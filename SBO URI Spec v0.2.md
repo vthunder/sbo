@@ -42,10 +42,14 @@ sbo://[chain][:appId][@block]/[owner]/[path/][creator:][id][?query]
 ## Resolution Semantics
 
 - If `block` is present → resolve the object’s state as of that block (if resolvable).
+  - `@block` anchors the intended resolution point, but clients must be aware that historical blocks may not be available in pruned DA layers. If the block is unavailable, clients may fall back to content-based or historical resolution strategies.
 - If `content_hash` is present → the payload must match the specified hash.
+  - When a URI contains ?content_hash=..., clients must attempt to resolve the object by walking its update history (in reverse block order) until a matching content hash is found. This ensures durable and deterministic references to historical object versions, even if they are no longer the latest.
+- Unless a specific block height is specified, the URI resolves to the latest version by LWW policy.
+- If `creator` is present, the object must have been originally minted by that creator
+- If `creator` is not present, the object must have been created by the current owner path segment
 - If `id` is omitted, the URI references the collection at the specified path
 - Collection URIs may by filtered by owner, creator, and query arguments if specified.
-- Unless a specific block height is specified, the URI resolves to the latest version by LWW policy.
 
 ---
 
@@ -60,8 +64,8 @@ sbo://[chain][:appId][@block]/[owner]/[path/][creator:][id][?query]
 | Transfer-aware reference | `sbo://Avail:13/user2/larvalabs:punk-001` |
 | Full disambiguation | `sbo://Avail:42@8765/userB/userA:art-7?content_hash=0xdeadbeef` |
 | All JSON-encoded objects larger than 1024 bytes | `sbo://Avail:13/user1/?content_type=application/json&size=>1024` |
-| All NFTs belonging to user1 | `sbo://Avail:13/user1/?schema=nft.v1` |
-| All NFTs belonging to user1 and created by larvalabs | `sbo://Avail:13/user1/larvalabs:?schema=nft.v1` |
+| All NFTs belonging to user1 | `sbo://Avail:13/user1/?content_schema=nft.v1` |
+| All NFTs belonging to user1 and created by larvalabs | `sbo://Avail:13/user1/larvalabs:?content_schema=nft.v1` |
 ---
 
 ## Usage in Envelopes
