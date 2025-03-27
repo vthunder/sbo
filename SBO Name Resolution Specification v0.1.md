@@ -85,7 +85,7 @@ To resolve `userA` in the context of `sbo://Avail:17`:
   - Use `@block` to lock in the timing of the identity state
   - Use `?content_hash=` to lock in the exact version
 - Do not rely on the “latest” version of a remote identity unless you’re okay with non-deterministic resolution
-- SDKs should warn or error if bindings are dereferenced without any snapshot metadata
+- SDKs should warn or error if bindings without `@block` or `?content_hash` are encountered
 
 ## Example: Using Names in URIs
 

@@ -27,13 +27,13 @@ Each object in the system is identified by an ID, a creator, and a path. The ful
 
 ## Paths
 
-Paths are hierarchical, and may be nested (e.g. `nfts/animals/`), similar to file system paths.
+Paths are collections, and are hierarchical. They may be nested (e.g. `nfts/animals/`), similar to file system paths.
 
-Paths are themselves objects in the system, and may be created, updated, transferred, or deleted like any other object. Unlike other objects, they do not contain a payload, but they are used to set access control rules for the objects they contain.
+Paths are themselves objects in the system with `type: collection`, and may be created, updated, transferred, or deleted like any other object. Unlike other objects, they do not contain a payload, but they are used to set access control rules for the objects they contain. Deep paths can be used without explicitly creating the intermediate paths.
 
-SBO does not define a hard-coded (assumed) ownership semantics for paths, but through the policy system, it is possible to define such semantics. For example, an SBO database may define /users/<user_id> paths where the owner of each path is the user with the specified ID, and they can create and control objects within their scope.
+SBO does not define a hard-coded (assumed) ownership semantics for paths, but through the policy system, it is possible to define such semantics. For example, an SBO database may define /users/<user_id> paths where the owner of each collection is the user with the specified ID, and they can create and control objects within that scope.
 
-Object references may be relative to the path of the object they are in, or absolute. For example, given two objects in the same path, one object may refer to the other without a path.
+Object references may be relative to the path of the object they are in, or absolute. For example, given two objects in the same collection, one object may refer to the other without a path.
 
 Note that some references (owner, creator in particular) refer to identity objects in the names/ namespace as specified in the [Name Resolution Spec](#name-resolution-spec-v01).
 
@@ -41,7 +41,7 @@ Note that some references (owner, creator in particular) refer to identity objec
 
 SBO includes an identity name resolution system that allows users to map human-readable names to public keys or other identity objects. See the [Name Resolution Spec](#name-resolution-spec-v01) for details.
 
-When an object is owned by the same identity as the path it is in, references to the object may omit the creator's identity (e.g. `abc` instead of `userA:abc`). Otherwise, the creator's identity must be specified to prevent collisions and ambiguity.
+When an object is owned by the same identity as the collection it is in, references to the object may omit the creator's identity (e.g. `abc` instead of `userA:abc`). Otherwise, the creator's identity must be specified to prevent collisions and ambiguity.
 
 ## URIs
 
@@ -59,6 +59,7 @@ The envelope consists of a YAML metadata header followed by the object payload, 
 - `schema`: Must be `"SBO-v0.4"`.
 - `id`: Object ID string, e.g. `nft-123`.
 - `path`: Path string, e.g. `/nfts`.
+- `type`: Object type, either `object` or `collection`.
 - `owner`: Optional. Owner of the object. See [Ownership](#ownership).
 - `action`: One of `post`, `rename`, `transfer`, or `delete`.
 - `update_type`: Optional. `replace` (default), other values reserved for future merge strategies.
@@ -79,10 +80,14 @@ The envelope consists of a YAML metadata header followed by the object payload, 
 - `---`: End of YAML metadata (followed by a newline).
 - [Raw payload]: Starts immediately after `---\n`.
 
-### Path & ID
+### ID, Path, and Type
 
-- If `id` is not specified, the object refers to a path/collection. It contains metadata but no payload.
-- If `id` is specified, the object is an object with a payload, at the specified path.
+- `id`, `path`, and `type` are all required fields.
+- The object or collection is defined by its ID `id` at the path specified by `path`.
+- If `type` is `collection`, the object refers to a collection, and contains metadata but no payload.
+- If `type` is `object`, the object is an object with a payload.
+
+The same ID in the same collection may only refer to one object (or collection), unless the objects (or collections) have different creators.
 
 ### Actions
 
@@ -129,8 +134,9 @@ Ownership may be transferred to another identity via a transfer message.
 - Only the current owner may post updates to the object, unless forbidden by the object's policy.
 
 #### rename
-- Only valid if the destination ID does not exist by the same creator at the given path.
-- Rename is governed by the policy of the nearest ancestor path object with a policy reference.
+- Rename may modify both `id` and `path` (if allowed by policy).
+- Only valid if the destination ID does not exist by the same creator at the destination path.
+- Rename is governed by the policy of the nearest ancestor collection object of the destination path with a policy reference.
 
 #### transfer
 - Transfers are governed by the policy of the object itself.
@@ -145,15 +151,15 @@ Ownership may be transferred to another identity via a transfer message.
 
 A policy object may be used to constrain the behavior of an object or (in the case of paths) its hierarchical descendants. Policies are themselves objects in the system, and are referenced by the `policy_ref` field in the envelope.
 
-Policies are resolved by following the path hierarchy. Objects and paths inherit policy enforcement from the nearest ancestor path object with a policy reference.
+Policies are resolved by following the path hierarchy. Objects and paths inherit policy enforcement from the nearest ancestor path object with a policy reference. Nonexistent intermediate path objects or paths without a policy reference are skipped in the policy resolution chain.
 
 The root path (`/`) itself references the root policy object, which is thus the default policy for all objects in the system, except as otherwise specified.
 
-In the absence of a root object policy, messages are considered invalid and discarded.
+In the absence of a root object policy, messages are considered invalid and discarded. During development, a more relaxed root policy is recommended to allow for easier testing and development.
 
 For example, to post to `/foo/bar/baz`:
 
-1. Check for a path object at `/foo/bar/baz`
+1. Check for a path object with a policy reference at `/foo/bar/baz`
 2. If none, check `/foo/bar`, then `/foo`, then `/`
 3. Use the first path object with `policy_ref` found
 4. If none exists, the message is considered invalid and discarded.
@@ -169,6 +175,7 @@ Policy objects themselves are specified in ... (a future spec).
 schema: "SBO-v0.4"
 id: "hello-world-123"
 path: "/random/stuff"
+type: "object"
 action: "post"
 content_type: "application/json"
 content_encoding: "utf-8"
