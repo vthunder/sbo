@@ -25,6 +25,7 @@ Simple Blockchain Objects (SBO) define a minimal, flexible, and human-readable s
 | [SBO Name Resolution v0.1](./SBO%20Name%20Resolution%20Specification%20v0.1.md) | Naming system and identity bindings |
 | [SBO Policy Spec v0.1](./SBO%20Policy%20Specification%20v0.1.md) | Executable path-level policy rules |
 | [SBO Bridge Spec v0.1](./SBO%20Bridge%20Specification%20v0.1.md) | Cross-blockchain object transfer |
+| [SBO NFT Schema v1](./SBO%20NFT%20Schema%20v1.md) | Schema for NFT objects |
 
 ---
 
