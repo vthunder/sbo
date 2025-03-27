@@ -10,7 +10,7 @@ SBO URIs provide a uniform way to reference objects across and within chains, ap
 ## URI Syntax
 
 ```
-sbo://[chain][:appId][@block]/[owner]/[path/][creator:][id][?query]
+sbo://[chain][:appId][@block]/[path/][creator:][id][?query]
 ```
 
 ### Components
@@ -20,7 +20,6 @@ sbo://[chain][:appId][@block]/[owner]/[path/][creator:][id][?query]
 | `chain` | Optional chain name (e.g. `Avail`). |
 | `appId` | Optional application ID or namespace within the chain (e.g. Avail's App ID, or a contract address). |
 | `block` | Optional block number. Specifies historical resolution point. |
-| `owner` | Required. Owner of the object. |
 | `path` | Reserved for future use. |
 | `creator` | Optional. The original creator of the object. |
 | `id` | Optional when referencing a collection. Required for single-object URIs. The object's logical identifier (e.g. `nft-123`). |
