@@ -24,7 +24,7 @@ Simple Blockchain Objects (SBO) define a minimal, flexible, and human-readable s
 | [SBO Wire Format v0.1](./SBO%20Wire%20Format%20Specification%20v0.1.md) | Canonical serialization, crypto formats, signature computation |
 | [SBO URI Spec v0.2](./SBO%20URI%20Specification%20v0.2.md) | Cross-chain, versioned object URIs |
 | [SBO Name Resolution v0.1](./SBO%20Name%20Resolution%20Specification%20v0.1.md) | Naming system and identity bindings |
-| [SBO Policy Spec v0.1](./SBO%20Policy%20Specification%20v0.1.md) | Executable path-level policy rules |
+| [SBO Policy Spec v0.2](./SBO%20Policy%20Specification%20v0.2.md) | Declarative path-level policy rules |
 | [SBO Bridge Spec v0.1](./SBO%20Bridge%20Specification%20v0.1.md) | Cross-blockchain object transfer |
 | [SBO NFT Schema v1](./SBO%20NFT%20Schema%20v1.md) | Schema for NFT objects |
 
@@ -45,7 +45,7 @@ Simple Blockchain Objects (SBO) define a minimal, flexible, and human-readable s
 - Bridging to other blockchains (as ERC-721)
 - Verifiable off-chain computation (ZK policy conditions)
 - Signed collections, indexes, snapshots
-- WASM-based and declarative policies
+- WASM-based policies for complex logic
 - Merge strategies (CRDTs, diffs, etc.)
 - Support for content-addressed payloads (IPFS, Arweave)
 

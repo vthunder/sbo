@@ -2,7 +2,7 @@
 # SBO Policy Specification (v0.1)
 
 ## Status
-Draft
+**Deprecated** — See [SBO Policy Specification v0.2](./SBO%20Policy%20Specification%20v0.2.md) for the current declarative policy format.
 
 ## Overview
 
