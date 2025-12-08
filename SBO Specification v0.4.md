@@ -29,7 +29,7 @@ Each object in the system is identified by an ID, a creator, and a path. The ful
 
 Paths are collections, and are hierarchical. They may be nested (e.g. `nfts/animals/`), similar to file system paths.
 
-Paths are themselves objects in the system with `type: collection`, and may be created, updated, transferred, or deleted like any other object. Unlike other objects, they do not contain a payload, but they are used to set access control rules for the objects they contain. Deep paths can be used without explicitly creating the intermediate paths.
+Paths are themselves objects in the system with `Type: collection`, and may be created, updated, transferred, or deleted like any other object. Unlike other objects, they do not contain a payload, but they are used to set access control rules for the objects they contain. Deep paths can be used without explicitly creating the intermediate paths.
 
 SBO does not define a hard-coded (assumed) ownership semantics for paths, but through the policy system, it is possible to define such semantics. For example, an SBO database may define /users/<user_id> paths where the owner of each collection is the user with the specified ID, and they can create and control objects within that scope.
 
@@ -51,41 +51,56 @@ SBO objects may be referenced using SBO URIs, which provide a more complete way 
 
 Objects are defined and manipulated via messages posted on chain. These messages represent specific actions (post, transfer, delete, etc.).
 
-Each message contains a frontmatter envelope and (where appropriate) a payload.
+Each message contains a header envelope and (where appropriate) a payload. The canonical wire format is defined in the [SBO Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md).
 
 ### Envelope Format
-The envelope consists of a YAML metadata header followed by the object payload, separated by a `---` marker and a newline. Valid fields are:
 
-- `schema`: Must be `"SBO-v0.4"`.
-- `id`: Object ID string, e.g. `nft-123`.
-- `path`: Path string, e.g. `/nfts`.
-- `type`: Object type, either `object` or `collection`.
-- `owner`: Optional. Owner of the object. See [Ownership](#ownership).
-- `action`: One of `post`, `rename`, `transfer`, or `delete`.
-- `update_type`: Optional. `replace` (default), other values reserved for future merge strategies.
-- `new_id`: Required for `rename`.
-- `new_owner`: Required for `transfer`.
-- `policy_ref`: Optional. Reference to a policy object.
-- `related`: List of references to other objects, see below.
-- `content_type`: MIME type of the object payload, e.g. `application/json`.
-- `content_schema`: Optional payload schema (e.g. `nft.v1`).
-- `content_encoding`: Transport encoding (e.g. `utf-8`, `gzip`).
-- `content_size`: Size of the decoded content, in bytes.
-- `content_hash`: Hash of the decoded payload.
-- `content_hash_algorithm`: Hash algorithm used (e.g. SHA-256, Keccak256).
-- `content_storage_ref`: Optional reference to a content-addressed storage location (not yet implemented, reserved for future use).
-- `signature_algorithm`: Signature algorithm used (e.g. `ecdsa`).
-- `signing_key`: Public key that signed the envelope.
-- `signature`: Signature over the envelope (see below).
-- `---`: End of YAML metadata (followed by a newline).
-- [Raw payload]: Starts immediately after `---\n`.
+The envelope consists of line-based headers (similar to HTTP) followed by a blank line and the payload:
+
+```
+Header-Name: value
+Another-Header: value
+
+<payload bytes>
+```
+
+### Required Headers
+
+| Header | Description |
+|--------|-------------|
+| `SBO-Version` | Must be `0.5` |
+| `Action` | One of `post`, `move`, `transfer`, or `delete` |
+| `Path` | Collection path with trailing slash, e.g. `/nfts/` |
+| `ID` | Object ID string, e.g. `nft-123` |
+| `Type` | Either `object` or `collection` |
+| `Content-Type` | MIME type of payload, e.g. `application/json` |
+| `Content-Length` | Size of the payload in bytes |
+| `Content-Hash` | Hash of payload with algorithm prefix, e.g. `sha256:a1b2c3...` |
+| `Signing-Key` | Public key with algorithm prefix, e.g. `secp256k1:02a1b2...` |
+| `Signature` | Signature bytes in lowercase hex |
+
+### Optional Headers
+
+| Header | Description |
+|--------|-------------|
+| `Owner` | Owner of the object (identity reference) |
+| `Creator` | Original creator (defaults to signer) |
+| `Content-Encoding` | Transport encoding (`utf-8`, `gzip`, `base64`) |
+| `Content-Schema` | Payload schema (e.g. `nft.v1`) |
+| `New-ID` | Required for `move` action |
+| `New-Path` | Required for `move` action |
+| `New-Owner` | Required for `transfer` action |
+| `Policy-Ref` | Reference to a policy object (SBO URI) |
+| `Related` | JSON array of related object references |
+
+See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for complete details on header ordering, cryptographic formats, and signature computation.
 
 ### ID, Path, and Type
 
-- `id`, `path`, and `type` are all required fields.
-- The object or collection is defined by its ID `id` at the path specified by `path`.
-- If `type` is `collection`, the object refers to a collection, and contains metadata but no payload.
-- If `type` is `object`, the object is an object with a payload.
+- `ID`, `Path`, and `Type` are all required headers.
+- The object or collection is defined by its ID at the path specified by `Path`.
+- If `Type` is `collection`, the object refers to a collection, and contains metadata but no payload.
+- If `Type` is `object`, the object is an object with a payload.
 
 The same ID in the same collection may only refer to one object (or collection), unless the objects (or collections) have different creators.
 
@@ -93,20 +108,24 @@ The same ID in the same collection may only refer to one object (or collection),
 
 Valid values for `action` are:
 
-- `post`: Create a new object or post an updated version. This is the only action used to create or mutate object content or frontmatter.
-- `rename`: Rename an object. Requires a `new_id` field.
-- `transfer`: Change ownership of an object. Requires a `new_owner` field.
+- `post`: Create a new object or post an updated version. This is the only action used to create or mutate object content or headers.
+- `move`: Move and/or rename an object. Requires `New-ID` and/or `New-Path` headers.
+- `transfer`: Change ownership of an object. Requires `New-Owner` header.
 - `delete`: Mark an object as removed. Modeled as a transfer to a null owner (`null:`).
 
 ### Related Objects
-The `related` field is a list of relationships and target objects. Each entry has:
-- `relation`: the type of relation (e.g., 'collection', 'license', etc.)
-- `target`: a reference (URI or ID) to the target object
+
+The `Related` header contains a JSON array of relationship objects. Each entry has:
+- `rel`: the type of relation (e.g., `license`, `collection`, `policy`)
+- `ref`: a reference (SBO URI or relative path) to the target object
+
+Example: `Related: [{"rel":"license","ref":"sbo://Avail:13/licenses/cc-by"}]`
 
 ### Signature Scope
-The signature covers:
-- All bytes from the start of the envelope up to and including the line containing `---\n`.
-- The `signature` field itself is excluded entirely from the signed content.
+
+The signature covers all header bytes (in canonical order) plus the trailing blank line, **excluding the `Signature` header entirely**. The payload is protected indirectly via `Content-Hash`.
+
+See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for the exact signature computation algorithm.
 
 ## Rules
 
@@ -120,7 +139,7 @@ The signature covers:
 
 ### Object Ownership
 
-Ownership of an object is determined by the `owner` field in the envelope. This field points to an identity record as specified in the [Name Resolution](#name-resolution-spec-v01) spec.
+Ownership of an object is determined by the `Owner` header. This header points to an identity record as specified in the [Name Resolution Specification](./SBO%20Name%20Resolution%20Specification%20v0.1.md).
 
 Ownership may be transferred to another identity via a transfer message.
 
@@ -128,15 +147,17 @@ Ownership may be transferred to another identity via a transfer message.
 
 #### post
 - Object creation is idempotent: it may create a new object or update an existing one.
-- Object creation is governed by the policy of the nearest ancestor path object with a policy reference.
+- Object creation is governed by the policy of the nearest ancestor collection object with a policy reference.
 - Object updates are governed by the policy of the object itself.
-- May only set or update `policy_ref` if the object is owned by the creator of the object.
+- May only set or update `Policy-Ref` if the object is owned by the creator of the object.
 - Only the current owner may post updates to the object, unless forbidden by the object's policy.
 
-#### rename
-- Rename may modify both `id` and `path` (if allowed by policy).
+#### move
+- Move may modify both `id` and `path` (if allowed by policy).
 - Only valid if the destination ID does not exist by the same creator at the destination path.
-- Rename is governed by the policy of the nearest ancestor collection object of the destination path with a policy reference.
+- Move is governed by both the policies of the source and destination paths. In both cases the nearest ancestor collection object with a policy reference is used:
+  - Source path: Must allow moving the object out of the collection.
+  - Destination path: Must allow receiving the object.
 
 #### transfer
 - Transfers are governed by the policy of the object itself.
@@ -149,9 +170,9 @@ Ownership may be transferred to another identity via a transfer message.
 
 ### Policies
 
-A policy object may be used to constrain the behavior of an object or (in the case of paths) its hierarchical descendants. Policies are themselves objects in the system, and are referenced by the `policy_ref` field in the envelope.
+A policy object may be used to constrain the behavior of an object or (in the case of paths) its hierarchical descendants. Policies are themselves objects in the system, and are referenced by the `Policy-Ref` header.
 
-Policies are resolved by following the path hierarchy. Objects and paths inherit policy enforcement from the nearest ancestor path object with a policy reference. Nonexistent intermediate path objects or paths without a policy reference are skipped in the policy resolution chain.
+Policies are resolved by following the path hierarchy. Objects and paths inherit policy enforcement from the nearest ancestor collection object with a policy reference. Nonexistent intermediate collection objects or paths without a policy reference are skipped in the policy resolution chain.
 
 The root path (`/`) itself references the root policy object, which is thus the default policy for all objects in the system, except as otherwise specified.
 
@@ -159,9 +180,9 @@ In the absence of a root object policy, messages are considered invalid and disc
 
 For example, to post to `/foo/bar/baz`:
 
-1. Check for a path object with a policy reference at `/foo/bar/baz`
+1. Check for a collection object with a policy reference at `/foo/bar/baz`
 2. If none, check `/foo/bar`, then `/foo`, then `/`
-3. Use the first path object with `policy_ref` found
+3. Use the first collection object with `Policy-Ref` found
 4. If none exists, the message is considered invalid and discarded.
 
 Policy objects themselves are specified in ... (a future spec).
@@ -171,18 +192,19 @@ Policy objects themselves are specified in ... (a future spec).
 - Support for content-addressed storage (e.g., IPFS) may be added via `content_storage_ref` in lieu of the payload.
 
 ## Example
+
 ```
-schema: "SBO-v0.4"
-id: "hello-world-123"
-path: "/random/stuff"
-type: "object"
-action: "post"
-content_type: "application/json"
-content_encoding: "utf-8"
-content_size: 27
-content_hash: "0xabcde12345..."
-signing_key: "0xuser1pubkey"
-signature: "0xsigneddata"
----
-{ "message": "Hello, world!" }
+SBO-Version: 0.5
+Action: post
+Path: /random/stuff/
+ID: hello-world-123
+Type: object
+Content-Type: application/json
+Content-Encoding: utf-8
+Content-Length: 27
+Content-Hash: sha256:4b7a3c8f2e1d5a9b0c6e3f7a2d4b8c1e5f9a3d7b0c4e8f2a6d9b3c7e1f5a9d3b
+Signing-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Signature: 1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
+
+{"message":"Hello, world!"}
 ```

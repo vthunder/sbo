@@ -22,18 +22,21 @@ This document defines a naming and identity resolution system for SBO (Simple Bl
 
 ## Object Schema: `identity.claim`
 
-```yaml
-schema: SBO-v0.3
-id: names/userA
-action: post
-content_schema: identity.claim
-content_type: application/json
-content_hash: 0x...
-signing_key: 0x123abc...
-signature: 0xsigneddata
----
+```
+SBO-Version: 0.5
+Action: post
+Path: /names/
+ID: userA
+Type: object
+Content-Type: application/json
+Content-Schema: identity.claim
+Content-Length: 156
+Content-Hash: sha256:a1b2c3d4e5f6...
+Signing-Key: secp256k1:02123abc...
+Signature: a1b2c3d4e5f6...
+
 {
-  "public_key": "0x123abc...",
+  "public_key": "secp256k1:02123abc...",
   "display_name": "User A",
   "description": "Main handle for User A",
   "binding": "sbo://Avail:18/names/actualUserA"
@@ -44,7 +47,7 @@ signature: 0xsigneddata
 
 | Field         | Type     | Description |
 |---------------|----------|-------------|
-| `public_key`  | string   | Optional public key for this name |
+| `public_key`  | string   | Public key with algorithm prefix (e.g., `secp256k1:02abc...` or `ed25519:abc...`) |
 | `display_name`| string   | Optional human-friendly label |
 | `description` | string   | Optional text description |
 | `binding`     | string   | Optional SBO URI to a canonical identity object on another chain/app |
@@ -94,22 +97,20 @@ Given this object:
 sbo://Avail:17/userA/nft-123
 ```
 
-If it contains in its envelope:
+If its envelope contains:
 
-```yaml
-creator: "userA"
+```
+Creator: userA
 ```
 
-The creator field is resolved via the names/ namespace in the current SBO database (e.g., sbo://Avail:17/names/userA). This object might contain a public key (or a binding) that could be used to verify that the userA/nft-123 object was signed by the specified key.
+The `Creator` header is resolved via the `names/` namespace in the current SBO database (e.g., `sbo://Avail:17/names/userA`). This object contains a public key (or a binding) that is used to verify that the `userA/nft-123` object was signed by the specified key.
 
 Another example: referencing an identity as a profile link:
 
-```yaml
-related:
-  - relation: "profile"
-    target: "sbo://Avail:17/names/userA"
+```
+Related: [{"rel":"profile","ref":"sbo://Avail:17/names/userA"}]
 ```
 
-This reference would provide an identity as a "profile" for the object (an application-specific usage of the identity with no prescribed meaning or usage in this spec)
+This reference provides an identity as a "profile" for the object (an application-specific usage of the identity with no prescribed meaning or usage in this spec).
 
 ---

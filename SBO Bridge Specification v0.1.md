@@ -75,12 +75,14 @@ The format of a `proof.v1` object is to be defined, but should include:
   "schema": "proof.v1",
   "chain": "Ethereum",
   "block": 12345678,
-  "tx_hash": "0xabc...",
-  "burned_token_id": "0xdef...",
+  "tx_hash": "abc123...",
+  "burned_token_id": "def456...",
   "target_object": "sbo://Avail:13/userA/punk-001",
-  "signature": "..."
+  "signature": "secp256k1:1a2b3c..."
 }
 ```
+
+Note: Hash values use lowercase hex without `0x` prefix. Signatures include algorithm prefix.
 
 Validation is policy-specific but may include:
 - Verifying inclusion of `tx_hash` in Ethereum block `block`
@@ -98,13 +100,10 @@ Policies must track previously accepted proofs (e.g., by tx hash or proof hash) 
 ## URI Conventions
 
 While in the bridge:
-- The object’s SBO URI becomes `/bridge/...`
-- A `related` field may record:
-  ```yaml
-  - relation: "origin"
-    target: "sbo://Avail:13/userA/punk-001"
-  - relation: "remote_replica"
-    target: "eth://0xabc123/token/0xdef456"
+- The object's SBO URI becomes `/bridge/...`
+- A `Related` header may record:
+  ```
+  Related: [{"rel":"origin","ref":"sbo://Avail:13/userA/punk-001"},{"rel":"remote_replica","ref":"eth://0xabc123/token/0xdef456"}]
   ```
 
 On return:

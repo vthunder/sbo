@@ -16,15 +16,18 @@ Policies are executable, sandboxed programs written in JavaScript. Each function
 
 ### Envelope
 
-```yaml
-schema: SBO-v0.4
-path: "/policies"
-id: "default"
-action: post
-content_schema: "policy.v1"
-content_type: "application/json"
-signing_key: "0x..."
-signature: "0x..."
+```
+SBO-Version: 0.5
+Action: post
+Path: /policies/
+ID: default
+Type: object
+Content-Type: application/json
+Content-Schema: policy.v1
+Content-Length: 245
+Content-Hash: sha256:a1b2c3...
+Signing-Key: secp256k1:02abc...
+Signature: 1a2b3c...
 ```
 
 ### Payload

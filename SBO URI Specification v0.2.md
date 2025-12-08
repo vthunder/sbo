@@ -31,8 +31,8 @@ sbo://[chain][:appId][@block]/[path/][creator:][id][?query]
 
 | Parameter        | Description |
 |------------------|-------------|
-| `content_hash`   | Specifies the exact content version being referenced. |
-| `content_type`   | MIME type of the object payload. (e.g. `application/json`). |
+| `content_hash`   | Exact content version with algorithm prefix (e.g. `sha256:a1b2c3...`). |
+| `content_type`   | MIME type of the object payload (e.g. `application/json`). |
 | `content_schema` | Optional schema filter (e.g. `nft.v1`). |
 | `encoding`       | Transport encoding (e.g. `utf-8`, `gzip`). |
 | `size`           | Payload size in bytes, optionally prefixed with a comparison operator (e.g. `>1024`). |
@@ -59,9 +59,9 @@ sbo://[chain][:appId][@block]/[path/][creator:][id][?query]
 | Current object on Avail app 13 | `sbo://Avail:13/user1/nft-123` |
 | Historical snapshot at block 12345 on the current chain and app | `sbo://@12345/user1/nft-123` |
 | Cross-chain reference | `sbo://Ethereum:0x123...@5555/user2/certificate-xyz` |
-| Versioned object | `sbo://Avail:13/user2/foo?content_hash=0xabc` |
+| Versioned object | `sbo://Avail:13/user2/foo?content_hash=sha256:abc123` |
 | Transfer-aware reference | `sbo://Avail:13/user2/larvalabs:punk-001` |
-| Full disambiguation | `sbo://Avail:42@8765/userB/userA:art-7?content_hash=0xdeadbeef` |
+| Full disambiguation | `sbo://Avail:42@8765/userB/userA:art-7?content_hash=sha256:deadbeef` |
 | All JSON-encoded objects larger than 1024 bytes | `sbo://Avail:13/user1/?content_type=application/json&size=>1024` |
 | All NFTs belonging to user1 | `sbo://Avail:13/user1/?content_schema=nft.v1` |
 | All NFTs belonging to user1 and created by larvalabs | `sbo://Avail:13/user1/larvalabs:?content_schema=nft.v1` |
@@ -69,17 +69,16 @@ sbo://[chain][:appId][@block]/[path/][creator:][id][?query]
 
 ## Usage in Envelopes
 
-```yaml
-related:
-  - relation: "collection"
-    target: "sbo://Avail:13/creator123/punks-v1"
-  - relation: "policy"
-    target: "sbo://Avail:13@12345/legaldao/policy-xyz?content_hash=0xabc"
+URIs can be used in the `Related` header (JSON array):
+
+```
+Related: [{"rel":"collection","ref":"sbo://Avail:13/creator123/punks-v1"},{"rel":"policy","ref":"sbo://Avail:13@12345/legaldao/policy-xyz?content_hash=sha256:abc123"}]
 ```
 
-```yaml
-depends_on:
-  - target: "sbo://Avail:13/oracleA/market-state?content_hash=0xfeedface"
+Or in the `Policy-Ref` header:
+
+```
+Policy-Ref: sbo://Avail:13@12345/policies/default?content_hash=sha256:abc123
 ```
 
 ---

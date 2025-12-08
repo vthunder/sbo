@@ -12,9 +12,11 @@ This document defines `nft.v1`, a schema for representing media-based non-fungib
 
 ## Content Schema
 
-```yaml
-content_schema: "nft.v1"
-content_type: "application/json"
+NFT objects use these headers:
+
+```
+Content-Type: application/json
+Content-Schema: nft.v1
 ```
 
 ---
@@ -70,14 +72,15 @@ content_type: "application/json"
 - This version is ideal for demos, smaller assets, or use cases where full decentralization is not yet required.
 - Future versions may include:
   - External `media.uri` with `content_hash`
-  - Links to collection objects via `collection_ref`
-  - Custom transfer or royalty logic via `policy_ref`
+  - Links to collection objects via `Related` header
+  - Custom transfer or royalty logic via `Policy-Ref` header
 
 ---
 
 ## Compatibility
 
-- The full object (including the media payload) is covered by the SBO signature.
+- The full payload (including embedded media) is protected by `Content-Hash`, which is covered by the SBO signature.
 - Objects using this schema can be referenced, transferred, or bridged according to the core SBO rules.
+- See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for signature computation details.
 
 ---
