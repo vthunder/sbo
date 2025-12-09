@@ -2,7 +2,7 @@
 # SBO Bridge Specification (v0.1)
 
 ## Status
-Draft
+**Deprecated** — See [SBO Bridge Specification v0.2](./SBO%20Bridge%20Specification%20v0.2.md) for the current bridge design with atomic imports and proof attachments.
 
 ## Overview
 

@@ -92,6 +92,12 @@ Another-Header: value
 | `New-Owner` | Required for `transfer` action |
 | `Policy-Ref` | Reference to a policy object (SBO URI) |
 | `Related` | JSON array of related object references |
+| `Proof-Type` | Type of proof attached (`burn` for unlocks) |
+| `Proof` | Base64-encoded proof for `transfer` actions |
+| `Origin` | External origin identifier for `import` action |
+| `Registry-Path` | Registry path for `import` action |
+| `Object-Path` | Destination path for `import` action |
+| `Attestation` | Base64-encoded attestation for `import` action |
 
 See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for complete details on header ordering, cryptographic formats, and signature computation.
 
@@ -110,8 +116,9 @@ Valid values for `action` are:
 
 - `post`: Create a new object or post an updated version. This is the only action used to create or mutate object content or headers.
 - `move`: Move and/or rename an object. Requires `New-ID` and/or `New-Path` headers.
-- `transfer`: Change ownership of an object. Requires `New-Owner` header.
+- `transfer`: Change ownership of an object. Requires `New-Owner` header. For bridge unlocks, requires `Proof-Type` and `Proof` headers with oracle attestation.
 - `delete`: Mark an object as removed. Modeled as a transfer to a null owner (`null:`).
+- `import`: Atomically create a registry entry and object for cross-chain imports. Requires `Origin`, `Registry-Path`, `Object-Path`, and `Attestation` headers. See [Bridge Specification](./SBO%20Bridge%20Specification%20v0.2.md).
 
 ### Related Objects
 
