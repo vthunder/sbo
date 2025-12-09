@@ -29,7 +29,7 @@ Each object in the system is identified by an ID, a creator, and a path. The ful
 
 IDs, path segments, and creator names share the same syntax rules:
 
-**Allowed characters:** `A-Z a-z 0-9 - _ . ~` (URI unreserved characters)
+**Allowed characters:** `A-Z a-z 0-9 - _ . ~` (the "unreserved" character set from [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-2.3))
 
 **Length:** 1-256 characters
 
