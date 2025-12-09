@@ -12,11 +12,12 @@ This document defines a naming and identity resolution system for SBO (Simple Bl
 
 ## Naming Model
 
-- Each SBO database (chain + appId) may contain a `names/` namespace.
-- Objects posted under `names/<local_name>` declare a mapping from a human-readable name to:
+- Each SBO database (chain + appId) contains a `/sys/names/` namespace.
+- Objects posted under `/sys/names/<local_name>` declare a mapping from a human-readable name to:
   - A public key (for signature validation)
   - Optionally, a fully qualified SBO URI pointing to another identity claim
-- Each name is scoped to the chain + appId + path (`names/`) in which it is defined.
+- Each name is scoped to the chain + appId in which it is defined.
+- The `/sys/names/` path is controlled by the `sys` identity established at genesis (see [Genesis Specification](./SBO%20Genesis%20Specification%20v0.1.md)).
 
 ---
 
@@ -25,7 +26,7 @@ This document defines a naming and identity resolution system for SBO (Simple Bl
 ```
 SBO-Version: 0.5
 Action: post
-Path: /names/
+Path: /sys/names/
 ID: userA
 Type: object
 Content-Type: application/json
@@ -39,7 +40,7 @@ Signature: a1b2c3d4e5f6...
   "public_key": "secp256k1:02123abc...",
   "display_name": "User A",
   "description": "Main handle for User A",
-  "binding": "sbo://Avail:18/names/actualUserA"
+  "binding": "sbo+raw://avail:mainnet:18/sys/names/actualUserA"
 }
 ```
 
@@ -59,8 +60,8 @@ Either `public_key` or `binding` must be present, but not both.
 ## Resolution Semantics
 
 ### Direct resolution:
-To resolve `userA` in the context of `sbo://Avail:17`:
-1. Load the object at `sbo://Avail:17/names/userA`
+To resolve `userA` in the context of `sbo://myapp.com` (which resolves to `avail:mainnet:17`):
+1. Load the object at `/sys/names/userA`
 2. Verify the signature on the object matches the declared `public_key`
 3. Use `public_key` as the identity of `userA` for validation
 
@@ -94,7 +95,7 @@ To resolve `userA` in the context of `sbo://Avail:17`:
 
 Given this object:
 ```
-sbo://Avail:17/userA/nft-123
+sbo://myapp.com/userA/nft-123
 ```
 
 If its envelope contains:
@@ -103,12 +104,12 @@ If its envelope contains:
 Creator: userA
 ```
 
-The `Creator` header is resolved via the `names/` namespace in the current SBO database (e.g., `sbo://Avail:17/names/userA`). This object contains a public key (or a binding) that is used to verify that the `userA/nft-123` object was signed by the specified key.
+The `Creator` header is resolved via the `/sys/names/` namespace in the current SBO database (e.g., `/sys/names/userA`). This object contains a public key (or a binding) that is used to verify that the `userA/nft-123` object was signed by the specified key.
 
 Another example: referencing an identity as a profile link:
 
 ```
-Related: [{"rel":"profile","ref":"sbo://Avail:17/names/userA"}]
+Related: [{"rel":"profile","ref":"sbo://myapp.com/sys/names/userA"}]
 ```
 
 This reference provides an identity as a "profile" for the object (an application-specific usage of the identity with no prescribed meaning or usage in this spec).

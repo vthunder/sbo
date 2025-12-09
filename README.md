@@ -22,7 +22,8 @@ Simple Blockchain Objects (SBO) define a minimal, flexible, and human-readable s
 |------|-------------|
 | [SBO Specification v0.4](./SBO%20Specification%20v0.4.md) | Core object model, envelope format, actions, paths, and rules |
 | [SBO Wire Format v0.1](./SBO%20Wire%20Format%20Specification%20v0.1.md) | Canonical serialization, crypto formats, signature computation |
-| [SBO URI Spec v0.2](./SBO%20URI%20Specification%20v0.2.md) | Cross-chain, versioned object URIs |
+| [SBO URI Spec v0.3](./SBO%20URI%20Specification%20v0.3.md) | DNS and direct URI schemes with CAIP-2 chain identifiers |
+| [SBO Genesis Spec v0.1](./SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence, sys identity, database identity |
 | [SBO Name Resolution v0.1](./SBO%20Name%20Resolution%20Specification%20v0.1.md) | Naming system and identity bindings |
 | [SBO Policy Spec v0.2](./SBO%20Policy%20Specification%20v0.2.md) | Declarative path-level policy rules |
 | [SBO State Commitment v0.1](./SBO%20State%20Commitment%20Specification%20v0.1.md) | Merkle trie for state proofs and checkpoints |

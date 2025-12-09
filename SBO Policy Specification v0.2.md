@@ -150,11 +150,14 @@ The `to` field in grants accepts these forms:
 
 | Action | Meaning |
 |--------|---------|
-| `"create"` | Create new path or collection |
-| `"post"` | Post or update an object |
+| `"create"` | Post to a path that doesn't exist (new object) |
+| `"update"` | Modify an existing object |
+| `"post"` | Shorthand for create + update |
 | `"delete"` | Delete an object |
 | `"transfer"` | Transfer ownership to another identity |
 | `"*"` | All actions |
+
+**Note:** The distinction between `create` and `update` allows policies to grant first-come-first-served creation (e.g., identity claims) without granting update rights. Use `post` when both should be allowed.
 
 ---
 

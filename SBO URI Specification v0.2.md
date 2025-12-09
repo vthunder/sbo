@@ -1,6 +1,9 @@
 
 # SBO URI Format (v0.2)
 
+## Status
+**Deprecated** — See [SBO URI Specification v0.3](./SBO%20URI%20Specification%20v0.3.md) for the current URI format with DNS and direct schemes.
+
 ## Overview
 
 SBO URIs provide a uniform way to reference objects across and within chains, applications, and ownership scopes. In conjunction with the SBO envelope format, they support versioning, provenance tracking, and cross-chain references — allowing systems to deterministically resolve and verify object state, even in complex or historical contexts.
