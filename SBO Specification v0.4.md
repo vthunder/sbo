@@ -69,7 +69,7 @@ Another-Header: value
 | Header | Description |
 |--------|-------------|
 | `SBO-Version` | Must be `0.5` |
-| `Action` | One of `post`, `move`, `transfer`, or `delete` |
+| `Action` | One of `post`, `transfer`, `delete`, or `import` |
 | `Path` | Collection path with trailing slash, e.g. `/nfts/` |
 | `ID` | Object ID string, e.g. `nft-123` |
 | `Type` | Either `object` or `collection` |
@@ -87,9 +87,9 @@ Another-Header: value
 | `Creator` | Original creator (defaults to signer) |
 | `Content-Encoding` | Transport encoding (`utf-8`, `gzip`, `base64`) |
 | `Content-Schema` | Payload schema (e.g. `nft.v1`) |
-| `New-ID` | Required for `move` action |
-| `New-Path` | Required for `move` action |
-| `New-Owner` | Required for `transfer` action |
+| `New-ID` | New object ID for `transfer` action |
+| `New-Path` | New path for `transfer` action |
+| `New-Owner` | New owner for `transfer` action |
 | `Policy-Ref` | Reference to a policy object (SBO URI) |
 | `Related` | JSON array of related object references |
 | `Proof-Type` | Type of proof attached (`burn` for unlocks) |
@@ -115,8 +115,7 @@ The same ID in the same collection may only refer to one object (or collection),
 Valid values for `action` are:
 
 - `post`: Create a new object or post an updated version. This is the only action used to create or mutate object content or headers.
-- `move`: Move and/or rename an object. Requires `New-ID` and/or `New-Path` headers.
-- `transfer`: Change ownership of an object. Requires `New-Owner` header. For bridge unlocks, requires `Proof-Type` and `Proof` headers with oracle attestation.
+- `transfer`: Move, rename, and/or change ownership of an object. Requires at least one of `New-Owner`, `New-Path`, or `New-ID`. For bridge unlocks, requires `Proof-Type` and `Proof` headers with oracle attestation.
 - `delete`: Mark an object as removed. Modeled as a transfer to a null owner (`null:`).
 - `import`: Atomically create a registry entry and object for cross-chain imports. Requires `Origin`, `Registry-Path`, `Object-Path`, and `Attestation` headers. See [Bridge Specification](./SBO%20Bridge%20Specification%20v0.2.md).
 
@@ -159,17 +158,15 @@ Ownership may be transferred to another identity via a transfer message.
 - May only set or update `Policy-Ref` if the object is owned by the creator of the object.
 - Only the current owner may post updates to the object, unless forbidden by the object's policy.
 
-#### move
-- Move may modify both `id` and `path` (if allowed by policy).
-- Only valid if the destination ID does not exist by the same creator at the destination path.
-- Move is governed by both the policies of the source and destination paths. In both cases the nearest ancestor collection object with a policy reference is used:
-  - Source path: Must allow moving the object out of the collection.
-  - Destination path: Must allow receiving the object.
-
 #### transfer
+- Transfer may modify `owner`, `path`, and/or `id` (at least one required).
+- Only the current owner may transfer the object, unless allowed by the object's policy.
 - Transfers are governed by the policy of the object itself.
-- (TBD - under consideration) Transfers may move the object to the "inbox" path as specified in the destination owner's identity claim object (see [Name Resolution](#name-resolution-spec-v01)).
-- Only the current owner may transfer the object, unless forbidden by the object's policy.
+- If `New-Path` or `New-ID` is specified:
+  - Only valid if the destination does not exist by the same creator at the destination path.
+  - Both source and destination path policies apply:
+    - Source path: Must allow moving the object out of the collection.
+    - Destination path: Must allow receiving the object.
 
 #### delete
 - Modeled as transfers to a null owner (`null:`).

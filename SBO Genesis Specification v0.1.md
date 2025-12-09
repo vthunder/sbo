@@ -182,7 +182,7 @@ sbo+raw://avail:mainnet:13/dan/foo
 
 With explicit genesis (for full disambiguation):
 ```
-sbo+raw://avail:mainnet:13?genesis=sha256:abc123.../dan/foo
+sbo+raw://avail:mainnet:13/dan/foo?genesis=sha256:abc123...
 ```
 
 **Components:**
@@ -223,7 +223,7 @@ New chains should be registered in the CAIP-2 namespace.
 ### Via Direct URI
 
 ```
-1. Client sees sbo+raw://avail:mainnet:13?genesis=sha256:abc123/dan/foo
+1. Client sees sbo+raw://avail:mainnet:13/dan/foo?genesis=sha256:abc123
 2. Parse chain, appId, genesis_hash
 3. Connect to DA layer
 4. If genesis block available:
@@ -308,7 +308,8 @@ The `post` action is split into `create` and `update`:
 | `update` | Modify an existing object |
 | `post` | Shorthand for create + update |
 | `delete` | Remove an object |
-| `transfer` | Change ownership |
+| `transfer` | Move, rename, and/or change ownership |
+| `import` | Create object from cross-chain import |
 
 This distinction allows policies to grant `create` without `update` (e.g., first-come-first-served naming).
 

@@ -43,7 +43,8 @@ SBO-Version: 0.5
 Action: transfer
 Path: /alice/
 ID: punk-001
-To: /sys/bridge/ethereum/alice/punk-001
+New-Owner: sys
+New-Path: /sys/bridge/ethereum/alice/
 Signing-Key: secp256k1:...
 Signature: ...
 ```
@@ -72,7 +73,8 @@ SBO-Version: 0.5
 Action: transfer
 Path: /sys/bridge/ethereum/alice/
 ID: punk-001
-To: /alice/punk-001
+New-Owner: alice
+New-Path: /alice/
 Proof-Type: burn
 Proof: <base64-encoded proof>
 Signing-Key: secp256k1:...

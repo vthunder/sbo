@@ -76,7 +76,7 @@ All messages MUST include these headers in this exact order:
 | Header | Format | Description |
 |--------|--------|-------------|
 | `SBO-Version` | `0.5` | Wire format version |
-| `Action` | enum | One of: `post`, `move`, `transfer`, `delete` |
+| `Action` | enum | One of: `post`, `transfer`, `delete`, `import` |
 | `Path` | string | Collection path with trailing slash (e.g., `/art/`) |
 | `ID` | string | Object identifier |
 | `Type` | enum | One of: `object`, `collection` |
@@ -90,9 +90,15 @@ All messages MUST include these headers in this exact order:
 
 | Header | Required When | Format |
 |--------|---------------|--------|
-| `New-ID` | `Action: move` | New object identifier |
-| `New-Path` | `Action: move` | New collection path |
-| `New-Owner` | `Action: transfer` | New owner identity reference |
+| `New-ID` | `Action: transfer` (optional) | New object identifier |
+| `New-Path` | `Action: transfer` (optional) | New collection path |
+| `New-Owner` | `Action: transfer` (optional) | New owner identity reference |
+| `Origin` | `Action: import` | External origin identifier |
+| `Registry-Path` | `Action: import` | Path for registry entry |
+| `Object-Path` | `Action: import` | Destination path for object |
+| `Attestation` | `Action: import` | Base64-encoded oracle attestation |
+
+**Note:** For `transfer`, at least one of `New-ID`, `New-Path`, or `New-Owner` must be present.
 
 ### Optional Headers
 
@@ -105,6 +111,8 @@ Optional headers appear after required headers, in alphabetical order:
 | `Creator` | identity ref | Original creator (defaults to signer) |
 | `Owner` | identity ref | Current owner (defaults to creator) |
 | `Policy-Ref` | SBO URI | Reference to governing policy object |
+| `Proof` | base64 | Proof data for bridge unlocks |
+| `Proof-Type` | string | Type of proof (e.g., `burn`) |
 | `Related` | JSON array | Related object references (see below) |
 
 ### Canonical Header Order
@@ -120,16 +128,22 @@ For signature computation, headers MUST appear in this order:
 7. `Content-Encoding` (if present)
 8. `Content-Length`
 9. `Content-Hash`
-10. `Content-Schema` (if present)
-11. `Creator` (if present)
-12. `New-ID` (if present)
-13. `New-Owner` (if present)
-14. `New-Path` (if present)
-15. `Owner` (if present)
-16. `Policy-Ref` (if present)
-17. `Related` (if present)
-18. `Signing-Key`
-19. `Signature`
+10. `Attestation` (if present)
+11. `Content-Schema` (if present)
+12. `Creator` (if present)
+13. `New-ID` (if present)
+14. `New-Owner` (if present)
+15. `New-Path` (if present)
+16. `Object-Path` (if present)
+17. `Origin` (if present)
+18. `Owner` (if present)
+19. `Policy-Ref` (if present)
+20. `Proof` (if present)
+21. `Proof-Type` (if present)
+22. `Registry-Path` (if present)
+23. `Related` (if present)
+24. `Signing-Key`
+25. `Signature`
 
 ---
 
@@ -253,19 +267,19 @@ This design allows streaming: the payload can be processed without buffering the
 
 ## Identity References
 
-Identity references point to name objects in the `names/` namespace.
+Identity references point to name objects in the `/sys/names/` namespace.
 
 ### Local Reference
 ```
 alice
 ```
-Resolves to `names/alice` in the current SBO database.
+Resolves to `/sys/names/alice` in the current SBO database.
 
 ### Cross-Chain Reference
 ```
-Avail:13/alice
+avail:mainnet:13/alice
 ```
-Resolves to `sbo://Avail:13/names/alice`.
+Resolves to `sbo+raw://avail:mainnet:13/sys/names/alice`.
 
 ### Usage
 

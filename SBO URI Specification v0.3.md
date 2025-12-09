@@ -98,11 +98,11 @@ sbo+raw://[chain]:[appId][@block]/[path/][creator:][id][?query]
 | Use Case | URI |
 |----------|-----|
 | Object on Avail mainnet | `sbo+raw://avail:mainnet:13/alice/nft-123` |
-| With genesis hash | `sbo+raw://avail:mainnet:13?genesis=sha256:abc123/alice/nft-123` |
+| With genesis hash | `sbo+raw://avail:mainnet:13/alice/nft-123?genesis=sha256:abc123` |
 | Historical snapshot | `sbo+raw://avail:mainnet:13@12345/alice/nft-123` |
 | Cross-chain reference | `sbo+raw://celestia:mainnet:42/bob/certificate-xyz` |
 | Versioned object | `sbo+raw://avail:mainnet:13/alice/foo?content_hash=sha256:def456` |
-| Full disambiguation | `sbo+raw://avail:mainnet:13@8765?genesis=sha256:abc123/bob/alice:art-7` |
+| Full disambiguation | `sbo+raw://avail:mainnet:13@8765/bob/alice:art-7?genesis=sha256:abc123` |
 
 ---
 

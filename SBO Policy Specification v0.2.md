@@ -154,7 +154,8 @@ The `to` field in grants accepts these forms:
 | `"update"` | Modify an existing object |
 | `"post"` | Shorthand for create + update |
 | `"delete"` | Delete an object |
-| `"transfer"` | Transfer ownership to another identity |
+| `"transfer"` | Move, rename, and/or change ownership |
+| `"import"` | Create object from cross-chain import |
 | `"*"` | All actions |
 
 **Note:** The distinction between `create` and `update` allows policies to grant first-come-first-served creation (e.g., identity claims) without granting update rights. Use `post` when both should be allowed.

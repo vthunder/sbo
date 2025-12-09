@@ -311,7 +311,7 @@ Checkpoints are periodic on-chain commitments to state roots, enabling lite clie
 ```
 SBO-Version: 0.5
 Action: post
-Path: /.checkpoints/
+Path: /sys/checkpoints/
 ID: block-12345
 Type: object
 Content-Type: application/json
@@ -322,7 +322,7 @@ Signature: ...
 {
   "block": 12345,
   "state_root": "sha256:abc123...",
-  "prev_checkpoint": "sbo://.../.checkpoints/block-10000"
+  "prev_checkpoint": "/sys/checkpoints/block-10000"
 }
 ```
 
