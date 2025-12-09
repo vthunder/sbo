@@ -80,11 +80,19 @@ All messages MUST include these headers in this exact order:
 | `Path` | string | Collection path with trailing slash (e.g., `/art/`) |
 | `ID` | string | Object identifier |
 | `Type` | enum | One of: `object`, `collection` |
-| `Content-Type` | MIME | Payload MIME type (required if payload present) |
-| `Content-Length` | integer | Payload size in bytes |
-| `Content-Hash` | prefixed | Hash of payload bytes |
+| `Content-Type` | MIME | Payload MIME type (if payload present) |
+| `Content-Length` | integer | Payload size in bytes (if payload present) |
+| `Content-Hash` | prefixed | Hash of payload bytes (if payload present) |
 | `Signing-Key` | prefixed | Public key that signed the message |
 | `Signature` | hex | Signature bytes |
+
+**Payload rules:**
+- `Type: object` — payload required, content headers required
+- `Type: collection` — payload optional (for metadata), content headers required only if payload present
+
+**Path conventions:**
+- `Path` header: Always ends with `/` (the container). Examples: `/`, `/alice/`, `/alice/nfts/`
+- `ID` header: Never contains `/`. Examples: `alice`, `nft-123`
 
 ### Conditionally Required Headers
 

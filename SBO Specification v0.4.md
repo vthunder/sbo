@@ -25,11 +25,47 @@ Each object in the system is identified by an ID, a creator, and a path. The ful
 - `creator` is the account identifier of the original creator of the object. See [Creators](#creators).
 - `id` is a string that is the logical identifier of the object.
 
+### Identifier Syntax
+
+IDs, path segments, and creator names share the same syntax rules:
+
+**Allowed characters:** `A-Z a-z 0-9 - _ . ~` (URI unreserved characters)
+
+**Length:** 1-256 characters
+
+**Case sensitivity:** IDs are case-sensitive. `Foo` and `foo` are different.
+
+**Unicode:** Not allowed directly. Use percent-encoding for non-ASCII characters (e.g., `café` → `caf%C3%A9`).
+
+**Grammar (ABNF):**
+```
+id       = 1*256id_char
+id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~"
+segment  = id
+path     = "/" *(segment "/")
+creator  = id
+```
+
+**Parsing object references:**
+```
+object_ref = [path] [creator ":"] id
+
+Examples:
+  "punk-001"              → id only
+  "alice:punk-001"        → creator:id
+  "/nfts/punk-001"        → path + id
+  "/nfts/alice:punk-001"  → path + creator:id
+```
+
+To parse an object reference:
+1. If the string contains `/`, split at the last `/`. Left part (including `/`) is `path`, right part is `remainder`. Otherwise, `remainder` is the whole string.
+2. If `remainder` contains `:`, split at the first `:`. Left part is `creator`, right part is `id`. Otherwise, `id` is the whole remainder.
+
 ## Paths
 
 Paths are collections, and are hierarchical. They may be nested (e.g. `nfts/animals/`), similar to file system paths.
 
-Paths are themselves objects in the system with `Type: collection`, and may be created, updated, transferred, or deleted like any other object. Unlike other objects, they do not contain a payload, but they are used to set access control rules for the objects they contain. Deep paths can be used without explicitly creating the intermediate paths.
+Paths are themselves objects in the system with `Type: collection`, and may be created, updated, transferred, or deleted like any other object. Collections may optionally include a metadata payload (e.g., name, description, icon), but are primarily used to set access control rules for the objects they contain. Deep paths can be used without explicitly creating the intermediate paths.
 
 SBO does not define a hard-coded (assumed) ownership semantics for paths, but through the policy system, it is possible to define such semantics. For example, an SBO database may define /users/<user_id> paths where the owner of each collection is the user with the specified ID, and they can create and control objects within that scope.
 
@@ -73,11 +109,13 @@ Another-Header: value
 | `Path` | Collection path with trailing slash, e.g. `/nfts/` |
 | `ID` | Object ID string, e.g. `nft-123` |
 | `Type` | Either `object` or `collection` |
-| `Content-Type` | MIME type of payload, e.g. `application/json` |
-| `Content-Length` | Size of the payload in bytes |
-| `Content-Hash` | Hash of payload with algorithm prefix, e.g. `sha256:a1b2c3...` |
+| `Content-Type` | MIME type of payload (required if payload present) |
+| `Content-Length` | Size of the payload in bytes (required if payload present) |
+| `Content-Hash` | Hash of payload with algorithm prefix (required if payload present) |
 | `Signing-Key` | Public key with algorithm prefix, e.g. `secp256k1:02a1b2...` |
 | `Signature` | Signature bytes in lowercase hex |
+
+**Note:** Content headers (`Content-Type`, `Content-Length`, `Content-Hash`) are required when a payload is present. For `Type: object`, payload is always required. For `Type: collection`, payload is optional (used for metadata like name, description).
 
 ### Optional Headers
 
@@ -105,8 +143,13 @@ See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1
 
 - `ID`, `Path`, and `Type` are all required headers.
 - The object or collection is defined by its ID at the path specified by `Path`.
-- If `Type` is `collection`, the object refers to a collection, and contains metadata but no payload.
-- If `Type` is `object`, the object is an object with a payload.
+- If `Type` is `collection`, the entry defines a collection (path). Payload is optional (metadata).
+- If `Type` is `object`, the entry defines an object. Payload is required.
+
+**Path conventions:**
+- `Path` header: Always ends with `/` (it's the container). Examples: `/`, `/alice/`, `/alice/nfts/`
+- `ID` header: Never contains `/`. Examples: `alice`, `nft-123`
+- Full path to an object or collection: `Path` + `ID`, no trailing slash. Examples: `/alice`, `/alice/nfts/punk-001`
 
 The same ID in the same collection may only refer to one object (or collection), unless the objects (or collections) have different creators.
 
