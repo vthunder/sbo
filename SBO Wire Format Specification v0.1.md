@@ -40,14 +40,14 @@ Another-Header: value
 ### Parsing Algorithm
 
 ```
-function parse(message: bytes) -> (headers, payload):
+function parse_one(data: bytes, start: int) -> (headers, payload, end_pos):
     lines = []
-    pos = 0
+    pos = start
 
     # Parse header lines
-    while pos < len(message):
-        line_end = message.index(0x0A, pos)  # Find LF
-        line = message[pos:line_end]
+    while pos < len(data):
+        line_end = data.index(0x0A, pos)  # Find LF
+        line = data[pos:line_end]
         pos = line_end + 1
 
         if len(line) == 0:  # Blank line
@@ -58,12 +58,92 @@ function parse(message: bytes) -> (headers, payload):
         value = line[colon+2:]
         lines.append((key, value))
 
-    # Rest is payload
-    content_length = int(headers["Content-Length"])
-    payload = message[pos : pos + content_length]
+    # Payload length from Content-Length header (0 if absent)
+    content_length = int(headers.get("Content-Length", "0"))
+    payload = data[pos : pos + content_length]
+    end_pos = pos + content_length
 
-    return (headers, payload)
+    return (headers, payload, end_pos)
 ```
+
+---
+
+## Batch Submissions
+
+A DA layer submission MAY contain multiple SBO messages concatenated directly. Messages are self-delimiting: the `Content-Length` header specifies exactly how many bytes follow the blank line separator.
+
+### Batch Structure
+
+```
+[Message 1 headers]
+[blank line]
+[Message 1 payload - exactly Content-Length bytes]
+[Message 2 headers]
+[blank line]
+[Message 2 payload - exactly Content-Length bytes]
+...
+```
+
+No separator is required between messages. After reading `Content-Length` bytes of payload, if more data remains, it is the start of the next message (beginning with `SBO-Version:`).
+
+### Batch Parsing Algorithm
+
+```
+function parse_batch(data: bytes) -> List[Message]:
+    messages = []
+    pos = 0
+
+    while pos < len(data):
+        headers, payload, end_pos = parse_one(data, pos)
+        messages.append(Message(headers, payload))
+        pos = end_pos
+
+    return messages
+```
+
+### Atomicity
+
+Messages within a single DA submission are processed **atomically in submission order**:
+
+1. All messages in the batch are validated together
+2. If any message is invalid, the entire batch is rejected
+3. Valid batches are applied in message order within the batch
+4. Batches from different DA transactions are ordered by DA layer sequencing
+
+This enables atomic multi-message operations such as:
+- Genesis: system identity + root policy
+- Collection creation with initial objects
+- Multi-object transfers
+
+### Example: Genesis Batch
+
+```
+SBO-Version: 0.5
+Action: post
+Path: /sys/names/
+ID: sys
+Type: object
+Content-Type: application/json
+Content-Length: 89
+Content-Hash: sha256:...
+Signing-Key: ed25519:...
+Signature: ...
+
+{"public_key":"ed25519:...","display_name":"System"}SBO-Version: 0.5
+Action: post
+Path: /sys/policies/
+ID: root
+Type: object
+Content-Type: application/json
+Content-Length: 166
+Content-Hash: sha256:...
+Signing-Key: ed25519:...
+Signature: ...
+
+{"grants":[{"to":"*","can":["create"],"on":"/sys/names/*"},...]}
+```
+
+Note: The second message starts immediately after the first payload ends (no newline separator).
 
 ---
 
