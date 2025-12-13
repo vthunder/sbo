@@ -161,7 +161,7 @@ Create NFTs with programmable policies—not smart contracts. Define who can min
 
 ### Decentralized Identity
 
-Claim your name. Link your keys across chains. Build a verifiable identity that you control.
+Claim your name. Link your keys across chains. Build a verifiable identity that you control—and use it to log in to web apps.
 
 ```
 /sys/names/alice
@@ -170,6 +170,8 @@ Claim your name. Link your keys across chains. Build a verifiable identity that 
 /alice/profile
 → {"bio":"Building the future","links":{"twitter":"@alice"}}
 ```
+
+Web apps can authenticate users via SBO identities using email-style discovery (`alice@domain.com` → SBO identity) and challenge-response signatures. No passwords, no OAuth providers—just your key.
 
 ### User-Controlled Data
 
@@ -258,6 +260,7 @@ hello
 | [URI Spec](./SBO%20URI%20Specification%20v0.3.md) | Cross-chain references |
 | [Policy Spec](./SBO%20Policy%20Specification%20v0.2.md) | Declarative access control |
 | [Name Resolution](./SBO%20Name%20Resolution%20Specification%20v0.1.md) | Identity and naming |
+| [Identity Spec](./SBO%20Identity%20Specification%20v0.1.md) | Web authentication, identity schema |
 | [Genesis Spec](./SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence |
 | [Bridge Spec](./SBO%20Bridge%20Specification%20v0.2.md) | Cross-chain imports |
 | [State Commitment](./SBO%20State%20Commitment%20Specification%20v0.1.md) | Merkle proofs |
