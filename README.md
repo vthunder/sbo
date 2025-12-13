@@ -255,15 +255,15 @@ hello
 
 | Spec | What it covers |
 |------|----------------|
-| [Core Spec](./SBO%20Specification%20v0.4.md) | Object model, actions, paths, ownership |
-| [Wire Format](./SBO%20Wire%20Format%20Specification%20v0.1.md) | Message serialization, signatures |
-| [URI Spec](./SBO%20URI%20Specification%20v0.3.md) | Cross-chain references |
-| [Policy Spec](./SBO%20Policy%20Specification%20v0.2.md) | Declarative access control |
-| [Name Resolution](./SBO%20Name%20Resolution%20Specification%20v0.1.md) | Identity and naming |
-| [Identity Spec](./SBO%20Identity%20Specification%20v0.1.md) | Web authentication, identity schema |
-| [Genesis Spec](./SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence |
-| [Bridge Spec](./SBO%20Bridge%20Specification%20v0.2.md) | Cross-chain imports |
-| [State Commitment](./SBO%20State%20Commitment%20Specification%20v0.1.md) | Merkle proofs |
+| [Core Spec](./specs/SBO%20Specification%20v0.4.md) | Object model, actions, paths, ownership |
+| [Wire Format](./specs/SBO%20Wire%20Format%20Specification%20v0.1.md) | Message serialization, signatures |
+| [URI Spec](./specs/SBO%20URI%20Specification%20v0.3.md) | Cross-chain references |
+| [Policy Spec](./specs/SBO%20Policy%20Specification%20v0.2.md) | Declarative access control |
+| [Name Resolution](./specs/SBO%20Name%20Resolution%20Specification%20v0.1.md) | Identity and naming |
+| [Identity Spec](./specs/SBO%20Identity%20Specification%20v0.1.md) | Web authentication, identity schema |
+| [Genesis Spec](./specs/SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence |
+| [Bridge Spec](./specs/SBO%20Bridge%20Specification%20v0.2.md) | Cross-chain imports |
+| [State Commitment](./specs/SBO%20State%20Commitment%20Specification%20v0.1.md) | Merkle proofs |
 
 ---
 

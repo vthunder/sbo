@@ -490,7 +490,7 @@ location /.well-known/sbo-identity {
 ## 8. References
 
 - [SBO Specification](./SBO%20Specification%20v0.4.md)
-- [SBO DNS URI Specification](./SBO%20DNS%20URI%20Specification%20v0.1.md)
+- [SBO URI Specification](./SBO%20URI%20Specification%20v0.3.md)
 - [RFC 8615 - Well-Known URIs](https://tools.ietf.org/html/rfc8615)
 - [Web Authentication (WebAuthn)](https://www.w3.org/TR/webauthn/)
 - [Ed25519 Signatures](https://ed25519.cr.yp.to/)
