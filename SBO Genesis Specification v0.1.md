@@ -32,38 +32,36 @@ Both objects must be signed by the same key. This key becomes the initial system
 ### System Identity (`/sys/names/sys`)
 
 ```
-SBO-Version: 0.5
-Action: post
+SBO-Version: 1
+Action: Create
 Path: /sys/names/
-ID: sys
-Type: object
+Id: sys
 Content-Type: application/json
-Content-Schema: identity.claim
-Signing-Key: secp256k1:02abc...
-Signature: ...
+Content-Schema: identity.v1
+Signing-Key: ed25519:abc123...
+Signature: <signature>
 
 {
-  "public_key": "secp256k1:02abc...",
+  "signing_key": "ed25519:abc123...",
   "display_name": "System"
 }
 ```
 
 **Validation:**
-- Must be valid `identity.claim` schema
-- Must be self-signed (`Signing-Key` == `public_key` in payload)
+- Must be valid `identity.v1` schema (see [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md))
+- Must be self-signed (`Signing-Key` header == `signing_key` in payload)
 
 ### Root Policy (`/sys/policies/root`)
 
 ```
-SBO-Version: 0.5
-Action: post
+SBO-Version: 1
+Action: Create
 Path: /sys/policies/
-ID: root
-Type: object
+Id: root
 Content-Type: application/json
 Content-Schema: policy.v2
-Signing-Key: secp256k1:02abc...
-Signature: ...
+Signing-Key: ed25519:abc123...
+Signature: <signature>
 
 {
   "grants": [
@@ -102,8 +100,8 @@ Genesis objects are validated with special rules since no prior state exists:
 1. Both objects must be present in the same block
 2. Both must be signed by the same key
 3. /sys/names/sys:
-   - Valid identity.claim schema
-   - Self-signed (Signing-Key matches public_key)
+   - Valid identity.v1 schema
+   - Self-signed (Signing-Key matches signing_key)
 4. /sys/policies/root:
    - Valid policy.v2 schema
    - Signed by sys key
@@ -270,25 +268,24 @@ All identities live under `/sys/names/`. User namespaces are top-level paths mat
 After genesis, users claim identities by posting to `/sys/names/*`:
 
 ```
-SBO-Version: 0.5
-Action: post
+SBO-Version: 1
+Action: Create
 Path: /sys/names/
-ID: alice
-Type: object
+Id: alice
 Content-Type: application/json
-Content-Schema: identity.claim
-Signing-Key: secp256k1:02def...
-Signature: ...
+Content-Schema: identity.v1
+Signing-Key: ed25519:def456...
+Signature: <signature>
 
 {
-  "public_key": "secp256k1:02def...",
+  "signing_key": "ed25519:def456...",
   "display_name": "Alice"
 }
 ```
 
 **Validation:**
 1. Policy check: root policy allows `create` on `/sys/names/*` for anyone
-2. Schema check: `identity.claim` requires self-signing
+2. Schema check: `identity.v1` requires self-signing
 3. Path check: `/sys/names/alice` must not already exist
 
 After claiming:

@@ -21,26 +21,25 @@ This document defines a naming and identity resolution system for SBO (Simple Bl
 
 ---
 
-## Object Schema: `identity.claim`
+## Object Schema: `identity.v1`
+
+**Note:** This schema supersedes the earlier `identity.claim` schema. See the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for the full schema definition including web authentication fields.
 
 ```
-SBO-Version: 0.5
-Action: post
+SBO-Version: 1
+Action: Create
 Path: /sys/names/
-ID: userA
-Type: object
+Id: userA
 Content-Type: application/json
-Content-Schema: identity.claim
-Content-Length: 156
-Content-Hash: sha256:a1b2c3d4e5f6...
-Signing-Key: secp256k1:02123abc...
-Signature: a1b2c3d4e5f6...
+Content-Schema: identity.v1
+Signing-Key: ed25519:abc123...
+Signature: <signature>
 
 {
-  "public_key": "secp256k1:02123abc...",
+  "signing_key": "ed25519:abc123...",
   "display_name": "User A",
   "description": "Main handle for User A",
-  "binding": "sbo+raw://avail:mainnet:18/sys/names/actualUserA"
+  "binding": "sbo://avail:mainnet:18/sys/names/actualUserA"
 }
 ```
 
@@ -48,12 +47,16 @@ Signature: a1b2c3d4e5f6...
 
 | Field         | Type     | Description |
 |---------------|----------|-------------|
-| `public_key`  | string   | Public key with algorithm prefix (e.g., `secp256k1:02abc...` or `ed25519:abc...`) |
+| `signing_key` | string   | Public key with algorithm prefix (e.g., `ed25519:abc...`). Replaces `public_key`. |
 | `display_name`| string   | Optional human-friendly label |
 | `description` | string   | Optional text description |
+| `avatar`      | string   | Optional SBO path or URL to avatar image |
+| `links`       | object   | Optional key-value pairs of named links |
 | `binding`     | string   | Optional SBO URI to a canonical identity object on another chain/app |
 
-Either `public_key` or `binding` must be present, but not both.
+Either `signing_key` or `binding` must be present, but not both.
+
+**Backward Compatibility:** Implementations SHOULD accept `public_key` as an alias for `signing_key`.
 
 ---
 
@@ -62,8 +65,8 @@ Either `public_key` or `binding` must be present, but not both.
 ### Direct resolution:
 To resolve `userA` in the context of `sbo://myapp.com` (which resolves to `avail:mainnet:17`):
 1. Load the object at `/sys/names/userA`
-2. Verify the signature on the object matches the declared `public_key`
-3. Use `public_key` as the identity of `userA` for validation
+2. Verify the signature on the object matches the declared `signing_key`
+3. Use `signing_key` as the identity of `userA` for validation
 
 ### Cross-chain resolution (via binding):
 1. Resolve `names/userA` as above
@@ -77,9 +80,9 @@ To resolve `userA` in the context of `sbo://myapp.com` (which resolves to `avail
 ## Rules
 
 - Only one valid name claim is active per `id` at a time (Last-Write-Wins)
-- Name claims must be signed by the `public_key` they declare
+- Name claims must be signed by the `signing_key` they declare
 - Name claims can be updated, renamed, or deleted like any other SBO object
-- Bindings are optional, and must point to objects of schema `identity.claim`
+- Bindings are optional, and must point to objects of schema `identity.v1`
 
 ---
 

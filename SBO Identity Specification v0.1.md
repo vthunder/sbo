@@ -111,6 +111,8 @@ The SBO object at the discovered URI contains the user's identity information.
 
 **Schema:** `identity.v1`
 
+This schema supersedes `identity.claim` from the Name Resolution specification, adding web authentication support while maintaining backward compatibility.
+
 **Required Fields:**
 ```json
 {
@@ -118,17 +120,18 @@ The SBO object at the discovered URI contains the user's identity information.
 }
 ```
 
-**Optional Fields:**
+**All Fields:**
 ```json
 {
   "signing_key": "ed25519:abc123...",
   "display_name": "Alice Smith",
+  "description": "Main identity for Alice",
   "avatar": "/alice/avatar.png",
-  "bio": "Software developer",
   "links": {
     "website": "https://alice.example.com",
     "github": "https://github.com/alice"
-  }
+  },
+  "binding": "sbo://avail:mainnet:42/sys/names/alice"
 }
 ```
 
@@ -136,11 +139,14 @@ The SBO object at the discovered URI contains the user's identity information.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `signing_key` | string | Yes | Public key in `algorithm:hex` format |
+| `signing_key` | string | Yes | Public key in `algorithm:hex` format (e.g., `ed25519:abc...`) |
 | `display_name` | string | No | Human-readable name |
+| `description` | string | No | Text description of this identity |
 | `avatar` | string | No | Relative SBO path or absolute URL to avatar image |
-| `bio` | string | No | Short biography or description |
 | `links` | object | No | Key-value pairs of named links |
+| `binding` | string | No | SBO URI to a canonical identity on another chain/app (for cross-chain resolution) |
+
+**Note:** The `signing_key` field replaces `public_key` from the earlier `identity.claim` schema. Implementations SHOULD accept both field names for backward compatibility.
 
 **Example SBO Message:**
 ```
