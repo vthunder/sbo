@@ -23,7 +23,7 @@ This document defines a naming and identity resolution system for SBO (Simple Bl
 
 ## Object Schema: `identity.v1`
 
-**Note:** This schema supersedes the earlier `identity.claim` schema. See the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for the full schema definition including web authentication fields.
+Identity objects use the `identity.v1` schema. See the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for the complete schema definition.
 
 ```
 SBO-Version: 1
@@ -47,7 +47,7 @@ Signature: <signature>
 
 | Field         | Type     | Description |
 |---------------|----------|-------------|
-| `signing_key` | string   | Public key with algorithm prefix (e.g., `ed25519:abc...`). Replaces `public_key`. |
+| `signing_key` | string   | Public key with algorithm prefix (e.g., `ed25519:abc...`) |
 | `display_name`| string   | Optional human-friendly label |
 | `description` | string   | Optional text description |
 | `avatar`      | string   | Optional SBO path or URL to avatar image |
@@ -55,8 +55,6 @@ Signature: <signature>
 | `binding`     | string   | Optional SBO URI to a canonical identity object on another chain/app |
 
 Either `signing_key` or `binding` must be present, but not both.
-
-**Backward Compatibility:** Implementations SHOULD accept `public_key` as an alias for `signing_key`.
 
 ---
 

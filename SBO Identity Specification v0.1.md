@@ -111,8 +111,6 @@ The SBO object at the discovered URI contains the user's identity information.
 
 **Schema:** `identity.v1`
 
-This schema supersedes `identity.claim` from the Name Resolution specification, adding web authentication support while maintaining backward compatibility.
-
 **Required Fields:**
 ```json
 {
@@ -145,8 +143,6 @@ This schema supersedes `identity.claim` from the Name Resolution specification, 
 | `avatar` | string | No | Relative SBO path or absolute URL to avatar image |
 | `links` | object | No | Key-value pairs of named links |
 | `binding` | string | No | SBO URI to a canonical identity on another chain/app (for cross-chain resolution) |
-
-**Note:** The `signing_key` field replaces `public_key` from the earlier `identity.claim` schema. Implementations SHOULD accept both field names for backward compatibility.
 
 **Example SBO Message:**
 ```

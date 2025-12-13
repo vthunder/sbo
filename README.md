@@ -103,7 +103,7 @@ $ ls my-sbo-repo/
 nfts/  sys/  apps/
 
 $ cat my-sbo-repo/sys/names/alice
-{"display_name":"Alice","public_key":"ed25519:19d76fbd..."}
+{"display_name":"Alice","signing_key":"ed25519:19d76fbd..."}
 ```
 
 Your data. Your filesystem. Verified against the blockchain.
@@ -165,10 +165,10 @@ Claim your name. Link your keys across chains. Build a verifiable identity that 
 
 ```
 /sys/names/alice
-→ {"display_name":"Alice","public_key":"ed25519:..."}
+→ {"display_name":"Alice","signing_key":"ed25519:..."}
 
 /alice/profile
-→ {"bio":"Building the future","links":["twitter:@alice"]}
+→ {"bio":"Building the future","links":{"twitter":"@alice"}}
 ```
 
 ### User-Controlled Data
