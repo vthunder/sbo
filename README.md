@@ -194,60 +194,16 @@ Store application configuration, feature flags, or content on-chain for pennies.
 
 ---
 
-## How It Works
+## Reference Implementation
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Your App                             │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                    ┌─────────▼─────────┐
-                    │    SBO Daemon     │  ← Validates & syncs
-                    │  (runs locally)   │
-                    └─────────┬─────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-              ▼               ▼               ▼
-        ┌──────────┐   ┌──────────┐   ┌──────────┐
-        │  Avail   │   │ Ethereum │   │ Celestia │
-        │   DA     │   │  (L1)    │   │   DA     │
-        └──────────┘   └──────────┘   └──────────┘
-```
+See [reference_impl/](./reference_impl/) for the working implementation including:
 
-1. **Post**: Sign a message and submit it to a DA layer
-2. **Sync**: The daemon watches the chain and downloads new messages
-3. **Validate**: Each message is verified (signature, ownership, policy)
-4. **Store**: Valid messages are written to local filesystem + state DB
-5. **Use**: Your app reads data like normal files
+- **sbo-cli** - Command-line tool for posting and querying objects
+- **sbo-daemon** - Background service that syncs from DA layers
+- **sbo-core** - Core library with validation and state management
+- **sbo-crypto** - Cryptographic primitives and proofs
 
----
-
-## Quick Start
-
-```bash
-# Install (coming soon)
-cargo install sbo-cli
-
-# Create a key
-sbo key generate
-
-# Bootstrap a new database (posts genesis block with root policy + system identity)
-sbo da submit --preset genesis --chain avail:turing --app-id 506
-
-# Post an object
-echo '{"name":"My First Object"}' | sbo post sbo://avail:turing:506/test/hello
-
-# Start the daemon
-sbo daemon start
-
-# Add a repo to sync
-sbo repo add sbo://avail:turing:506 ./my-repo
-
-# Watch your data appear
-ls ./my-repo/test/
-hello
-```
+The [reference implementation README](./reference_impl/README.md) includes quick start instructions, proof verification examples, and API documentation.
 
 ---
 
@@ -263,7 +219,7 @@ hello
 | [Identity Spec](./specs/SBO%20Identity%20Specification%20v0.1.md) | Web authentication, identity schema |
 | [Genesis Spec](./specs/SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence |
 | [Bridge Spec](./specs/SBO%20Bridge%20Specification%20v0.2.md) | Cross-chain imports |
-| [State Commitment](./specs/SBO%20State%20Commitment%20Specification%20v0.1.md) | Merkle proofs |
+| [State Commitment](./specs/SBO%20State%20Commitment%20Specification%20v0.2.md) | Trie proofs |
 
 ---
 
