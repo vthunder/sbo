@@ -1,8 +1,12 @@
 
-# SBO State Commitment Specification (v0.1)
+# SBO State Commitment Specification (v0.2)
 
 ## Status
 Draft
+
+## Changelog
+
+- **v0.2**: Changed leaf value from `Content-Hash` to `object_hash` (SHA-256 of complete raw SBO bytes). This ensures proofs commit to the full object including headers, not just payload. Added creator as path segment for disambiguation.
 
 ## Overview
 
@@ -11,6 +15,35 @@ This document defines the state commitment structure for SBO, enabling lightweig
 - Object existence and content at a path
 - Non-existence of a path
 - Completeness of a subtree (all objects under a path)
+
+---
+
+## Object Hash
+
+The **object hash** is the SHA-256 hash of the complete raw SBO object bytes (headers + payload in wire format):
+
+```
+object_hash = sha256(raw_sbo_bytes)
+```
+
+Where `raw_sbo_bytes` is the complete wire-format serialization:
+```
+HEADER-NAME: HEADER-VALUE\n
+HEADER-NAME: HEADER-VALUE\n
+\n
+[payload bytes]
+```
+
+**Why object_hash instead of Content-Hash?**
+
+The `Content-Hash` header only covers the payload bytes. The `object_hash` covers the complete object including:
+- All headers (Path, ID, Creator, Action, signatures, etc.)
+- The payload
+
+This is important because:
+1. Proofs can embed the complete object for verification
+2. Verifiers can hash the embedded bytes and confirm they match the leaf
+3. The commitment covers the full object identity, not just content
 
 ---
 
@@ -38,7 +71,7 @@ The state tree is a **sparse path-segment trie**. Each node represents a path pr
 
 The hash value can reference:
 - Another node (if the path continues deeper)
-- An object's content hash (if it's a leaf)
+- An object's **object hash** (if it's a leaf)
 
 ### Example Tree
 
@@ -70,7 +103,59 @@ Root node:
 }
 ```
 
-The leaf hashes (`sha256:111...`, etc.) are the `Content-Hash` values of the objects at those paths.
+The leaf hashes (`sha256:111...`, etc.) are the **object hashes** (SHA-256 of complete raw bytes) of the objects at those paths.
+
+### Creator as Path Segment
+
+In SBO, objects are uniquely identified by `(path, creator, id)` rather than just `(path, id)`. Multiple creators can post objects with the same ID at the same path. To handle this in the trie, the **creator** is included as a path segment between the path and the ID.
+
+**Full path segments:** `[path_segments..., creator, id]`
+
+**Example:**
+
+An object at `/sys/names/` with ID `alice` created by `user123` has trie segments:
+```
+["sys", "names", "user123", "alice"]
+```
+
+The tree structure becomes:
+```
+Root:
+{
+  "children": {
+    "sys": "sha256:..."
+  }
+}
+
+/sys node:
+{
+  "children": {
+    "names": "sha256:..."
+  }
+}
+
+/sys/names node:
+{
+  "children": {
+    "user123": "sha256:...",
+    "user456": "sha256:..."   // Different creator
+  }
+}
+
+/sys/names/user123 node:
+{
+  "children": {
+    "alice": "sha256:111...",   // object_hash
+    "bob": "sha256:222..."      // another object by same creator
+  }
+}
+```
+
+This design:
+1. Allows multiple creators at the same path to have objects with the same ID
+2. Enables proofs for all objects by a specific creator under a path
+3. Maintains the trie's hierarchical structure
+4. Makes proofs slightly larger due to the extra segment, but keeps them efficient (O(depth))
 
 ---
 
@@ -118,13 +203,14 @@ The state root is deterministic: given the same block sequence, all implementati
 ### Post (Create or Update)
 
 ```
-post /userA/nft-001 with Content-Hash sha256:xyz...
+post /userA/nft-001
 
-1. Traverse from root, creating nodes as needed
-2. Set children["nft-001"] = "sha256:xyz..." in /userA node
-3. Rehash /userA node
-4. Update root's children["userA"] with new hash
-5. Rehash root node
+1. Compute object_hash = sha256(raw_sbo_bytes)
+2. Traverse from root, creating nodes as needed
+3. Set children["nft-001"] = object_hash in /userA node
+4. Rehash /userA node
+5. Update root's children["userA"] with new hash
+6. Rehash root node
 ```
 
 ### Delete
@@ -143,11 +229,13 @@ delete /userA/nft-001
 ```
 transfer /userA/nft-001 to /userB/nft-001
 
-1. Read value at /userA/nft-001
+1. Read object_hash at /userA/nft-001
 2. Delete from /userA/nft-001
-3. Post to /userB/nft-001 with same value
+3. Post to /userB/nft-001 with same object_hash
 4. Rehash all affected nodes
 ```
+
+**Note:** Transfer preserves the object_hash because the raw bytes (including original path/id in headers) remain the same. The tree location changes but the committed content does not.
 
 **Cost:** All operations are O(depth) where depth = number of path segments.
 
@@ -155,7 +243,7 @@ transfer /userA/nft-001 to /userB/nft-001
 
 ## Inclusion Proof
 
-Proves that a path has a specific value relative to a state root.
+Proves that a path has a specific object relative to a state root.
 
 ### Format
 
@@ -164,7 +252,7 @@ Proves that a path has a specific value relative to a state root.
   "state_root": "sha256:abc123...",
   "block": 12345,
   "path": "/userA/nft-001",
-  "value": "sha256:def456...",
+  "object_hash": "sha256:def456...",
   "proof": [
     {
       "segment": "userA",
@@ -180,7 +268,8 @@ Proves that a path has a specific value relative to a state root.
         "nft-003": "sha256:..."
       }
     }
-  ]
+  ],
+  "object": "<base64 or hex encoded raw SBO bytes>"
 }
 ```
 
@@ -191,18 +280,23 @@ Proves that a path has a specific value relative to a state root.
 | `state_root` | string | Root hash this proof is anchored to |
 | `block` | number | Block number (optional, for context) |
 | `path` | string | Path being proven |
-| `value` | string | Content hash at path, or null for non-existence |
+| `object_hash` | string | Object hash at path, or null for non-existence |
 | `proof` | array | Nodes from root to leaf with sibling hashes |
+| `object` | string | Raw SBO object bytes (optional, for verification) |
 
 ### Verification Algorithm
 
 ```
-1. Start with value (the leaf)
-2. For each proof level (bottom to top):
+1. If object is provided:
+   a. Compute sha256(object_bytes)
+   b. Verify it equals object_hash
+
+2. Start with object_hash (the leaf)
+3. For each proof level (bottom to top):
    a. Reconstruct node: siblings + {segment: current_hash}
    b. Serialize and hash the node
    c. current_hash = result
-3. Final hash must equal state_root
+4. Final hash must equal state_root
 ```
 
 ---
@@ -217,7 +311,7 @@ Proves that a path does not exist.
 {
   "state_root": "sha256:abc123...",
   "path": "/userA/nft-999",
-  "value": null,
+  "object_hash": null,
   "proof": [
     {
       "segment": "userA",
@@ -276,7 +370,7 @@ Proves the complete contents of a path prefix.
 |-------|------|-------------|
 | `path` | string | Subtree path being proven |
 | `subtree_root` | string | Hash of the subtree |
-| `subtree` | object | Complete subtree contents |
+| `subtree` | object | Complete subtree contents (object hashes) |
 | `proof` | array | Path from state root to subtree root |
 
 ### Nested Subtrees
@@ -297,7 +391,7 @@ If the subtree contains collections, it can be nested:
 
 ### Verification
 
-1. Serialize and hash `subtree` → must equal `subtree_root`
+1. Serialize and hash `subtree` -> must equal `subtree_root`
 2. Verify `proof` shows `subtree_root` at `path` under `state_root`
 
 ---
@@ -344,6 +438,20 @@ How lite clients trust checkpoints is deployment-specific. Options include:
 - **Optimistic + fraud proofs**: Trust unless challenged within window
 
 The trust mechanism is not specified here and may vary by deployment.
+
+---
+
+## State Root Recording
+
+Full nodes record state roots during sync for proof verification:
+
+1. **On every block**: Record `last_processed_block`
+2. **On state change**: Record `(block_number, state_root)` mapping
+
+This allows verification of proofs for any block up to `last_processed_block`:
+- If proof's block equals a recorded block, use that state root
+- If proof's block is between recorded blocks, use the most recent state root at or before that block (state didn't change)
+- If proof's block > `last_processed_block`, reject as future/unknown
 
 ---
 
