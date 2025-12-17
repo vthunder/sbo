@@ -213,12 +213,10 @@ Command-line interface.
 ### Main Commands
 
 ```
-sbo claim <name>                 # Claim an identity name
 sbo post --path --id --file      # Post an object
 sbo transfer <path> <id> ...     # Transfer/move/rename
 sbo get <path> <id>              # Query an object
 sbo list <path>                  # List objects at path
-sbo status                       # Show database status
 ```
 
 ### DA Test Commands
