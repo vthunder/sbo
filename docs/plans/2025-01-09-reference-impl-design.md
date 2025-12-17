@@ -213,8 +213,6 @@ Command-line interface.
 ### Main Commands
 
 ```
-sbo init --app-id <ID>           # Initialize database (create genesis)
-sbo sync [--follow]              # Sync blocks from DA layer
 sbo claim <name>                 # Claim an identity name
 sbo post --path --id --file      # Post an object
 sbo transfer <path> <id> ...     # Transfer/move/rename
