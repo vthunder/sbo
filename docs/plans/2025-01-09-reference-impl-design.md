@@ -221,16 +221,18 @@ sbo uri transfer <uri> [--new-path] [--new-id] # Transfer/move/rename
 
 Example URIs: `sbo://avail:turing:506/alice/nfts/token1`
 
-### DA Test Commands
+### Debug Commands
 
 ```
-sbo da stream --from <N> [--limit <N>] [--raw]   # Stream raw blocks
-sbo da submit --preset <NAME>                     # Submit test payload
-sbo da submit --file <PATH>                       # Submit custom payload
-sbo da ping                                       # Check DA connection
+sbo debug da stream --from <N> [--limit <N>] [--raw]   # Stream raw blocks
+sbo debug da submit --preset <NAME>                     # Submit test payload
+sbo debug da submit --file <PATH>                       # Submit custom payload
+sbo debug da ping                                       # Check DA connection
+sbo debug da scan <block>                               # Scan a specific block
+sbo debug da status <submission-id>                     # Check TurboDA status
 ```
 
-Test presets:
+DA test presets:
 - `hello` - Simple bytes (not SBO)
 - `genesis` - Valid genesis (/sys/names/sys + /sys/policies/root)
 - `post` - Valid SBO post message
