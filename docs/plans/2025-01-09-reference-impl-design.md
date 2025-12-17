@@ -210,14 +210,16 @@ Trait allows mocking for tests. TurboDA would be a separate implementation.
 
 Command-line interface.
 
-### Main Commands
+### URI Commands (Object Operations)
 
 ```
-sbo post --path --id --file      # Post an object
-sbo transfer <path> <id> ...     # Transfer/move/rename
-sbo get <path> <id>              # Query an object
-sbo list <path>                  # List objects at path
+sbo uri get <uri>                              # Get an object by SBO URI
+sbo uri post <uri> <file> [--content-type]     # Post an object
+sbo uri list <uri>                             # List objects at path
+sbo uri transfer <uri> [--new-path] [--new-id] # Transfer/move/rename
 ```
+
+Example URIs: `sbo://avail:turing:506/alice/nfts/token1`
 
 ### DA Test Commands
 
