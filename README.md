@@ -32,7 +32,7 @@ ID: punk-001
 Type: object
 Content-Type: application/json
 Content-Hash: sha256:abc123...
-Signing-Key: ed25519:19d76fbd...
+Public-Key: ed25519:19d76fbd...
 Signature: dd1aebf779dd5752...
 
 {"name":"CryptoPunk #001","attributes":{"type":"alien","accessories":["pipe"]}}
@@ -64,7 +64,7 @@ Every object has an owner. Only the owner can update or transfer it. This is enf
 Path: /nfts/
 ID: my-art
 Owner: alice
-Signing-Key: ed25519:<alice-pubkey>
+Public-Key: ed25519:<alice-pubkey>
 
 # Only Alice can transfer or update it
 Action: transfer
@@ -103,7 +103,7 @@ $ ls my-sbo-repo/
 nfts/  sys/  apps/
 
 $ cat my-sbo-repo/sys/names/alice
-{"display_name":"Alice","signing_key":"ed25519:19d76fbd..."}
+{"display_name":"Alice","public_key":"ed25519:19d76fbd..."}
 ```
 
 Your data. Your filesystem. Verified against the blockchain.
@@ -165,7 +165,7 @@ Claim your name. Link your keys across chains. Build a verifiable identity that 
 
 ```
 /sys/names/alice
-→ {"display_name":"Alice","signing_key":"ed25519:..."}
+→ {"display_name":"Alice","public_key":"ed25519:..."}
 
 /alice/profile
 → {"bio":"Building the future","links":{"twitter":"@alice"}}

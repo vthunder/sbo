@@ -32,11 +32,11 @@ Path: /sys/names/
 Id: userA
 Content-Type: application/json
 Content-Schema: identity.v1
-Signing-Key: ed25519:abc123...
+Public-Key: ed25519:abc123...
 Signature: <signature>
 
 {
-  "signing_key": "ed25519:abc123...",
+  "public_key": "ed25519:abc123...",
   "display_name": "User A",
   "description": "Main handle for User A",
   "binding": "sbo://avail:mainnet:18/sys/names/actualUserA"
@@ -47,14 +47,14 @@ Signature: <signature>
 
 | Field         | Type     | Description |
 |---------------|----------|-------------|
-| `signing_key` | string   | Public key with algorithm prefix (e.g., `ed25519:abc...`) |
+| `public_key`  | string   | Public key with algorithm prefix (e.g., `ed25519:abc...`) |
 | `display_name`| string   | Optional human-friendly label |
 | `description` | string   | Optional text description |
 | `avatar`      | string   | Optional SBO path or URL to avatar image |
 | `links`       | object   | Optional key-value pairs of named links |
 | `binding`     | string   | Optional SBO URI to a canonical identity object on another chain/app |
 
-Either `signing_key` or `binding` must be present, but not both.
+Either `public_key` or `binding` must be present, but not both.
 
 ---
 
@@ -63,8 +63,8 @@ Either `signing_key` or `binding` must be present, but not both.
 ### Direct resolution:
 To resolve `userA` in the context of `sbo://myapp.com` (which resolves to `avail:mainnet:17`):
 1. Load the object at `/sys/names/userA`
-2. Verify the signature on the object matches the declared `signing_key`
-3. Use `signing_key` as the identity of `userA` for validation
+2. Verify the signature on the object matches the declared `public_key`
+3. Use `public_key` as the identity of `userA` for validation
 
 ### Cross-chain resolution (via binding):
 1. Resolve `names/userA` as above
@@ -78,7 +78,7 @@ To resolve `userA` in the context of `sbo://myapp.com` (which resolves to `avail
 ## Rules
 
 - Only one valid name claim is active per `id` at a time (Last-Write-Wins)
-- Name claims must be signed by the `signing_key` they declare
+- Name claims must be signed by the `public_key` they declare
 - Name claims can be updated, renamed, or deleted like any other SBO object
 - Bindings are optional, and must point to objects of schema `identity.v1`
 

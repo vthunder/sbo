@@ -32,7 +32,7 @@ Another-Header: value
 | Character encoding | UTF-8 |
 | Line ending | LF only (`\n`, 0x0A). CRLF is invalid. |
 | Header format | `Name: value` (colon + single ASCII space) |
-| Header names | Kebab-Case (e.g., `Content-Type`, `Signing-Key`) |
+| Header names | Kebab-Case (e.g., `Content-Type`, `Public-Key`) |
 | Header values | UTF-8 string, no embedded newlines |
 | Blank line | Exactly one LF byte between headers and payload |
 | Payload | Raw bytes, length specified by `Content-Length` |
@@ -126,7 +126,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 89
 Content-Hash: sha256:...
-Signing-Key: ed25519:...
+Public-Key: ed25519:...
 Signature: ...
 
 {"public_key":"ed25519:...","display_name":"System"}SBO-Version: 0.5
@@ -137,7 +137,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 166
 Content-Hash: sha256:...
-Signing-Key: ed25519:...
+Public-Key: ed25519:...
 Signature: ...
 
 {"grants":[{"to":"*","can":["create"],"on":"/sys/names/*"},...]}
@@ -163,7 +163,7 @@ All messages MUST include these headers in this exact order:
 | `Content-Type` | MIME | Payload MIME type (if payload present) |
 | `Content-Length` | integer | Payload size in bytes (if payload present) |
 | `Content-Hash` | prefixed | Hash of payload bytes (if payload present) |
-| `Signing-Key` | prefixed | Public key that signed the message |
+| `Public-Key` | prefixed | Public key of the signer |
 | `Signature` | hex | Signature bytes |
 
 **Payload rules:**
@@ -230,7 +230,7 @@ For signature computation, headers MUST appear in this order:
 21. `Proof-Type` (if present)
 22. `Registry-Path` (if present)
 23. `Related` (if present)
-24. `Signing-Key`
+24. `Public-Key`
 25. `Signature`
 
 ---
@@ -273,9 +273,9 @@ algorithm:value
 
 ```
 Content-Hash: sha256:7d0a4b3c8f2e1d6a5b9c4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b
-Signing-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
-Signing-Key: ed25519:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
-Signature: 1a2b3c4d5e6f...  (no prefix, algorithm from Signing-Key)
+Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Public-Key: ed25519:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
+Signature: 1a2b3c4d5e6f...  (no prefix, algorithm from Public-Key)
 ```
 
 ---
@@ -332,7 +332,7 @@ function verify_message(message):
     canonical += "\n"  # Blank line
 
     # 5. Verify signature
-    key_algo, public_key = parse_prefixed(headers["Signing-Key"])
+    key_algo, public_key = parse_prefixed(headers["Public-Key"])
     signature = hex_decode(headers["Signature"])
 
     if not verify_signature(key_algo, public_key, canonical, signature):
@@ -411,7 +411,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 42
 Content-Hash: sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b
-Signing-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
 Signature: 1a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f9
 
 {"name":"Sunset #1","artist":"alice"}
@@ -443,7 +443,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 42
 Content-Hash: sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b
-Signing-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
 
 ```
 

@@ -410,7 +410,7 @@ ID: block-12345
 Type: object
 Content-Type: application/json
 Content-Schema: checkpoint.v1
-Signing-Key: <checkpoint authority>
+Public-Key: <checkpoint authority>
 Signature: ...
 
 {

@@ -38,18 +38,18 @@ Path: /sys/names/
 Id: sys
 Content-Type: application/json
 Content-Schema: identity.v1
-Signing-Key: ed25519:abc123...
+Public-Key: ed25519:abc123...
 Signature: <signature>
 
 {
-  "signing_key": "ed25519:abc123...",
+  "public_key": "ed25519:abc123...",
   "display_name": "System"
 }
 ```
 
 **Validation:**
 - Must be valid `identity.v1` schema (see [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md))
-- Must be self-signed (`Signing-Key` header == `signing_key` in payload)
+- Must be self-signed (`Signing-Key` header == `public_key` in payload)
 
 ### Root Policy (`/sys/policies/root`)
 
@@ -60,7 +60,7 @@ Path: /sys/policies/
 Id: root
 Content-Type: application/json
 Content-Schema: policy.v2
-Signing-Key: ed25519:abc123...
+Public-Key: ed25519:abc123...
 Signature: <signature>
 
 {
@@ -101,7 +101,7 @@ Genesis objects are validated with special rules since no prior state exists:
 2. Both must be signed by the same key
 3. /sys/names/sys:
    - Valid identity.v1 schema
-   - Self-signed (Signing-Key matches signing_key)
+   - Self-signed (Signing-Key matches public_key)
 4. /sys/policies/root:
    - Valid policy.v2 schema
    - Signed by sys key
@@ -274,11 +274,11 @@ Path: /sys/names/
 Id: alice
 Content-Type: application/json
 Content-Schema: identity.v1
-Signing-Key: ed25519:def456...
+Public-Key: ed25519:def456...
 Signature: <signature>
 
 {
-  "signing_key": "ed25519:def456...",
+  "public_key": "ed25519:def456...",
   "display_name": "Alice"
 }
 ```

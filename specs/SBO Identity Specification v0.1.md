@@ -114,14 +114,14 @@ The SBO object at the discovered URI contains the user's identity information.
 **Required Fields:**
 ```json
 {
-  "signing_key": "ed25519:<hex-encoded-public-key>"
+  "public_key": "ed25519:<hex-encoded-public-key>"
 }
 ```
 
 **All Fields:**
 ```json
 {
-  "signing_key": "ed25519:abc123...",
+  "public_key": "ed25519:abc123...",
   "display_name": "Alice Smith",
   "description": "Main identity for Alice",
   "avatar": "/alice/avatar.png",
@@ -137,7 +137,7 @@ The SBO object at the discovered URI contains the user's identity information.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `signing_key` | string | Yes | Public key in `algorithm:hex` format (e.g., `ed25519:abc...`) |
+| `public_key` | string | Yes | Public key in `algorithm:hex` format (e.g., `ed25519:abc...`) |
 | `display_name` | string | No | Human-readable name |
 | `description` | string | No | Text description of this identity |
 | `avatar` | string | No | Relative SBO path or absolute URL to avatar image |
@@ -152,11 +152,11 @@ Path: /alice/
 Id: identity
 Content-Type: application/json
 Content-Schema: identity.v1
-Signing-Key: ed25519:abc123...
+Public-Key: ed25519:abc123...
 Signature: <signature>
 
 {
-  "signing_key": "ed25519:abc123...",
+  "public_key": "ed25519:abc123...",
   "display_name": "Alice",
   "avatar": "/alice/avatar.png"
 }
@@ -164,9 +164,9 @@ Signature: <signature>
 
 ### 2.2 Identity Ownership
 
-The identity object MUST be signed by the key specified in `signing_key`. This proves the identity creator controls the private key.
+The identity object MUST be signed by the private key associated with `public_key`. This proves the identity creator controls the private key.
 
-Verifiers MUST check that the SBO message's `Signing-Key` header matches the `signing_key` field in the payload.
+Verifiers MUST check that the SBO message's `Public-Key` header matches the `public_key` field in the payload.
 
 ### 2.3 Domain Identity (Optional)
 
@@ -179,7 +179,7 @@ Domains MAY publish their own identity object for domain-level operations:
 ```json
 {
   "domain": "example.com",
-  "signing_key": "ed25519:def456...",
+  "public_key": "ed25519:def456...",
   "admin_contact": "admin@example.com"
 }
 ```
@@ -228,7 +228,7 @@ The signed assertion contains:
   "challenge": "<challenge-from-app>",
   "issued_at": 1702500000,
   "expires_at": 1702500300,
-  "signing_key": "ed25519:abc123...",
+  "public_key": "ed25519:abc123...",
   "signature": "<hex-encoded-signature>"
 }
 ```
@@ -243,7 +243,7 @@ The signed assertion contains:
 | `challenge` | string | Challenge from application |
 | `issued_at` | number | Unix timestamp of assertion creation |
 | `expires_at` | number | Unix timestamp of assertion expiration |
-| `signing_key` | string | Public key used to sign |
+| `public_key` | string | Public key used to sign |
 | `signature` | string | Hex-encoded signature |
 
 **Signature Computation:**
@@ -258,7 +258,7 @@ message = canonical_json({
   "challenge": "...",
   "issued_at": ...,
   "expires_at": ...,
-  "signing_key": "..."
+  "public_key": "..."
 })
 signature = ed25519_sign(private_key, message)
 ```
@@ -273,7 +273,7 @@ To verify an assertion:
 2. **Check origin:** `origin` matches the verifying application's origin
 3. **Check challenge:** `challenge` matches what the application issued
 4. **Fetch identity:** Retrieve SBO object at `identity_uri`
-5. **Check key match:** `signing_key` in assertion matches `signing_key` in identity object
+5. **Check key match:** `public_key` in assertion matches `public_key` in identity object
 6. **Verify signature:** Ed25519 signature is valid for the assertion message
 
 If any check fails, reject the authentication.
@@ -425,7 +425,7 @@ User: alice@example.com
 
 3. Fetch Identity
    GET sbo://avail:mainnet:42/alice/identity
-   Response: {"signing_key":"ed25519:abc123...","display_name":"Alice"}
+   Response: {"public_key":"ed25519:abc123...","display_name":"Alice"}
 
 4. Generate Challenge
    App creates: {"challenge":"x7k9m2...","origin":"https://app.com","expires_at":1702500300}
@@ -438,7 +438,7 @@ User: alice@example.com
      "challenge": "x7k9m2...",
      "issued_at": 1702500000,
      "expires_at": 1702500300,
-     "signing_key": "ed25519:abc123...",
+     "public_key": "ed25519:abc123...",
      "signature": "def456..."
    }
 
