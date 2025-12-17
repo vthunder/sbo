@@ -43,16 +43,18 @@ sbo://[domain]/[path/][creator:][id][?query]
 ### DNS TXT Record Format
 
 ```
-_sbo.myapp.com TXT "sbo=v1 chain=avail:mainnet appId=13 genesis=sha256:abc123... checkpoint=https://myapp.com/sbo/checkpoint.json"
+_sbo.myapp.com TXT "sbo=v1 chain=avail:mainnet appId=13 genesis=sha256:abc123... firstBlock=1000 checkpoint=https://myapp.com/sbo/checkpoint.json node=https://sbo.myapp.com"
 ```
 
-| Field | Description |
-|-------|-------------|
-| `sbo` | Version identifier (v1) |
-| `chain` | CAIP-2 chain identifier |
-| `appId` | Application ID on the chain |
-| `genesis` | Genesis hash for database identity |
-| `checkpoint` | Optional URL for bootstrap checkpoint |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `sbo` | Yes | Version identifier (v1) |
+| `chain` | Yes | CAIP-2 chain identifier |
+| `appId` | Yes | Application ID on the chain |
+| `genesis` | No | Genesis hash for database identity |
+| `firstBlock` | No | Block number containing genesis (for sync-from-start) |
+| `checkpoint` | No | URL for bootstrap checkpoint (preferred for mature databases) |
+| `node` | No | URL of full node for data fetching |
 
 ### Examples
 
