@@ -219,7 +219,7 @@ sbo uri list <uri>                             # List objects at path
 sbo uri transfer <uri> [--new-path] [--new-id] # Transfer/move/rename
 ```
 
-Example URIs: `sbo://avail:turing:506/alice/nfts/token1`
+Example URIs: `sbo+raw://avail:turing:506/alice/nfts/token1`
 
 ### Debug Commands
 

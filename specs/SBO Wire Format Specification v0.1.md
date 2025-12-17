@@ -383,7 +383,7 @@ Identity references appear in:
 The `Related` header contains a JSON array of relationship objects:
 
 ```
-Related: [{"rel":"license","ref":"sbo://Avail:13/licenses/cc-by"},{"rel":"collection","ref":"/art/"}]
+Related: [{"rel":"license","ref":"sbo+raw://avail:mainnet:13/licenses/cc-by"},{"rel":"collection","ref":"/art/"}]
 ```
 
 Each object has:

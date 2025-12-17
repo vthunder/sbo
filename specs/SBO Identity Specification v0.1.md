@@ -55,7 +55,7 @@ GET https://<host>/.well-known/sbo-identity?user=<username>
 ```json
 {
   "version": 1,
-  "sbo_uri": "sbo://avail:mainnet:123/path/to/identity"
+  "sbo_uri": "sbo+raw://avail:mainnet:123/path/to/identity"
 }
 ```
 
@@ -129,7 +129,7 @@ The SBO object at the discovered URI contains the user's identity information.
     "website": "https://alice.example.com",
     "github": "https://github.com/alice"
   },
-  "binding": "sbo://avail:mainnet:42/sys/names/alice"
+  "binding": "sbo+raw://avail:mainnet:42/sys/names/alice"
 }
 ```
 
@@ -223,7 +223,7 @@ The signed assertion contains:
 ```json
 {
   "version": 1,
-  "identity_uri": "sbo://avail:mainnet:123/alice/identity",
+  "identity_uri": "sbo+raw://avail:mainnet:123/alice/identity",
   "origin": "https://app.example.com",
   "challenge": "<challenge-from-app>",
   "issued_at": 1702500000,
@@ -288,7 +288,7 @@ Implementations SHOULD provide a `navigator.credentials`-compatible API:
 // Request authentication
 const assertion = await navigator.credentials.get({
   sbo: {
-    identity: "sbo://avail:mainnet:123/alice/identity",
+    identity: "sbo+raw://avail:mainnet:123/alice/identity",
     challenge: "server-provided-nonce"
   }
 });
@@ -421,10 +421,10 @@ User: alice@example.com
 
 2. Discovery Request
    GET https://id.example.com/.well-known/sbo-identity?user=alice
-   Response: {"version":1,"sbo_uri":"sbo://avail:mainnet:42/alice/identity"}
+   Response: {"version":1,"sbo_uri":"sbo+raw://avail:mainnet:42/alice/identity"}
 
 3. Fetch Identity
-   GET sbo://avail:mainnet:42/alice/identity
+   GET sbo+raw://avail:mainnet:42/alice/identity
    Response: {"public_key":"ed25519:abc123...","display_name":"Alice"}
 
 4. Generate Challenge
@@ -433,7 +433,7 @@ User: alice@example.com
 5. User Signs Assertion
    Assertion: {
      "version": 1,
-     "identity_uri": "sbo://avail:mainnet:42/alice/identity",
+     "identity_uri": "sbo+raw://avail:mainnet:42/alice/identity",
      "origin": "https://app.com",
      "challenge": "x7k9m2...",
      "issued_at": 1702500000,

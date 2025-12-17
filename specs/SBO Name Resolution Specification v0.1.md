@@ -39,7 +39,7 @@ Signature: <signature>
   "public_key": "ed25519:abc123...",
   "display_name": "User A",
   "description": "Main handle for User A",
-  "binding": "sbo://avail:mainnet:18/sys/names/actualUserA"
+  "binding": "sbo+raw://avail:mainnet:18/sys/names/actualUserA"
 }
 ```
 

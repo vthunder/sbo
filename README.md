@@ -98,7 +98,7 @@ Policies cascade down the hierarchy. Set rules at `/nfts/` and they apply to eve
 Run the SBO daemon and it syncs blockchain data to your local filesystem:
 
 ```bash
-$ sbo repo add sbo://avail:turing:506
+$ sbo repo add sbo+raw://avail:turing:506
 $ ls my-sbo-repo/
 nfts/  sys/  apps/
 
@@ -110,18 +110,18 @@ Your data. Your filesystem. Verified against the blockchain.
 
 ### 5. Cross-Chain by Design
 
-Every SBO object has a URI. Direct references use the chain and app ID:
+Every SBO object has a URI. Direct chain references use `sbo+raw://`:
 
 ```
-sbo://avail:mainnet:42/nfts/punk-001
-sbo://ethereum:1/nfts/bridged-punk
+sbo+raw://avail:mainnet:42/nfts/punk-001
+sbo+raw://ethereum:1/nfts/bridged-punk
 ```
 
-Or use DNS to give your database a human-readable name:
+Or use DNS to give your database a human-readable name with `sbo://`:
 
 ```
-sbo:alice.eth/nfts/my-art        ← DNS TXT record points to sbo://avail:mainnet:42
-sbo:myapp.com/users/bob          ← Your domain, your objects
+sbo://alice.eth/nfts/my-art      ← DNS TXT record resolves to sbo+raw://avail:mainnet:42
+sbo://myapp.com/users/bob        ← Your domain, your objects
 ```
 
 **Bridging** lets you move objects between chains. Lock an NFT on Avail, mint it on Ethereum as an ERC-721. Burn the ERC-721, unlock the original. The object's history and ownership travel with it—verified by oracle attestations.

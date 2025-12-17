@@ -168,7 +168,7 @@ The `Related` header contains a JSON array of relationship objects. Each entry h
 - `rel`: the type of relation (e.g., `license`, `collection`, `policy`)
 - `ref`: a reference (SBO URI or relative path) to the target object
 
-Example: `Related: [{"rel":"license","ref":"sbo://Avail:13/licenses/cc-by"}]`
+Example: `Related: [{"rel":"license","ref":"sbo+raw://avail:mainnet:13/licenses/cc-by"}]`
 
 ### Signature Scope
 
