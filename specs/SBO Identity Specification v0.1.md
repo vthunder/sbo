@@ -44,12 +44,17 @@ The DNS record serves two purposes:
 The discovery host MUST serve an HTTPS endpoint at:
 
 ```
-GET https://<host>/.well-known/sbo-identity?user=<username>
+GET https://<host>/.well-known/sbo-identity/<domain>/<user>
 ```
 
-**Request:**
-- Method: GET
-- Query parameter `user`: The local part of the email address (before @)
+Where:
+- `<domain>` is the domain part of the email address (after @)
+- `<user>` is the local part of the email address (before @)
+
+**Example:**
+```
+alice@example.com → GET https://id.example.com/.well-known/sbo-identity/example.com/alice
+```
 
 **Response (Success):**
 ```json
@@ -59,28 +64,9 @@ GET https://<host>/.well-known/sbo-identity?user=<username>
 }
 ```
 
-**Response (User Not Found):**
-```json
-{
-  "version": 1,
-  "error": "not_found",
-  "message": "User not found"
-}
-```
-
-**Response (Feature Disabled):**
-```json
-{
-  "version": 1,
-  "error": "disabled",
-  "message": "SBO identity not configured for this user"
-}
-```
-
 **HTTP Status Codes:**
-- `200 OK` - Success (includes error responses in JSON body)
-- `400 Bad Request` - Missing or invalid user parameter
-- `404 Not Found` - Endpoint not implemented
+- `200 OK` - Success, returns JSON with `sbo_uri`
+- `404 Not Found` - User not found, or domain not served by this host
 - `429 Too Many Requests` - Rate limited
 - `500 Internal Server Error` - Server error
 
@@ -98,8 +84,10 @@ To discover the SBO identity for `alice@domain.com`:
 1. Query DNS for `_sbo-id.domain.com` TXT record
 2. If no record exists, discovery fails (domain does not support SBO identity)
 3. Parse the `host` field from the DNS record
-4. Request `https://<host>/.well-known/sbo-identity?user=alice`
+4. Request `https://<host>/.well-known/sbo-identity/domain.com/alice`
 5. Parse the `sbo_uri` from the response
+
+The domain is included in the path because the discovery host may serve multiple domains. For example, if both `foo.example.com` and `bar.example.com` delegate to `id.example.com`, the path distinguishes which domain's user is being queried.
 
 **Security Note:** Implementations MUST NOT trust `.well-known` responses without first verifying the DNS record exists. This prevents attacks where a malicious actor on shared hosting creates fake discovery responses.
 
@@ -420,7 +408,7 @@ User: alice@example.com
    _sbo-id.example.com → "v=sbo-id1 host=id.example.com"
 
 2. Discovery Request
-   GET https://id.example.com/.well-known/sbo-identity?user=alice
+   GET https://id.example.com/.well-known/sbo-identity/example.com/alice
    Response: {"version":1,"sbo_uri":"sbo+raw://avail:mainnet:42/alice/identity"}
 
 3. Fetch Identity
@@ -460,30 +448,32 @@ User: alice@example.com
 _sbo-id.example.com. 3600 IN TXT "v=sbo-id1 host=example.com"
 ```
 
-**Nginx Configuration:**
-```nginx
-location /.well-known/sbo-identity {
-    add_header Access-Control-Allow-Origin *;
-    add_header Content-Type application/json;
+**File Structure:**
+```
+/.well-known/sbo-identity/
+  example.com/
+    alice       → {"version":1,"sbo_uri":"sbo://..."}
+    bob         → {"version":1,"sbo_uri":"sbo://..."}
+  other.com/
+    alice       → {"version":1,"sbo_uri":"sbo://..."}
+```
 
-    # Proxy to identity service or serve static files
-    proxy_pass http://identity-service/lookup;
+Files have no extension. Content-Type should be `application/json`.
+
+**Nginx Configuration (static files):**
+```nginx
+location /.well-known/sbo-identity/ {
+    add_header Access-Control-Allow-Origin *;
+    default_type application/json;
 }
 ```
 
-**Static File Structure:**
-```
-/.well-known/sbo-identity/
-  alice.json  → {"version":1,"sbo_uri":"sbo://..."}
-  bob.json    → {"version":1,"sbo_uri":"sbo://..."}
-```
-
-With URL rewriting:
+**Nginx Configuration (dynamic backend):**
 ```nginx
-location /.well-known/sbo-identity {
-    rewrite ^/.well-known/sbo-identity$ /.well-known/sbo-identity/index.php?user=$arg_user last;
-    # Or for static:
-    try_files /.well-known/sbo-identity/$arg_user.json =404;
+location /.well-known/sbo-identity/ {
+    add_header Access-Control-Allow-Origin *;
+    add_header Content-Type application/json;
+    proxy_pass http://identity-service/lookup/;
 }
 ```
 
