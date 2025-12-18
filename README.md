@@ -249,4 +249,13 @@ SBO is infrastructure for a world where your digital stuff is truly yours.
 
 ---
 
+## License
+
+All specifications are licensed under a
+[Creative Commons Attribution 4.0 International License][http://creativecommons.org/licenses/by/4.0/].
+
+All source code is available under the [MPL 2.0](https://mozilla.org/MPL/2.0/) license, unless otherwise indicated.
+
+---
+
 *Questions? Ideas? [Open an issue](https://github.com/availproject/sbo/issues).*

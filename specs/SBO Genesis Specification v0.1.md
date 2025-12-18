@@ -1,3 +1,8 @@
+---
+license: CC-BY-4.0
+---
+
+> This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
 # SBO Genesis Specification (v0.1)
 
