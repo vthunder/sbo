@@ -185,16 +185,3 @@ Policy-Ref: sbo+raw://avail:mainnet:13/sys/policies/default
 - Implementations should support both schemes
 
 ---
-
-## Migration from v0.2
-
-The v0.2 `sbo://chain:appId/...` format is deprecated. Migrate as follows:
-
-| v0.2 | v0.3 |
-|------|------|
-| `sbo://Avail:13/alice/foo` | `sbo+raw://avail:mainnet:13/alice/foo` |
-| `sbo://Ethereum:0x123/bob/bar` | `sbo+raw://eip155:1:0x123/bob/bar` |
-
-Note: Chain names are now lowercase CAIP-2 identifiers.
-
----

@@ -11,61 +11,134 @@ Draft
 
 ## Overview
 
-This document defines how an SBO database is bootstrapped from an empty state. It addresses the circular dependency problem (validating objects requires policies, but policies are objects) by specifying special genesis rules and establishing the `sys` identity as the system administrator.
+This document defines how an SBO database is bootstrapped from an empty state. It addresses the circular dependency problem (validating objects requires policies, but policies are objects) by specifying special genesis rules.
+
+Genesis supports two modes based on the desired trust model:
+- **Mode A: Self-signed sys** - sys is the root of trust (personal repos, sovereign users)
+- **Mode B: Domain-certified sys** - domain is the root of trust (organizations, enterprises)
 
 ---
 
-## Genesis Block Requirements
+## Genesis Modes
 
-A valid genesis block must contain exactly two objects, signed by the same key:
+### Mode A: Self-signed sys
 
+The sys identity is self-signed and serves as the root of trust.
+
+**Genesis block contains (in order):**
 ```
-POST /sys/names/sys         → system identity claim
-POST /sys/policies/root     → root policy
+1. POST /sys/names/sys         → self-signed system identity
+2. POST /sys/policies/root     → root policy (signed by sys)
 ```
 
-**Order in block:**
-1. `/sys/names/sys` first — establishes the `sys` identity
-2. `/sys/policies/root` second — establishes governance rules
+**Use cases:** Personal repos, sovereign users, development environments.
 
-Both objects must be signed by the same key. This key becomes the initial system administrator.
+### Mode B: Domain-certified sys
+
+A domain is established first, then sys is certified by that domain.
+
+**Genesis block contains (in order):**
+```
+1. POST /sys/domains/<domain>  → self-signed domain identity
+2. POST /sys/names/sys         → domain-certified system identity
+3. POST /sys/policies/root     → root policy (signed by sys)
+```
+
+**Use cases:** Organizations, enterprises, multi-tenant platforms.
 
 ---
 
 ## Genesis Objects
 
-### System Identity (`/sys/names/sys`)
+All identity and domain objects use JWT format as defined in [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md).
+
+### Domain Object (Mode B only)
 
 ```
-SBO-Version: 1
-Action: Create
-Path: /sys/names/
-Id: sys
-Content-Type: application/json
-Content-Schema: identity.v1
-Public-Key: ed25519:abc123...
+SBO-Version: 0.5
+Action: post
+Path: /sys/domains/
+ID: example.com
+Type: object
+Content-Type: application/jwt
+Content-Schema: domain.v1
+Public-Key: ed25519:<DOMAIN_KEY>
 Signature: <signature>
 
+<JWT>
+```
+
+**JWT Payload:**
+```json
 {
-  "public_key": "ed25519:abc123...",
-  "display_name": "System"
+  "iss": "self",
+  "sub": "example.com",
+  "public_key": "ed25519:<DOMAIN_KEY>",
+  "iat": 1703001234
 }
 ```
 
 **Validation:**
-- Must be valid `identity.v1` schema (see [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md))
-- Must be self-signed (`Signing-Key` header == `public_key` in payload)
+- `iss` MUST be `"self"`
+- JWT MUST be signed by `public_key` in payload
+- `Public-Key` header MUST match `public_key` in payload
+
+### System Identity (`/sys/names/sys`)
+
+**Mode A (self-signed):**
+```
+SBO-Version: 0.5
+Action: post
+Path: /sys/names/
+ID: sys
+Type: object
+Content-Type: application/jwt
+Content-Schema: identity.v1
+Public-Key: ed25519:<SYS_KEY>
+Signature: <signature>
+
+<JWT>
+```
+
+**JWT Payload (Mode A):**
+```json
+{
+  "iss": "self",
+  "sub": "sys",
+  "public_key": "ed25519:<SYS_KEY>",
+  "iat": 1703001234
+}
+```
+
+**Mode B (domain-certified):**
+
+**JWT Payload (Mode B):**
+```json
+{
+  "iss": "domain:example.com",
+  "sub": "sys@example.com",
+  "public_key": "ed25519:<SYS_KEY>",
+  "iat": 1703001234
+}
+```
+JWT is signed by the domain key from `/sys/domains/example.com`.
+
+**Validation:**
+- If `iss: "self"` → JWT signed by `public_key` in payload
+- If `iss: "domain:<domain>"` → JWT signed by domain key from `/sys/domains/<domain>`
+- `Public-Key` header MUST match `public_key` in payload
 
 ### Root Policy (`/sys/policies/root`)
 
 ```
-SBO-Version: 1
-Action: Create
+SBO-Version: 0.5
+Action: post
 Path: /sys/policies/
-Id: root
+ID: root
+Type: object
 Content-Type: application/json
 Content-Schema: policy.v2
-Public-Key: ed25519:abc123...
+Public-Key: ed25519:<SYS_KEY>
 Signature: <signature>
 
 {
@@ -79,7 +152,7 @@ Signature: <signature>
 
 **Validation:**
 - Must be valid `policy.v2` schema
-- Must be signed by the same key as `/sys/names/sys`
+- Must be signed by the sys key (from `/sys/names/sys`)
 
 ---
 
@@ -99,18 +172,36 @@ This policy is recommended but not required. Deployers may use different policie
 
 ## Genesis Validation
 
-Genesis objects are validated with special rules since no prior state exists:
+### Mode A Validation
 
 ```
-1. Both objects must be present in the same block
-2. Both must be signed by the same key
+1. /sys/names/sys and /sys/policies/root must be present in same block
+2. /sys/names/sys:
+   - Valid identity.v1 JWT with iss: "self"
+   - Self-signed (JWT signature matches public_key in payload)
+   - Public-Key header matches public_key in payload
+3. /sys/policies/root:
+   - Valid policy.v2 schema
+   - Signed by sys key
+4. All signatures must be cryptographically valid
+```
+
+### Mode B Validation
+
+```
+1. /sys/domains/<domain>, /sys/names/sys, and /sys/policies/root in same block
+2. /sys/domains/<domain>:
+   - Valid domain.v1 JWT with iss: "self"
+   - Self-signed (JWT signature matches public_key in payload)
+   - Must appear FIRST in block order
 3. /sys/names/sys:
-   - Valid identity.v1 schema
-   - Self-signed (Signing-Key matches public_key)
+   - Valid identity.v1 JWT with iss: "domain:<domain>"
+   - Signed by domain key from step 2
+   - Public-Key header matches public_key in payload
 4. /sys/policies/root:
    - Valid policy.v2 schema
    - Signed by sys key
-5. Signatures must be cryptographically valid
+5. All signatures must be cryptographically valid
 ```
 
 After genesis validation succeeds, all subsequent objects are validated using normal policy rules.
@@ -119,13 +210,15 @@ After genesis validation succeeds, all subsequent objects are validated using no
 
 ## Genesis Detection
 
-Clients identify genesis as follows:
+Clients identify genesis mode as follows:
 
 ```
 1. Start at block 0 (or first block with data for this appId)
-2. Scan for /sys/names/sys and /sys/policies/root
-3. If both present and valid → genesis found
-4. If missing or invalid → database is invalid
+2. Scan for /sys/domains/*, /sys/names/sys, and /sys/policies/root
+3. If /sys/domains/* present → Mode B
+4. If only /sys/names/sys and /sys/policies/root → Mode A
+5. Validate according to detected mode
+6. If validation fails → database is invalid
 ```
 
 **Conflict resolution:**
@@ -146,7 +239,7 @@ The canonical identity of an SBO database is:
 Where:
 - `chain` is a CAIP-2 chain identifier (e.g., `avail:mainnet`)
 - `appId` is the application ID on that chain
-- `genesis_hash` is `sha256(sys_identity_bytes || root_policy_bytes)`
+- `genesis_hash` is `sha256(all_genesis_objects_bytes)`
 
 **Example:**
 ```
@@ -253,6 +346,7 @@ DA layers may prune old blocks. When genesis block is unavailable:
 After genesis, the path structure is:
 
 ```
+/sys/domains/example.com    → domain identity (Mode B, or added post-genesis)
 /sys/names/sys              → system identity
 /sys/names/alice            → user identity
 /sys/names/bob              → user identity
@@ -264,45 +358,38 @@ After genesis, the path structure is:
 /bob/...                    → bob's namespace
 ```
 
-All identities live under `/sys/names/`. User namespaces are top-level paths matching their identity name.
+All identities live under `/sys/names/`. Domains live under `/sys/domains/`. User namespaces are top-level paths matching their identity name.
 
 ---
 
-## Post-Genesis Identity Claims
+## Post-Genesis Operations
 
-After genesis, users claim identities by posting to `/sys/names/*`:
+### Adding Domains
+
+After genesis, sys (or authorized identities per policy) can create additional domains:
 
 ```
-SBO-Version: 1
-Action: Create
-Path: /sys/names/
-Id: alice
-Content-Type: application/json
-Content-Schema: identity.v1
-Public-Key: ed25519:def456...
-Signature: <signature>
-
-{
-  "public_key": "ed25519:def456...",
-  "display_name": "Alice"
-}
+POST /sys/domains/other.com
 ```
 
-**Validation:**
-1. Policy check: root policy allows `create` on `/sys/names/*` for anyone
-2. Schema check: `identity.v1` requires self-signing
-3. Path check: `/sys/names/alice` must not already exist
+See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for domain schema.
 
-After claiming:
-- Alice can post to `/alice/**` (owner rule)
-- Alice can update `/sys/names/alice` (owner of that object)
-- No one else can modify `/sys/names/alice`
+### User Identity Claims
+
+Users claim identities by posting to `/sys/names/*`. Identities may be:
+- **Self-signed** (`iss: "self"`) - for sovereign users
+- **Domain-certified** (`iss: "domain:<domain>"`) - for email-verified users
+
+See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for identity schema and validation rules.
+
+After claiming an identity:
+- User can post to `/{name}/**` (owner rule)
+- User can update `/sys/names/{name}` (owner of that object)
+- No one else can modify `/sys/names/{name}`
 
 ---
 
-## Action Types (Updated)
-
-The `post` action is split into `create` and `update`:
+## Action Types
 
 | Action | Meaning |
 |--------|---------|
@@ -325,3 +412,9 @@ This distinction allows policies to grant `create` without `update` (e.g., first
 - URI schemes extend the existing URI specification
 
 ---
+
+## References
+
+- [SBO Identity Specification v0.1](./SBO%20Identity%20Specification%20v0.1.md)
+- [SBO Specification v0.4](./SBO%20Specification%20v0.4.md)
+- [SBO Policy Specification v0.2](./SBO%20Policy%20Specification%20v0.2.md)

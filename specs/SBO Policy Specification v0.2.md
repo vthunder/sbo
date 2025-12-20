@@ -265,22 +265,6 @@ Invalid policies must be rejected. Objects posted under an invalid policy are th
 
 ---
 
-## Migration from policy.v1
-
-The JavaScript-based `policy.v1` schema is deprecated. New policies should use `policy.v2`.
-
-| JS pattern | Declarative equivalent |
-|------------|----------------------|
-| `path.startsWith(user.name)` | `{"to": "owner", "on": "/$owner/**"}` |
-| `user.name === 'admin'` | `{"to": "admin", ...}` |
-| `user.roles.includes('mod')` | `{"to": {"role": "mod"}, ...}` |
-| `object.schema === 'nft.v1'` | `{"require": {"schema": "nft.v1"}}` |
-| `object.size < 1024` | `{"require": {"max_size": 1024}}` |
-
-Complex logic (proof validation, stateful workflows) is out of scope for `policy.v2` and will be addressed in future specifications.
-
----
-
 ## Compatibility
 
 - `policy.v2` requires no scripting engine, enabling lightweight client implementations

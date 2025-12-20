@@ -7,507 +7,370 @@ license: CC-BY-4.0
 # SBO Identity Specification v0.1
 
 **Status:** Draft
-**Date:** 2024-12-13
 
 ## Abstract
 
-This specification defines a protocol for web authentication using SBO (Signed Blockchain Objects) identities. It enables users to authenticate to web applications using cryptographic signatures, with identity discovery via DNS and HTTPS, and identity data stored on SBO.
+This specification defines how identities are established and resolved in SBO. It covers identity objects at `/sys/names/*`, domain objects at `/sys/domains/*`, and profile objects. Identities use a unified JWT format with a typed issuer field that distinguishes self-signed identities from domain-certified identities.
 
 ## Overview
 
-The protocol has three layers:
+SBO identities establish the binding between a human-readable name and a public key. The system supports two trust models:
 
-1. **Discovery Layer** - DNS and HTTPS endpoints that map email-style identifiers to SBO URIs
-2. **Identity Layer** - SBO objects containing signing keys and optional profile data
-3. **Authentication Layer** - Challenge-response protocol proving key ownership
+- **Self-signed identities** - The identity holder signs their own identity claim. Used by sys, sovereign users, and repos not requiring domain certification.
+- **Domain-certified identities** - A domain certifies the binding between an email address and a public key. Used for email-based authentication.
 
-## 1. Discovery Layer
+Both types use the same JWT schema, distinguished by the `iss` (issuer) field.
 
-### 1.1 DNS Record
-
-Domains that support SBO identity discovery MUST publish a DNS TXT record:
+## Trust Hierarchy
 
 ```
-_sbo-id.domain.com TXT "v=sbo-id1 host=<hostname>"
+Genesis
+   │
+   ├── Mode A: Self-signed sys
+   │      │
+   │      └── sys (iss: "self")
+   │             │
+   │             └── /sys/domains/* (policy-controlled)
+   │                    │
+   │                    └── /sys/names/* (domain-certified users)
+   │
+   └── Mode B: Domain-certified sys
+          │
+          └── /sys/domains/org.com (iss: "self", root of trust)
+                 │
+                 └── sys (iss: "domain:org.com")
+                        │
+                        └── /sys/names/* (domain-certified users)
 ```
 
-**Fields:**
-- `v=sbo-id1` - Protocol version (required)
-- `host=<hostname>` - Host serving the identity discovery endpoint (required)
+See [SBO Genesis Specification](./SBO%20Genesis%20Specification%20v0.1.md) for bootstrap details.
 
-**Examples:**
-```
-_sbo-id.example.com TXT "v=sbo-id1 host=example.com"
-_sbo-id.bigcorp.com TXT "v=sbo-id1 host=identity.bigcorp.com"
-```
+## Identity Schema (`identity.v1`)
 
-The DNS record serves two purposes:
-1. Indicates the domain supports SBO identity discovery
-2. Specifies which host handles discovery requests (may differ from the email domain)
+All identities use JWT format with `Content-Type: application/jwt` and `Content-Schema: identity.v1`.
 
-### 1.2 Well-Known Endpoint
+### JWT Payload
 
-The discovery host MUST serve an HTTPS endpoint at:
-
-```
-GET https://<host>/.well-known/sbo-identity/<domain>/<user>
-```
-
-Where:
-- `<domain>` is the domain part of the email address (after @)
-- `<user>` is the local part of the email address (before @)
-
-**Example:**
-```
-alice@example.com → GET https://id.example.com/.well-known/sbo-identity/example.com/alice
-```
-
-**Response (Success):**
 ```json
 {
-  "version": 1,
-  "sbo_uri": "sbo+raw://avail:mainnet:123/path/to/identity"
+  "iss": "self" | "domain:<domain>",
+  "sub": "<identifier>",
+  "public_key": "ed25519:<hex>",
+  "profile": "/path/to/profile",
+  "iat": <unix-timestamp>
 }
 ```
 
-**HTTP Status Codes:**
-- `200 OK` - Success, returns JSON with `sbo_uri`
-- `404 Not Found` - User not found, or domain not served by this host
-- `429 Too Many Requests` - Rate limited
-- `500 Internal Server Error` - Server error
+### Fields
 
-**CORS:**
-The endpoint SHOULD include CORS headers to allow browser-based discovery:
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `iss` | string | Yes | Issuer type: `"self"` or `"domain:<domain>"` |
+| `sub` | string | Yes | Subject identifier (name or email) |
+| `public_key` | string | Yes | Public key with algorithm prefix |
+| `profile` | string | No | Path to profile object |
+| `iat` | number | Yes | Issued-at timestamp (Unix seconds) |
+
+### Issuer Types
+
+| `iss` Value | Meaning | Verification |
+|-------------|---------|--------------|
+| `"self"` | Self-signed identity | JWT signed by `public_key` in payload |
+| `"domain:example.com"` | Domain-certified | JWT signed by key from `/sys/domains/example.com` |
+
+### Subject Format
+
+| `iss` Type | `sub` Format | Example |
+|------------|--------------|---------|
+| `"self"` | Name only | `"alice"` |
+| `"domain:X"` | Email address | `"alice@example.com"` |
+
+### SBO Message
+
 ```
-Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: GET
+SBO-Version: 0.5
+Action: post
+Path: /sys/names/
+ID: alice
+Type: object
+Content-Type: application/jwt
+Content-Schema: identity.v1
+Public-Key: ed25519:<USER_KEY>
+Signature: <envelope-signature>
+
+<JWT>
 ```
 
-### 1.3 Discovery Flow
+### Validation Rules
 
-To discover the SBO identity for `alice@domain.com`:
+1. `Public-Key` header MUST match `public_key` in JWT payload
+2. If `iss: "self"`:
+   - JWT MUST be signed by `public_key` in payload
+3. If `iss: "domain:<domain>"`:
+   - Fetch `/sys/domains/<domain>`
+   - JWT MUST be signed by that domain's public key
+   - `sub` email domain MUST match `iss` domain
+4. `ID` in SBO envelope SHOULD match the local part of `sub`
 
-1. Query DNS for `_sbo-id.domain.com` TXT record
-2. If no record exists, discovery fails (domain does not support SBO identity)
-3. Parse the `host` field from the DNS record
-4. Request `https://<host>/.well-known/sbo-identity/domain.com/alice`
-5. Parse the `sbo_uri` from the response
+### Examples
 
-The domain is included in the path because the discovery host may serve multiple domains. For example, if both `foo.example.com` and `bar.example.com` delegate to `id.example.com`, the path distinguishes which domain's user is being queried.
+**Self-signed identity:**
 
-**Security Note:** Implementations MUST NOT trust `.well-known` responses without first verifying the DNS record exists. This prevents attacks where a malicious actor on shared hosting creates fake discovery responses.
-
-## 2. Identity Layer
-
-### 2.1 Identity Object
-
-The SBO object at the discovered URI contains the user's identity information.
-
-**Schema:** `identity.v1`
-
-**Required Fields:**
 ```json
 {
-  "public_key": "ed25519:<hex-encoded-public-key>"
+  "iss": "self",
+  "sub": "alice",
+  "public_key": "ed25519:a1b2c3d4e5f6...",
+  "profile": "/alice/profile",
+  "iat": 1703001234
 }
 ```
 
-**All Fields:**
+**Domain-certified identity:**
+
 ```json
 {
-  "public_key": "ed25519:abc123...",
+  "iss": "domain:example.com",
+  "sub": "alice@example.com",
+  "public_key": "ed25519:a1b2c3d4e5f6...",
+  "profile": "/alice/profile",
+  "iat": 1703001234
+}
+```
+
+## Domain Schema (`domain.v1`)
+
+Domains establish public keys for organizations that certify user identities. Domain objects live at `/sys/domains/{domain}`.
+
+### JWT Payload
+
+```json
+{
+  "iss": "self",
+  "sub": "<domain>",
+  "public_key": "ed25519:<hex>",
+  "iat": <unix-timestamp>
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `iss` | string | Yes | Always `"self"` (domains are self-signed) |
+| `sub` | string | Yes | Domain name (e.g., `"example.com"`) |
+| `public_key` | string | Yes | Domain's public key with algorithm prefix |
+| `iat` | number | Yes | Issued-at timestamp (Unix seconds) |
+
+### SBO Message
+
+```
+SBO-Version: 0.5
+Action: post
+Path: /sys/domains/
+ID: example.com
+Type: object
+Content-Type: application/jwt
+Content-Schema: domain.v1
+Public-Key: ed25519:<DOMAIN_KEY>
+Signature: <signature>
+
+<JWT>
+```
+
+### Validation Rules
+
+1. `iss` MUST be `"self"`
+2. `sub` MUST match `ID` in SBO envelope
+3. JWT MUST be signed by `public_key` in payload
+4. `Public-Key` header MUST match `public_key` in payload
+
+### Access Control
+
+Creation of `/sys/domains/*` is policy-controlled. The default root policy grants this to sys only. Domains may be added by:
+- sys directly creating the domain object
+- Policy rules granting creation rights to other identities
+
+## Profile Schema (`profile.v1`)
+
+Profiles contain display information about an identity. The identity object's `profile` field points to the profile location.
+
+### Payload
+
+```json
+{
   "display_name": "Alice Smith",
-  "description": "Main identity for Alice",
+  "bio": "Software developer and open source enthusiast",
   "avatar": "/alice/avatar.png",
+  "banner": "/alice/banner.jpg",
+  "location": "San Francisco, CA",
   "links": {
     "website": "https://alice.example.com",
     "github": "https://github.com/alice"
   },
-  "binding": "sbo+raw://avail:mainnet:42/sys/names/alice"
+  "metadata": {
+    "pronouns": "she/her"
+  }
 }
 ```
 
-**Field Definitions:**
+### Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `public_key` | string | Yes | Public key in `algorithm:hex` format (e.g., `ed25519:abc...`) |
-| `display_name` | string | No | Human-readable name |
-| `description` | string | No | Text description of this identity |
-| `avatar` | string | No | Relative SBO path or absolute URL to avatar image |
+| `display_name` | string | No | Human-readable name (max 100 chars) |
+| `bio` | string | No | Short biography (max 500 chars) |
+| `avatar` | string | No | SBO path or URL to avatar image |
+| `banner` | string | No | SBO path or URL to banner image |
+| `location` | string | No | Free-text location |
 | `links` | object | No | Key-value pairs of named links |
-| `binding` | string | No | SBO URI to a canonical identity on another chain/app (for cross-chain resolution) |
+| `metadata` | object | No | Arbitrary key-value pairs |
 
-**Example SBO Message:**
+### SBO Message
+
 ```
-SBO-Version: 1
-Action: Create
+SBO-Version: 0.5
+Action: post
 Path: /alice/
-Id: identity
+ID: profile
+Type: object
 Content-Type: application/json
-Content-Schema: identity.v1
-Public-Key: ed25519:abc123...
+Content-Schema: profile.v1
+Public-Key: ed25519:<USER_KEY>
 Signature: <signature>
 
-{
-  "public_key": "ed25519:abc123...",
-  "display_name": "Alice",
-  "avatar": "/alice/avatar.png"
-}
+<JSON payload>
 ```
 
-### 2.2 Identity Ownership
+### Validation Rules
 
-The identity object MUST be signed by the private key associated with `public_key`. This proves the identity creator controls the private key.
+1. Profile MUST be signed by the identity's public key
+2. The signer's `Public-Key` MUST match the `public_key` in the identity that references this profile
 
-Verifiers MUST check that the SBO message's `Public-Key` header matches the `public_key` field in the payload.
+### Path Conventions
 
-### 2.3 Domain Identity (Optional)
+Profiles may be stored at various paths. Common conventions:
 
-Domains MAY publish their own identity object for domain-level operations:
+| Pattern | Example | Use Case |
+|---------|---------|----------|
+| `/{name}/profile` | `/alice/profile` | User namespace |
+| `/profiles/{name}` | `/profiles/alice` | Centralized collection |
 
-**Path Convention:** `/sys/domain/identity`
+The identity's `profile` field specifies the actual location.
 
-**Schema:** `domain.v1`
+## Resolution
 
-```json
-{
-  "domain": "example.com",
-  "public_key": "ed25519:def456...",
-  "admin_contact": "admin@example.com"
-}
+### Resolving an Identity
+
+```python
+def resolve_identity(repo, name):
+    # 1. Fetch identity object
+    identity = fetch(repo, f"/sys/names/{name}")
+    jwt = parse_jwt(identity.payload)
+
+    # 2. Verify based on issuer type
+    if jwt["iss"] == "self":
+        # Self-signed: verify JWT signed by its own public_key
+        verify_jwt_signature(identity.payload, jwt["public_key"])
+    else:
+        # Domain-certified: extract domain, verify against domain key
+        domain = jwt["iss"].removeprefix("domain:")
+        domain_key = resolve_domain(repo, domain)
+        verify_jwt_signature(identity.payload, domain_key)
+
+    # 3. Verify envelope matches JWT
+    assert identity.headers["Public-Key"] == jwt["public_key"]
+
+    return {
+        "public_key": jwt["public_key"],
+        "profile": jwt.get("profile")
+    }
 ```
 
-This enables:
-- Domain-level attestations
-- Verifying domain signatures
-- Trust chain establishment
+### Resolving a Domain
 
-## 3. Authentication Layer
+```python
+def resolve_domain(repo, domain):
+    # 1. Fetch domain object
+    domain_obj = fetch(repo, f"/sys/domains/{domain}")
+    jwt = parse_jwt(domain_obj.payload)
 
-### 3.1 Challenge-Response Protocol
+    # 2. Domains are always self-signed
+    assert jwt["iss"] == "self"
+    verify_jwt_signature(domain_obj.payload, jwt["public_key"])
 
-Authentication uses a challenge-response protocol:
+    # 3. Verify envelope matches JWT
+    assert domain_obj.headers["Public-Key"] == jwt["public_key"]
 
-1. **App generates challenge** - Random nonce with expiration
-2. **User signs assertion** - Signs challenge with identity key
-3. **App verifies assertion** - Checks signature against identity object
-
-### 3.2 Challenge Format
-
-Apps SHOULD generate challenges as:
-
-```json
-{
-  "challenge": "<random-nonce>",
-  "origin": "https://app.example.com",
-  "expires_at": 1702500300
-}
+    return jwt["public_key"]
 ```
 
-**Requirements:**
-- `challenge`: Minimum 16 bytes of cryptographically random data, hex or base64 encoded
-- `origin`: The requesting application's origin
-- `expires_at`: Unix timestamp, SHOULD be 5 minutes or less from issuance
+### Resolving a Profile
 
-### 3.3 Assertion Format
+```python
+def resolve_profile(repo, name):
+    # 1. Resolve identity first
+    identity = resolve_identity(repo, name)
 
-The signed assertion contains:
+    # 2. Check for profile link
+    if not identity.get("profile"):
+        return None
 
-```json
-{
-  "version": 1,
-  "identity_uri": "sbo+raw://avail:mainnet:123/alice/identity",
-  "origin": "https://app.example.com",
-  "challenge": "<challenge-from-app>",
-  "issued_at": 1702500000,
-  "expires_at": 1702500300,
-  "public_key": "ed25519:abc123...",
-  "signature": "<hex-encoded-signature>"
-}
+    # 3. Fetch and verify profile
+    profile = fetch(repo, identity["profile"])
+    assert profile.headers["Public-Key"] == identity["public_key"]
+
+    return parse_json(profile.payload)
 ```
 
-**Field Definitions:**
+## DNS Discovery
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `version` | number | Protocol version (1) |
-| `identity_uri` | string | Full SBO URI of identity object |
-| `origin` | string | Origin of requesting application |
-| `challenge` | string | Challenge from application |
-| `issued_at` | number | Unix timestamp of assertion creation |
-| `expires_at` | number | Unix timestamp of assertion expiration |
-| `public_key` | string | Public key used to sign |
-| `signature` | string | Hex-encoded signature |
-
-**Signature Computation:**
-
-The signature is computed over the canonical JSON encoding of all fields except `signature`:
+Applications discover a domain's SBO repository via DNS:
 
 ```
-message = canonical_json({
-  "version": 1,
-  "identity_uri": "...",
-  "origin": "...",
-  "challenge": "...",
-  "issued_at": ...,
-  "expires_at": ...,
-  "public_key": "..."
-})
-signature = ed25519_sign(private_key, message)
+_sbo.example.com. IN TXT "v=sbo1 chain=avail:turing appId=506"
 ```
 
-Canonical JSON: Keys sorted alphabetically, no whitespace, UTF-8 encoded.
+**Fields:**
+- `v`: Protocol version (`sbo1`)
+- `chain`: Chain identifier (`network:chain-name`)
+- `appId`: Application ID on the chain
 
-### 3.4 Verification Steps
+**Resolution flow:**
+1. Parse email domain from identity's `sub` field
+2. Query DNS for `_sbo.<domain>` TXT record
+3. Parse chain and appId to construct repository URI
+4. Fetch identity and domain objects from that repository
 
-To verify an assertion:
+## Security Considerations
 
-1. **Check expiration:** `expires_at` > current time
-2. **Check origin:** `origin` matches the verifying application's origin
-3. **Check challenge:** `challenge` matches what the application issued
-4. **Fetch identity:** Retrieve SBO object at `identity_uri`
-5. **Check key match:** `public_key` in assertion matches `public_key` in identity object
-6. **Verify signature:** Ed25519 signature is valid for the assertion message
+### Key Compromise
 
-If any check fails, reject the authentication.
+| Compromised Key | Impact | Recovery |
+|-----------------|--------|----------|
+| User key | Attacker can sign as user | Update identity with new key |
+| Domain key | Attacker can certify identities | sys updates `/sys/domains/*` |
+| sys key | Full compromise | No recovery (root of trust) |
 
-## 4. Browser Integration
+### Recommendations
 
-### 4.1 JavaScript API
+- Domain keys SHOULD be stored in HSMs
+- sys key SHOULD be stored offline (cold storage)
+- Users SHOULD store keys securely (hardware key, password manager)
+- Applications SHOULD verify identity signatures before trusting content
 
-Implementations SHOULD provide a `navigator.credentials`-compatible API:
+## Privacy Considerations
 
-```javascript
-// Request authentication
-const assertion = await navigator.credentials.get({
-  sbo: {
-    identity: "sbo+raw://avail:mainnet:123/alice/identity",
-    challenge: "server-provided-nonce"
-  }
-});
+- Identity objects are public (stored on-chain)
+- Email addresses in domain-certified identities are visible
+- Profile data is public by default
+- Users should not include sensitive information in profiles
 
-// Check if SBO credentials are available
-if ('sbo' in CredentialRequestOptions) {
-  // SBO identity supported
-}
-```
+## References
 
-### 4.2 Polyfill Architecture
-
-Browser support MAY be provided via polyfill with the following architecture:
-
-```
-┌─────────────────────────────────────────┐
-│ Web Application                         │
-│                                         │
-│   navigator.credentials.get({sbo:...})  │
-│              │                          │
-│              ▼                          │
-│   ┌─────────────────────────────────┐   │
-│   │ sbo-identity-polyfill.js        │   │
-│   │                                 │   │
-│   │ Communicates via postMessage    │   │
-│   └───────────────┬─────────────────┘   │
-│                   │                     │
-│   ┌───────────────▼─────────────────┐   │
-│   │ <iframe src="https://           │   │
-│   │   sbo-identity-provider.com/    │   │
-│   │   signer">                      │   │
-│   │                                 │   │
-│   │ - Stores encrypted keyring      │   │
-│   │ - Signs assertions              │   │
-│   │ - Prompts for password          │   │
-│   └─────────────────────────────────┘   │
-└─────────────────────────────────────────┘
-```
-
-The iframe-based signer:
-- Stores the encrypted keyring in its origin's localStorage
-- Receives signing requests via postMessage
-- Returns signed assertions
-- Provides UI for key management
-
-### 4.3 Auto-Login
-
-For automatic authentication on return visits:
-
-**Site Declaration:**
-```html
-<meta name="sbo-auth" content="challenge-endpoint=/api/sbo/challenge">
-```
-
-Or HTTP header:
-```
-SBO-Auth: challenge-endpoint=/api/sbo/challenge
-```
-
-**Challenge Endpoint Response:**
-```json
-{
-  "challenge": "<nonce>",
-  "expires_at": 1702500300
-}
-```
-
-**Flow:**
-1. User configures "auto-login" for a site in their identity provider
-2. On page load, polyfill detects site supports SBO auth
-3. If site is in auto-login list, polyfill fetches challenge
-4. Polyfill signs assertion and submits to site
-5. Site verifies and establishes session
-
-## 5. Security Considerations
-
-### 5.1 DNS Security
-
-- DNSSEC SHOULD be used to protect DNS records from spoofing
-- Implementations SHOULD cache DNS results per standard TTL rules
-- DNS lookup failures SHOULD be treated as "identity discovery not supported"
-
-### 5.2 HTTPS Security
-
-- All discovery endpoints MUST use HTTPS
-- Certificate validation MUST be performed
-- Implementations SHOULD reject self-signed certificates
-
-### 5.3 Challenge Freshness
-
-- Challenges MUST be single-use
-- Challenges SHOULD expire within 5 minutes
-- Servers MUST track issued challenges to prevent replay
-
-### 5.4 Key Storage
-
-- Private keys SHOULD be encrypted at rest
-- Keys SHOULD NOT be extractable by web pages
-- Hardware security modules or platform authenticators MAY be used
-
-### 5.5 Phishing Resistance
-
-- Assertions are bound to origin, preventing use on other sites
-- Users SHOULD verify the origin before signing
-- Identity providers SHOULD display the requesting origin prominently
-
-## 6. Privacy Considerations
-
-### 6.1 Identity Correlation
-
-- SBO identities are public and linkable across sites
-- Users concerned about correlation SHOULD use different identities per site
-- Identity providers MAY offer derived identities per origin
-
-### 6.2 Discovery Privacy
-
-- DNS and .well-known queries may reveal user identity to network observers
-- DNS-over-HTTPS (DoH) or DNS-over-TLS (DoT) SHOULD be used
-- Discovery requests could be proxied for additional privacy
-
-## 7. Examples
-
-### 7.1 Complete Authentication Flow
-
-```
-User: alice@example.com
-
-1. DNS Query
-   _sbo-id.example.com → "v=sbo-id1 host=id.example.com"
-
-2. Discovery Request
-   GET https://id.example.com/.well-known/sbo-identity/example.com/alice
-   Response: {"version":1,"sbo_uri":"sbo+raw://avail:mainnet:42/alice/identity"}
-
-3. Fetch Identity
-   GET sbo+raw://avail:mainnet:42/alice/identity
-   Response: {"public_key":"ed25519:abc123...","display_name":"Alice"}
-
-4. Generate Challenge
-   App creates: {"challenge":"x7k9m2...","origin":"https://app.com","expires_at":1702500300}
-
-5. User Signs Assertion
-   Assertion: {
-     "version": 1,
-     "identity_uri": "sbo+raw://avail:mainnet:42/alice/identity",
-     "origin": "https://app.com",
-     "challenge": "x7k9m2...",
-     "issued_at": 1702500000,
-     "expires_at": 1702500300,
-     "public_key": "ed25519:abc123...",
-     "signature": "def456..."
-   }
-
-6. App Verifies
-   - Check timestamps ✓
-   - Check origin matches ✓
-   - Check challenge matches ✓
-   - Fetch identity, check key matches ✓
-   - Verify signature ✓
-
-7. Authentication Complete
-   App creates session for alice@example.com
-```
-
-### 7.2 DNS and Well-Known Setup
-
-**DNS Record:**
-```
-_sbo-id.example.com. 3600 IN TXT "v=sbo-id1 host=example.com"
-```
-
-**File Structure:**
-```
-/.well-known/sbo-identity/
-  example.com/
-    alice       → {"version":1,"sbo_uri":"sbo://..."}
-    bob         → {"version":1,"sbo_uri":"sbo://..."}
-  other.com/
-    alice       → {"version":1,"sbo_uri":"sbo://..."}
-```
-
-Files have no extension. Content-Type should be `application/json`.
-
-**Nginx Configuration (static files):**
-```nginx
-location /.well-known/sbo-identity/ {
-    add_header Access-Control-Allow-Origin *;
-    default_type application/json;
-}
-```
-
-**Nginx Configuration (dynamic backend):**
-```nginx
-location /.well-known/sbo-identity/ {
-    add_header Access-Control-Allow-Origin *;
-    add_header Content-Type application/json;
-    proxy_pass http://identity-service/lookup/;
-}
-```
-
-## 8. References
-
-- [SBO Specification](./SBO%20Specification%20v0.4.md)
-- [SBO URI Specification](./SBO%20URI%20Specification%20v0.3.md)
-- [RFC 8615 - Well-Known URIs](https://tools.ietf.org/html/rfc8615)
-- [Web Authentication (WebAuthn)](https://www.w3.org/TR/webauthn/)
-- [Ed25519 Signatures](https://ed25519.cr.yp.to/)
-
-## Appendix A: Comparison with Existing Standards
-
-| Feature | SBO Identity | WebAuthn | OAuth/OIDC |
-|---------|--------------|----------|------------|
-| Key storage | User-controlled | Platform | Provider |
-| Identity portability | High | Low | Medium |
-| Requires provider | No | No | Yes |
-| Phishing resistance | Yes (origin-bound) | Yes | Partial |
-| Setup complexity | Medium | Low | Low |
-| Decentralized | Yes | No | No |
-
-## Appendix B: Future Extensions
-
-The following features are planned for future versions:
-
-1. **Attestations** - Third-party attestations about identity properties
-2. **Delegation** - Authorizing applications to act on behalf of user
-3. **Key Rotation** - Protocol for rotating signing keys
-4. **Recovery** - Social or backup key recovery mechanisms
-5. **Encryption** - Adding encryption keys for private messaging
+- [SBO Specification v0.4](./SBO%20Specification%20v0.4.md)
+- [SBO Wire Format Specification v0.1](./SBO%20Wire%20Format%20Specification%20v0.1.md)
+- [SBO Genesis Specification v0.1](./SBO%20Genesis%20Specification%20v0.1.md)
+- [SBO Auth Specification v0.1](./SBO%20Auth%20Specification%20v0.1.md)
+- RFC 7519: JSON Web Token (JWT)
+- RFC 8037: EdDSA Signatures in JOSE

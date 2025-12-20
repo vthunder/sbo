@@ -342,14 +342,3 @@ Lite clients can verify bridge operations using state proofs:
 - All proofs attached to actions, not stored as separate objects
 
 ---
-
-## Migration from v0.1
-
-| v0.1 | v0.2 |
-|------|------|
-| Separate `proof.v1` objects | Proofs attached to actions via `Proof` header |
-| Unspecified proof validation | Verifier objects define validation rules |
-| `/bridge/**` path | `/sys/bridge/**` path (under sys control) |
-| No import flow | Atomic `import` action for external → SBO |
-
----
