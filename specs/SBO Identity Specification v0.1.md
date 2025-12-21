@@ -325,22 +325,67 @@ def resolve_profile(repo, name):
 
 ## DNS Discovery
 
-Applications discover a domain's SBO repository via DNS:
+Applications discover a domain's SBO repository and services via DNS:
 
 ```
-_sbo.example.com. IN TXT "v=sbo1 chain=avail:turing appId=506"
+_sbo.example.com. IN TXT "v=sbo1 r=sbo+raw://avail:turing:506/ h=https://sbo.example.com"
 ```
 
 **Fields:**
 - `v`: Protocol version (`sbo1`)
-- `chain`: Chain identifier (`network:chain-name`)
-- `appId`: Application ID on the chain
+- `r`: Repository URI (required)
+- `h`: Discovery host for `.well-known/sbo` (optional, defaults to domain itself)
 
 **Resolution flow:**
 1. Parse email domain from identity's `sub` field
 2. Query DNS for `_sbo.<domain>` TXT record
-3. Parse chain and appId to construct repository URI
+3. Parse `r=` to get repository URI
 4. Fetch identity and domain objects from that repository
+
+## Service Discovery
+
+The discovery host (from `h=` field, or the domain itself if omitted) serves a JSON document at `/.well-known/sbo`:
+
+```
+GET https://sbo.example.com/.well-known/sbo
+```
+
+```json
+{
+  "version": "1",
+  "authentication": "/login",
+  "provisioning": "/.well-known/sbo/session"
+}
+```
+
+**Fields:**
+- `version`: Discovery document version (`"1"`)
+- `authentication`: Path to user-visible login page
+- `provisioning`: Path to session binding endpoint
+
+**Delegation:**
+
+A domain may delegate authentication to another host by including an `authority` field:
+
+```json
+{
+  "version": "1",
+  "authority": "login.provider.com"
+}
+```
+
+When `authority` is present, clients MUST fetch `/.well-known/sbo` from that host instead and use its endpoints.
+
+**Multi-tenant hosts:**
+
+When a discovery host serves multiple domains, endpoints accept a `?domain=` query parameter:
+
+```
+GET https://sbo.example.com/login?domain=example.com
+POST https://sbo.example.com/.well-known/sbo/session?domain=example.com
+```
+
+See [SBO Auth Specification](./SBO%20Auth%20Specification%20v0.1.md) for session binding details.
 
 ## Security Considerations
 

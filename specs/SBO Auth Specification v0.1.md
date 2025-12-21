@@ -10,58 +10,87 @@ license: CC-BY-4.0
 
 ## Abstract
 
-This specification defines a protocol for web authentication using SBO identities. Users authenticate using email addresses as identifiers, with session bindings issued by domains. The protocol provides:
+This specification defines a protocol for web authentication using SBO identities. Users authenticate using email addresses as identifiers, with nested JWT structures where user delegations are wrapped by domain endorsements. The protocol provides:
 
-- Zero key management for most users (domain-custodied)
-- Privacy preservation (domain doesn't see which apps users visit)
+- Flexible custody models (domain-custodied to full self-custody)
+- Privacy preservation (domains don't see which apps users visit)
 - Short-lived sessions without on-chain transactions
+- User's key cryptographically involved in all modes
+- Domain endorsement of session bindings
 
 This specification builds on the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) which defines identity and domain objects.
 
 ## Overview
 
-SBO Auth uses session bindings for web authentication. Session bindings are short-lived credentials issued by domains that delegate authentication to ephemeral session keys.
+SBO Auth uses **nested JWTs** for web authentication. The user signs a delegation to an ephemeral session key, and the domain wraps that delegation in a **session binding certificate** that endorses it.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
-│   IDENTITY (permanent, on-chain)                                         │
-│   See: SBO Identity Specification                                        │
+│   TRUSTED ROOTS (on-chain)                                               │
 │                                                                          │
-│   /sys/names/alice ──── certified by ──── /sys/domains/example.com       │
+│   /sys/names/alice ─────────────── /sys/domains/example.com              │
+│   (contains user's public key)     (contains domain's public key)        │
 │                                                                          │
-├─────────────────────────────────────────────────────────────────────────┤
+├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│   SESSION BINDING (short-lived, off-chain)                               │
+│   SESSION BINDING CERTIFICATE (off-chain, short-lived)                   │
 │                                                                          │
-│   SESSION_KEY ──── certified by DOMAIN_KEY ──── /sys/domains/example.com │
-│                    (session binding JWT)                                 │
+│   ┌────────────────────────────────────────────────────────────────┐     │
+│   │  Domain Wrapper (signed by DOMAIN_KEY)                         │     │
+│   │  { iss: domain, sub: email, user_delegation: ... }             │     │
+│   │                                                                │     │
+│   │   ┌────────────────────────────────────────────────────────┐   │     │
+│   │   │  User Delegation (signed by USER_KEY)                  │   │     │
+│   │   │  { iss: user_key, delegate_to: ephemeral_key }         │   │     │
+│   │   └────────────────────────────────────────────────────────┘   │     │
+│   └────────────────────────────────────────────────────────────────┘     │
 │                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   AUTH ASSERTION (per-request)                                           │
+│                                                                          │
+│   EPHEMERAL_KEY signs { iss: email, aud, nonce, iat }                    │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Terminology
 
 | Term | Definition |
 |------|------------|
-| **Session binding** | A short-lived JWT credential delegating auth to a session key |
-| **Session key** | An ephemeral key generated per-session for authentication |
-| **Auth assertion** | A JWT signed by the session key proving identity to an application |
+| **User delegation** | A JWT signed by the user's key, delegating to an ephemeral key |
+| **Session binding certificate** | A JWT signed by the domain, wrapping a user delegation |
+| **Ephemeral key** | A short-lived key generated per-session for signing assertions |
+| **Auth assertion** | A JWT signed by the ephemeral key proving identity to an application |
+| **Trusted root** | A user key or domain key that can be verified on-chain |
 
-For identity-related terms (domain, identity binding, user key), see the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md).
+For identity-related terms (domain, identity, user key), see the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md).
 
-## Session Binding
+## Identity and Custody
 
-Session bindings are short-lived credentials for web authentication. They are signed by the domain key and NOT stored on-chain.
+A user's identity object at `/sys/names/<name>` contains their public key. The identity JWT is always signed by the domain's key (as specified in the Identity Specification).
+
+**Custody** refers to who controls the private key corresponding to the public key in the identity:
+
+| Mode | Who controls user's private key |
+|------|--------------------------------|
+| Self-custody | User (via CLI, extension, etc.) |
+| Domain-custodied | Domain (on behalf of user) |
+
+The protocol is identical in both modes. The only difference is who signs the user delegation JWT.
+
+## User Delegation
+
+The user delegation is a JWT that authorizes an ephemeral key to act on the user's behalf.
 
 ### JWT Format
 
-**Signed by DOMAIN_KEY:**
+**Signed by USER_KEY:**
 ```json
 {
-  "iss": "domain:example.com",
-  "sub": "alice@example.com",
-  "delegate_key": "ed25519:<SESSION_KEY>",
+  "iss": "ed25519:<USER_PUBLIC_KEY>",
+  "delegate_to": "ed25519:<EPHEMERAL_KEY>",
   "iat": 1703001234,
   "exp": 1703087634
 }
@@ -71,25 +100,61 @@ Session bindings are short-lived credentials for web authentication. They are si
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `iss` | string | Yes | Domain issuer in format `"domain:<domain>"` |
-| `sub` | string | Yes | User's email address |
-| `delegate_key` | string | Yes | Session public key with algorithm prefix |
+| `iss` | string | Yes | User's public key with algorithm prefix |
+| `delegate_to` | string | Yes | Ephemeral key with algorithm prefix |
 | `iat` | number | Yes | Issued-at timestamp |
 | `exp` | number | Yes | Expiration timestamp |
 
 ### Requirements
 
-- `exp` MUST be set and SHOULD be no more than 24 hours from `iat`
-- `iss` domain MUST match the email domain in `sub`
-- Session binding MUST be signed by the domain key from `/sys/domains/<domain>`
+- `iss` MUST be the user's public key (from their identity object)
+- `delegate_to` MUST be the ephemeral key that will sign assertions
+- `exp` SHOULD be no more than 24 hours from `iat`
+- The JWT MUST be signed by the private key corresponding to `iss`
 
-## Auth Assertion
+## Session Binding Certificate
 
-The assertion is what the user presents to authenticate to an application.
+The session binding certificate is a JWT signed by the domain that wraps and endorses a user delegation.
 
 ### JWT Format
 
-**Signed by SESSION_KEY:**
+**Signed by DOMAIN_KEY:**
+```json
+{
+  "iss": "domain:example.com",
+  "sub": "alice@example.com",
+  "user_delegation": "<USER_DELEGATION_JWT>",
+  "iat": 1703001234,
+  "exp": 1703087634
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `iss` | string | Yes | Domain identifier: `"domain:<domain>"` |
+| `sub` | string | Yes | User's email address |
+| `user_delegation` | string | Yes | The user delegation JWT (complete, signed) |
+| `iat` | number | Yes | Issued-at timestamp |
+| `exp` | number | Yes | Expiration timestamp |
+
+### Requirements
+
+- `iss` MUST be `domain:<domain>` where `<domain>` matches the email domain in `sub`
+- `sub` MUST be the user's email address
+- `user_delegation` MUST be a valid, signed user delegation JWT
+- `exp` SHOULD be no more than 24 hours from `iat`
+- `exp` SHOULD NOT exceed the `exp` of the wrapped user delegation
+- The JWT MUST be signed by the domain's key (from `/sys/domains/<domain>`)
+
+## Auth Assertion
+
+The assertion is what the user presents to authenticate to an application. It is signed by the ephemeral key.
+
+### JWT Format
+
+**Signed by EPHEMERAL_KEY:**
 ```json
 {
   "iss": "alice@example.com",
@@ -113,44 +178,64 @@ The assertion is what the user presents to authenticate to an application.
 - `aud` MUST match the requesting application's origin
 - `nonce` MUST match the challenge provided by the application
 - `iat` MUST be recent (applications SHOULD reject assertions older than 5 minutes)
+- `iss` MUST match the `sub` field from the session binding certificate
 
 ## Flows
 
 ### Session Binding Issuance
 
+The session binding flow works identically for browser and CLI clients. The only difference is how the client handles the verification step.
+
 ```
 ┌──────────┐                              ┌──────────────┐
-│  Browser │                              │  domain.com  │
+│  Client  │                              │  domain.com  │
+│(Browser/ │                              │              │
+│  CLI)    │                              │              │
 └────┬─────┘                              └──────┬───────┘
      │                                           │
-     │  1. Generate session keypair              │
-     │     (SESSION_KEY, ephemeral)              │
+     │  1. Generate ephemeral keypair            │
      │                                           │
      │  2. Request session binding               │
      │     POST /.well-known/sbo/session         │
-     │     { email, session_public_key }         │
+     │     { email, ephemeral_public_key,        │
+     │       user_delegation? }                  │
      │  ─────────────────────────────────────────>
      │                                           │
-     │         3. Authenticate user              │
-     │            (if no valid session)          │
+     │  3. Receive request_id + verification_uri │
      │  <─────────────────────────────────────────
      │                                           │
-     │  4. Domain issues session binding JWT     │
-     │     { iss, sub, delegate_key, exp }       │
-     │     signed by DOMAIN_KEY                  │
+     │  4. Direct user to verification_uri       │
+     │     Browser: open popup                   │
+     │     CLI: print URL for user               │
+     │                                           │
+     │  5. User authenticates at domain          │
+     │     (if not already logged in)            │
+     │                                           │
+     │  6. Poll for result                       │
+     │     POST /.well-known/sbo/session/poll    │
+     │     { request_id }                        │
+     │  ─────────────────────────────────────────>
+     │                                           │
+     │  7. Receive session_binding (when ready)  │
      │  <─────────────────────────────────────────
      │                                           │
-     │  5. Browser stores:                       │
-     │     - session private key                 │
-     │     - session binding JWT                 │
+     │  8. Client stores:                        │
+     │     - ephemeral private key               │
+     │     - session binding certificate         │
      │                                           │
 ```
+
+**Domain-custodied mode:** Omit `user_delegation`. Domain signs both user delegation and session binding.
+
+**Self-custody mode:** Include `user_delegation` (signed by user's key). Domain verifies and wraps it.
 
 ### Authentication
 
+Once the client has a session binding certificate, it can authenticate to applications:
+
 ```
 ┌──────────┐                    ┌─────────┐                    ┌───────┐
-│  Browser │                    │   App   │                    │  SBO  │
+│  Client  │                    │   App   │                    │  SBO  │
 └────┬─────┘                    └────┬────┘                    └───┬───┘
      │                               │                             │
      │  1. Click "Login with SBO"    │                             │
@@ -161,30 +246,26 @@ The assertion is what the user presents to authenticate to an application.
      │  <─────────────────────────────                             │
      │                               │                             │
      │  3. Sign assertion with       │                             │
-     │     SESSION_KEY               │                             │
+     │     EPHEMERAL_KEY             │                             │
      │                               │                             │
      │  4. Send:                     │                             │
      │     - assertion JWT           │                             │
-     │     - session binding JWT     │                             │
+     │     - session binding cert    │                             │
      │  ─────────────────────────────>                             │
      │                               │                             │
-     │                               │  5. DNS lookup              │
-     │                               │     _sbo.domain.com         │
-     │                               │                             │
-     │                               │  6. Fetch domain key        │
-     │                               │     /sys/domains/domain.com │
+     │                               │  5. Verify session binding: │
+     │                               │     - Fetch domain key      │
      │                               │  ─────────────────────────────>
      │                               │                             │
-     │                               │  7. Verify:                 │
-     │                               │     - session binding       │
-     │                               │       signed by DOMAIN_KEY  │
-     │                               │     - assertion signed by   │
-     │                               │       delegate_key          │
-     │                               │     - nonce matches         │
-     │                               │     - not expired           │
+     │                               │  6. Verify user key:        │
+     │                               │     - Find identity by key  │
+     │                               │  ─────────────────────────────>
+     │                               │                             │
+     │                               │  7. Verify nested structure │
+     │                               │     + assertion             │
      │                               │                             │
      │  8. Auth success              │                             │
-     │     user = alice@domain.com   │                             │
+     │     user = alice@example.com  │                             │
      │  <─────────────────────────────                             │
      │                               │                             │
 ```
@@ -192,80 +273,169 @@ The assertion is what the user presents to authenticate to an application.
 ## Verification Algorithm
 
 ```python
-def verify_auth(assertion_jwt, session_binding_jwt, expected_nonce, expected_aud):
-    # 1. Parse JWTs
-    assertion = decode_jwt(assertion_jwt)
-    session_binding = decode_jwt(session_binding_jwt)
+def verify_auth(assertion_jwt, session_binding_cert, expected_nonce, expected_aud):
+    # 1. Parse session binding certificate (outer JWT)
+    session_binding = decode_jwt(session_binding_cert)
 
-    # 2. Extract domain from issuer
-    assert session_binding["iss"].startswith("domain:")
+    # 2. Verify domain signature
+    assert session_binding["iss"].startswith("domain:"), "Invalid issuer"
     domain = session_binding["iss"].removeprefix("domain:")
+    domain_key = fetch_domain_key(domain)  # From /sys/domains/<domain>
+    verify_jwt_signature(session_binding_cert, domain_key)
 
-    # 3. Resolve domain's SBO repository via DNS
-    dns_record = lookup_dns(f"_sbo.{domain}")
-    repo_uri = parse_sbo_dns(dns_record)
+    # 3. Check session binding expiry
+    assert session_binding["exp"] > now(), "Session binding expired"
 
-    # 4. Fetch domain key (see SBO Identity Specification)
-    domain_key = resolve_domain(repo_uri, domain)
+    # 4. Extract and parse user delegation (inner JWT)
+    user_delegation_jwt = session_binding["user_delegation"]
+    user_delegation = decode_jwt(user_delegation_jwt)
 
-    # 5. Verify session binding
-    verify_jwt_signature(session_binding_jwt, domain_key)
-    assert session_binding["exp"] > now(), "Session expired"
+    # 5. Verify user signature
+    user_key = user_delegation["iss"]
+    assert user_key.startswith("ed25519:"), "Invalid user key format"
+    verify_jwt_signature(user_delegation_jwt, parse_public_key(user_key))
 
-    # 6. Verify assertion
-    session_key = session_binding["delegate_key"]
-    verify_jwt_signature(assertion_jwt, session_key)
+    # 6. Check user delegation expiry
+    assert user_delegation["exp"] > now(), "User delegation expired"
+
+    # 7. Verify user key is registered on-chain
+    identity = fetch_identity_by_public_key(user_key)  # From /sys/names/*
+    assert identity is not None, "Unknown user key"
+
+    # 8. Verify email domain matches
+    email = session_binding["sub"]
+    email_domain = email.split("@")[1]
+    assert email_domain == domain, "Email domain mismatch"
+
+    # 9. Parse and verify assertion
+    assertion = decode_jwt(assertion_jwt)
+    ephemeral_key = get_signing_key(assertion_jwt)
+    verify_jwt_signature(assertion_jwt, ephemeral_key)
+
+    # 10. Verify assertion claims
     assert assertion["nonce"] == expected_nonce, "Nonce mismatch"
     assert assertion["aud"] == expected_aud, "Audience mismatch"
     assert assertion["iat"] > now() - 300, "Assertion too old"
+    assert assertion["iss"] == email, "Email mismatch"
 
-    # 7. Success
+    # 11. Verify ephemeral key matches delegation
+    assert user_delegation["delegate_to"] == f"ed25519:{ephemeral_key}", \
+        "Ephemeral key mismatch"
+
     return {
-        "email": session_binding["sub"],
-        "verified_at": now()
+        "email": email,
+        "user_key": user_key,
+        "domain": domain
     }
+
+
+def fetch_domain_key(domain):
+    """Fetch domain's public key from SBO repository."""
+    dns_record = lookup_dns(f"_sbo.{domain}")
+    repo_uri = parse_sbo_dns(dns_record)
+    return fetch_key_from_repo(repo_uri, f"/sys/domains/{domain}")
 ```
 
-## DNS Discovery
+## Service Discovery
 
-Applications discover a domain's SBO repository via DNS. See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md#dns-discovery) for the DNS record format.
+Applications discover a domain's SBO services via DNS and the `.well-known/sbo` document. See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md#dns-discovery) for the full discovery flow.
 
-## Session Binding Endpoint
+The discovery document provides:
+- `authentication`: Path to user-visible login page
+- `provisioning`: Path to session binding endpoint
 
-Domains MUST provide a session binding endpoint:
+For multi-tenant hosts, all endpoints accept a `?domain=` query parameter.
+
+## Session Endpoint
+
+The session endpoint issues session binding certificates. It uses a two-phase flow that works identically for browsers and CLI clients.
+
+### Phase 1: Request Session Binding
 
 ```
-POST /.well-known/sbo/session
+POST /.well-known/sbo/session?domain=example.com
 Content-Type: application/json
 
 {
   "email": "alice@example.com",
-  "session_public_key": "ed25519:abc123..."
+  "ephemeral_public_key": "ed25519:abc123...",
+  "user_delegation": "<optional: user-signed delegation JWT>"
 }
 ```
 
-**Response (Success):**
+**Response:**
 ```json
 {
-  "session_binding": "<JWT>"
+  "request_id": "Gmh8f3xK...",
+  "verification_uri": "https://auth.example.com/verify?domain=example.com&req=Gmh8f3xK...",
+  "expires_in": 900
 }
 ```
 
-**Response (Auth Required):**
+The client must direct the user to `verification_uri` to authenticate (if not already authenticated).
+
+### Phase 2: Poll for Result
+
 ```
-HTTP 401 Unauthorized
-WWW-Authenticate: <domain's auth method>
+POST /.well-known/sbo/session/poll?domain=example.com
+Content-Type: application/json
+
+{
+  "request_id": "Gmh8f3xK..."
+}
 ```
+
+**Response (pending):**
+```json
+{
+  "status": "pending"
+}
+```
+
+**Response (success):**
+```json
+{
+  "status": "complete",
+  "session_binding": "<session binding certificate JWT>"
+}
+```
+
+**Response (expired/error):**
+```json
+{
+  "status": "expired"
+}
+```
+
+### Custody Modes
+
+| `user_delegation` | Mode | Domain behavior |
+|-------------------|------|-----------------|
+| Omitted | Domain-custodied | Domain signs user delegation, wraps in session binding |
+| Provided | Self-custody | Domain verifies user delegation, wraps in session binding |
+
+When `user_delegation` is provided (self-custody):
+- Domain MUST verify the signature is valid
+- Domain MUST verify `iss` matches the user's registered public key
+- Domain MUST verify `delegate_to` matches `ephemeral_public_key`
+- Domain MUST verify the delegation is not expired
 
 ## Revocation
 
 ### Session Binding Revocation
 
-Session bindings are short-lived (recommended 24h maximum). Revocation is handled by expiry. If immediate revocation is required:
+Session binding certificates are short-lived (recommended 24h maximum). Revocation is handled by expiry. If immediate revocation is required:
 
 1. Domain rotates domain key (updates `/sys/domains/<domain>`)
 2. All outstanding session bindings become invalid
-3. Users must obtain new session bindings
+3. Users must obtain new session binding certificates
+
+### User Key Revocation
+
+For self-custody users who need to revoke their key:
+
+1. User updates their identity at `/sys/names/<name>` with new key
+2. Old user delegations fail verification (key no longer matches on-chain)
 
 ## Browser Integration
 
@@ -283,7 +453,10 @@ Browser support MAY be provided via polyfill:
 │   ┌─────────────────────────────────┐   │
 │   │ sbo-auth-polyfill.js            │   │
 │   │                                 │   │
-│   │ Communicates via postMessage    │   │
+│   │ - Discovers domain services     │   │
+│   │ - Opens verification popup      │   │
+│   │ - Polls for session binding     │   │
+│   │ - Signs assertions              │   │
 │   └───────────────┬─────────────────┘   │
 │                   │                     │
 │   ┌───────────────▼─────────────────┐   │
@@ -291,18 +464,18 @@ Browser support MAY be provided via polyfill:
 │   │   sbo-auth-provider.com/        │   │
 │   │   signer">                      │   │
 │   │                                 │   │
-│   │ - Stores encrypted session keys │   │
-│   │ - Signs assertions              │   │
+│   │ - Stores ephemeral keys         │   │
 │   │ - Manages session bindings      │   │
 │   └─────────────────────────────────┘   │
 └─────────────────────────────────────────┘
 ```
 
-The iframe-based signer:
-- Stores session keys in its origin's storage
-- Receives signing requests via postMessage
-- Returns signed assertions
-- Handles session binding refresh
+The polyfill:
+1. Fetches `.well-known/sbo` from the domain's discovery host
+2. Posts to provisioning endpoint, gets `request_id` + `verification_uri`
+3. Opens `verification_uri` in a popup for user authentication
+4. Polls until session binding is ready
+5. Closes popup, stores session binding in iframe
 
 ### JavaScript API
 
@@ -319,9 +492,30 @@ const result = await sbo.login({
   nonce: serverProvidedNonce
 });
 
-// Returns: { assertion_jwt, session_binding_jwt }
-// Send both to server for verification
+// Returns: { assertion_jwt, session_binding }
+// Send to server for verification
 ```
+
+### CLI Integration
+
+CLI clients use the same flow:
+
+```
+$ sbo auth login alice@example.com
+
+Requesting session binding...
+Please visit: https://auth.example.com/verify?domain=example.com&req=Gmh8f3xK...
+
+Waiting for authentication... (press Ctrl+C to cancel)
+✓ Session binding received
+```
+
+The CLI:
+1. Generates ephemeral keypair
+2. Posts to provisioning endpoint
+3. Prints `verification_uri` for user to open in browser
+4. Polls until session binding is ready
+5. Stores session binding locally
 
 ### Auto-Login
 
@@ -335,7 +529,7 @@ For automatic authentication on return visits:
 **Flow:**
 1. User configures "auto-login" for a site in their provider
 2. On page load, polyfill detects site supports SBO auth
-3. If site is in auto-login list, polyfill fetches challenge
+3. If site is in auto-login list and session binding is valid, polyfill fetches challenge
 4. Polyfill signs assertion and submits to site
 5. Site verifies and establishes session
 
@@ -345,14 +539,16 @@ For automatic authentication on return visits:
 
 | Compromised Key | Impact | Recovery |
 |-----------------|--------|----------|
-| Session key | Attacker can auth until expiry | Wait for expiry (max 24h) |
+| Ephemeral key | Attacker can auth until delegation expires | Wait for expiry (max 24h) |
 | Domain key | Attacker can issue session bindings | Rotate `/sys/domains/*` |
+| User key | Attacker can create delegations | Rotate identity at `/sys/names/*` |
 
 ### Recommendations
 
 - Session bindings SHOULD expire within 24 hours
+- User delegations SHOULD expire within 24 hours
 - Applications SHOULD verify assertions are recent (within 5 minutes)
-- Session keys SHOULD be stored in origin-isolated storage
+- Ephemeral keys SHOULD be stored in origin-isolated storage
 - Keys SHOULD NOT be extractable by web pages outside the provider origin
 
 ### DNS Security
@@ -363,7 +559,7 @@ For automatic authentication on return visits:
 
 ### HTTPS Security
 
-- Session binding endpoints MUST use HTTPS
+- Session endpoints MUST use HTTPS
 - Certificate validation MUST be performed
 - Implementations SHOULD reject self-signed certificates
 
@@ -406,8 +602,28 @@ For automatic authentication on return visits:
 
 ## Appendix A: JWT Examples
 
-### Session Binding JWT
+### User Delegation JWT
 
+**Signed by USER_KEY:**
+```
+Header:
+{
+  "alg": "EdDSA",
+  "typ": "JWT"
+}
+
+Payload:
+{
+  "iss": "ed25519:a1b2c3d4e5f6...",
+  "delegate_to": "ed25519:f9e8d7c6b5a4...",
+  "iat": 1703001234,
+  "exp": 1703087634
+}
+```
+
+### Session Binding Certificate
+
+**Signed by DOMAIN_KEY:**
 ```
 Header:
 {
@@ -419,7 +635,7 @@ Payload:
 {
   "iss": "domain:example.com",
   "sub": "alice@example.com",
-  "delegate_key": "ed25519:b7a3c1d4e5f6...",
+  "user_delegation": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...",
   "iat": 1703001234,
   "exp": 1703087634
 }
@@ -427,6 +643,7 @@ Payload:
 
 ### Auth Assertion JWT
 
+**Signed by EPHEMERAL_KEY:**
 ```
 Header:
 {
@@ -442,3 +659,53 @@ Payload:
   "iat": 1703001300
 }
 ```
+
+## Appendix B: Example Session Binding Certificates
+
+### Domain-Custodied
+
+Domain holds user's private key and signs both JWTs:
+
+```
+Session Binding Certificate (signed by domain key):
+{
+  "iss": "domain:example.com",
+  "sub": "alice@example.com",
+  "user_delegation": "<jwt signed by domain using custodied user key>",
+  "iat": ...,
+  "exp": ...
+}
+
+Where user_delegation decodes to:
+{
+  "iss": "ed25519:<user_public_key>",
+  "delegate_to": "ed25519:<ephemeral_key>",
+  "iat": ...,
+  "exp": ...
+}
+```
+
+### Self-Custody
+
+User signs their own delegation, domain wraps it:
+
+```
+Session Binding Certificate (signed by domain key):
+{
+  "iss": "domain:example.com",
+  "sub": "alice@example.com",
+  "user_delegation": "<jwt signed by user's own key>",
+  "iat": ...,
+  "exp": ...
+}
+
+Where user_delegation decodes to:
+{
+  "iss": "ed25519:<user_public_key>",
+  "delegate_to": "ed25519:<ephemeral_key>",
+  "iat": ...,
+  "exp": ...
+}
+```
+
+Note: The structure is identical. The difference is who signed the inner user_delegation JWT.
