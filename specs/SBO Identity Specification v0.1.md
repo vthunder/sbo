@@ -354,16 +354,16 @@ GET https://sbo.example.com/.well-known/sbo
 {
   "version": "1",
   "authentication": "/sbo/login",
-  "provisioning": "/sbo/session",
-  "provisioning_poll": "/sbo/session/poll"
+  "session": "/sbo/session",
+  "session_poll": "/sbo/session/poll"
 }
 ```
 
 **Fields:**
 - `version`: Discovery document version (`"1"`)
 - `authentication`: Path to user-visible login page
-- `provisioning`: Path to session binding initiation endpoint
-- `provisioning_poll`: Path to session binding poll endpoint (optional; defaults to `{provisioning}/poll`)
+- `session`: Path to session binding initiation endpoint
+- `session_poll`: Path to session binding poll endpoint (optional; defaults to `{session}/poll`)
 
 **Delegation:**
 

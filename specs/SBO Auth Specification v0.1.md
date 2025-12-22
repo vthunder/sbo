@@ -342,8 +342,8 @@ Applications discover a domain's SBO services via DNS and the `.well-known/sbo` 
 
 The discovery document provides:
 - `authentication`: Path to user-visible login page
-- `provisioning`: Path to session binding initiation endpoint
-- `provisioning_poll`: Path to session binding poll endpoint (optional; defaults to `{provisioning}/poll`)
+- `session`: Path to session binding initiation endpoint
+- `session_poll`: Path to session binding poll endpoint (optional; defaults to `{session}/poll`)
 
 For multi-tenant hosts, all endpoints accept a `?domain=` query parameter.
 
@@ -473,7 +473,7 @@ Browser support MAY be provided via polyfill:
 
 The polyfill:
 1. Fetches `.well-known/sbo` from the domain's discovery host
-2. Posts to provisioning endpoint, gets `request_id` + `verification_uri`
+2. Posts to session endpoint, gets `request_id` + `verification_uri`
 3. Opens `verification_uri` in a popup for user authentication
 4. Polls until session binding is ready
 5. Closes popup, stores session binding in iframe
@@ -513,7 +513,7 @@ Waiting for authentication... (press Ctrl+C to cancel)
 
 The CLI:
 1. Generates ephemeral keypair
-2. Posts to provisioning endpoint
+2. Posts to session endpoint
 3. Prints `verification_uri` for user to open in browser
 4. Polls until session binding is ready
 5. Stores session binding locally
