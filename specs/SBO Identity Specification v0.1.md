@@ -353,15 +353,17 @@ GET https://sbo.example.com/.well-known/sbo
 ```json
 {
   "version": "1",
-  "authentication": "/login",
-  "provisioning": "/.well-known/sbo/session"
+  "authentication": "/sbo/login",
+  "provisioning": "/sbo/session",
+  "provisioning_poll": "/sbo/session/poll"
 }
 ```
 
 **Fields:**
 - `version`: Discovery document version (`"1"`)
 - `authentication`: Path to user-visible login page
-- `provisioning`: Path to session binding endpoint
+- `provisioning`: Path to session binding initiation endpoint
+- `provisioning_poll`: Path to session binding poll endpoint (optional; defaults to `{provisioning}/poll`)
 
 **Delegation:**
 
@@ -381,8 +383,9 @@ When `authority` is present, clients MUST fetch `/.well-known/sbo` from that hos
 When a discovery host serves multiple domains, endpoints accept a `?domain=` query parameter:
 
 ```
-GET https://sbo.example.com/login?domain=example.com
-POST https://sbo.example.com/.well-known/sbo/session?domain=example.com
+GET https://sbo.example.com/sbo/login?domain=example.com
+POST https://sbo.example.com/sbo/session?domain=example.com
+POST https://sbo.example.com/sbo/session/poll?domain=example.com
 ```
 
 See [SBO Auth Specification](./SBO%20Auth%20Specification%20v0.1.md) for session binding details.

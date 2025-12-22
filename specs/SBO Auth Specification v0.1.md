@@ -196,7 +196,7 @@ The session binding flow works identically for browser and CLI clients. The only
      │  1. Generate ephemeral keypair            │
      │                                           │
      │  2. Request session binding               │
-     │     POST /.well-known/sbo/session         │
+     │     POST /sbo/session                     │
      │     { email, ephemeral_public_key,        │
      │       user_delegation? }                  │
      │  ─────────────────────────────────────────>
@@ -212,7 +212,7 @@ The session binding flow works identically for browser and CLI clients. The only
      │     (if not already logged in)            │
      │                                           │
      │  6. Poll for result                       │
-     │     POST /.well-known/sbo/session/poll    │
+     │     POST /sbo/session/poll                │
      │     { request_id }                        │
      │  ─────────────────────────────────────────>
      │                                           │
@@ -342,7 +342,8 @@ Applications discover a domain's SBO services via DNS and the `.well-known/sbo` 
 
 The discovery document provides:
 - `authentication`: Path to user-visible login page
-- `provisioning`: Path to session binding endpoint
+- `provisioning`: Path to session binding initiation endpoint
+- `provisioning_poll`: Path to session binding poll endpoint (optional; defaults to `{provisioning}/poll`)
 
 For multi-tenant hosts, all endpoints accept a `?domain=` query parameter.
 
@@ -353,7 +354,7 @@ The session endpoint issues session binding certificates. It uses a two-phase fl
 ### Phase 1: Request Session Binding
 
 ```
-POST /.well-known/sbo/session?domain=example.com
+POST /sbo/session?domain=example.com
 Content-Type: application/json
 
 {
@@ -377,7 +378,7 @@ The client must direct the user to `verification_uri` to authenticate (if not al
 ### Phase 2: Poll for Result
 
 ```
-POST /.well-known/sbo/session/poll?domain=example.com
+POST /sbo/session/poll?domain=example.com
 Content-Type: application/json
 
 {
