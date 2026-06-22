@@ -125,11 +125,18 @@ An attestation is authorized exactly like any other SBO write: the message must 
 - **Subject existence is not required.** The subject reference need not resolve to an existing record at issuance time. A claim about an unregistered email is valid; consumers resolve subjects at read time.
 - **A repository MAY constrain issuance via [policy](./SBO%20Policy%20Specification.md).** A community can deny `create` on `/<community-issuer>/attestations/**` to all but a role, scoping who may issue *under that repository's authoritative issuer identity*. This does not stop anyone from issuing attestations under their *own* namespace — it only governs claims made in the community's name.
 
-### Subject binding and durability
+### Choosing a subject
 
-The `subject` SHOULD reference a **`/sys/names/<name>` record** rather than a bare email when the claim is meant to persist. A name is a stable anchor that survives a change of controlling email (see the [Identity Specification](./SBO%20Identity%20Specification.md#the-sysnames-namespace)): a credential issued to the name `alice` remains attached to Alice after she transfers the name to a new provider. A claim issued to a bare email is attached to that email and does not follow the person if they move providers.
+The `subject` is an ordinary identity reference (see the [Identity Specification](./SBO%20Identity%20Specification.md#owner-references-and-resolution)), and **emails are first-class subjects** — both external emails (`alice@gmail.com`, T0) and community-issued, email-shaped names (`alice@community.org`, T1). There is no protocol preference for an on-chain name over an email; an attestation about `alice@gmail.com` is exactly as valid as one about a name.
 
-Indexers key reputation off the **resolved subject** (the name record, or the controller it grounds to), so two attestations that resolve to the same controller are about the same party.
+What an issuer actually chooses is *which identity the claim is about* — and, in particular, **who governs that identity**:
+
+- An **external email** the issuer does not control (`alice@gmail.com`) — appropriate for vouches and claims about people outside the issuer's trust boundary.
+- A **community-local identity** the issuer governs (T1) — natural when a community credentials its own members, because the claim then stays inside the trust boundary the community controls. The same identity is addressable as the email form `alice@community.org`, as the bare local name `alice`, or as the `/sys/names/alice` record; these denote one party (see the [Identity Specification](./SBO%20Identity%20Specification.md#community-issued-identities-t1)). A community **MAY** issue credentials to such local identities rather than to members' external emails.
+
+**No durability ranking.** A name is *not* a more recoverable anchor than an email. A name record's controller is itself an email, and the spec's name "recovery" is a `transfer` authorized by that controlling email — so a name is never more durable than the email behind it; it only adds a level of indirection that helps solely in a *planned* migration (transfer before the old email is lost) and adds reputation-hijack risk if a controlling email is recycled. Email providers have their own recovery flows. Choose a subject by who the claim is about and who governs that identity, not by a durability ranking.
+
+Indexers key aggregation off the **resolved subject**, so attestations that denote the same party — written as `alice`, `alice@community.org`, or the name record — aggregate together.
 
 ---
 
@@ -200,7 +207,7 @@ Any indexer can walk these to compute trust paths; the protocol stores only the 
 
 ### Portable credential
 
-A community certifies a skill, bound to Bob's durable name so it survives provider changes:
+A community certifies a skill for one of its own members (a community-governed local identity, here written in bare form):
 
 ```
 Path: /community@example.org/attestations/bob/
@@ -229,7 +236,7 @@ The subject cannot delete this — it lives in the community's namespace. The `e
 ## Security Considerations
 
 - **Issuer authority is not protocol-conferred.** Validity proves only *who* made a claim, never that the claim is *true* or that the issuer is *entitled* to make it. Consumers MUST decide which issuers they trust for which `type`s. Treating any valid attestation as authoritative is a vulnerability.
-- **Subject confusion.** Claims about a bare email do not follow a provider change; claims about a squatted or recycled name may bind to the wrong party. Prefer durable name subjects and resolve to controllers before aggregating.
+- **Subject recycling.** Any identifier can change hands: a recycled email re-targets a claim to a new party, and a recycled name (whose controlling email was recycled) silently re-targets accumulated reputation — names do not fix this, and the indirection can make it worse. This is an inherent hazard of mutable, recoverable identifiers (the accepted v1 trust level); claims that grant authority SHOULD use `expires` to bound exposure, and consumers SHOULD weigh issuer trust accordingly.
 - **Stale authority.** An authority-granting attestation without `expires` is honored indefinitely by consumers who cannot see a later deletion (offline, cached, or historical readers). Always bound authority grants with `expires`.
 - **Issuer-key compromise** lets an attacker mint claims in the issuer's name until the compromise is resolved; short expiry windows bound the blast radius. The issuer's identity-trust assumptions are those of the [Identity Specification](./SBO%20Identity%20Specification.md#security-considerations).
 
@@ -242,7 +249,7 @@ The subject cannot delete this — it lives in the community's namespace. The `e
 ## References
 
 - [SBO Specification](./SBO%20Specification.md) — object model, validity layers, last-writer-wins
-- [SBO Identity Specification](./SBO%20Identity%20Specification.md) — identity references, `/sys/names/`, authorization, subject durability
+- [SBO Identity Specification](./SBO%20Identity%20Specification.md) — identity references, `/sys/names/`, authorization, community-issued identities
 - [SBO Authorization Specification](./SBO%20Authorization%20Specification.md) — how a write is attributed to an issuer
 - [SBO Policy Specification](./SBO%20Policy%20Specification.md) — constraining who may issue under a repository's identity
 - [SBO Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) — envelope and signatures
