@@ -12,7 +12,7 @@ license: CC-BY-4.0
 Draft
 
 ## Overview
-The Simple Blockchain Object (SBO) is a minimal data model and envelope format for posting and updating structured objects to a blockchain or data availability layer in a way that supports replication, verification, and mutability. This version (v0.4) assumes a simple base layer with ordered transaction inclusion and no smart contract logic.
+The Simple Blockchain Object (SBO) is a minimal data model and envelope format for posting and updating structured objects to a blockchain or data availability layer in a way that supports replication, verification, and mutability. This version assumes a simple base layer with ordered transaction inclusion and no smart contract logic.
 
 SBO defines:
 - A human- and machine-readable object envelope
@@ -217,7 +217,7 @@ The protocol pins exactly one global anchor on chain: the **DNS root KSK**, as a
 
 Because DNSSEC is required end to end — a domain that does not run its own provider is served by a recognized broker that itself enforces DNSSEC — every attribution chains to the root KSK. There is no coverage gap and no need to mirror provider keys on chain. Trust reduces to exactly what email identity already implies: the DNS root and DNSSEC correctness, plus the deployment's designation of recognized broker(s).
 
-See the SBO Authorization Specification for the certificate and evidence formats, evidence reuse (large DNSSEC evidence may be posted once as a self-authenticating on-chain object and referenced by later writes), the required DNSSEC algorithms, and the inclusion-time clock. A zero-knowledge proof of this verification is a later optimization that shrinks evidence size and can additionally conceal the provider domain and email (enabling pseudonymous identities); it does not change the trust model.
+See the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md) for the certificate and evidence formats, evidence reuse (large DNSSEC evidence may be posted once as a self-authenticating on-chain object and referenced by later writes), the required DNSSEC algorithms, and the inclusion-time clock. A zero-knowledge proof of this verification is a later optimization that shrinks evidence size and can additionally conceal the provider domain and email (enabling pseudonymous identities); it does not change the trust model.
 
 ### Object Ownership and Authorization
 

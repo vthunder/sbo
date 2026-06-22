@@ -15,7 +15,7 @@ Draft
 
 This specification defines how identities are established, resolved, and controlled in SBO, and how `Owner`, `Creator`, and `New-Owner` references resolve to a controlling party.
 
-The **default identity is an email address**, whose control is proven by DNSSEC-anchored attribution (see [Attribution Capture](./SBO%20Specification.md#attribution-capture) in the Core Specification and the SBO Authorization Specification for the mechanism and formats). **Key-rooted** identities (`identity.v1`) are retained for genesis roots and self-sovereign users. The document also defines domain objects (`domain.v1`), profiles (`profile.v1`), the `/sys/names/` namespace, resolution and grounding rules, and the identity tiers.
+The **default identity is an email address**, whose control is proven by DNSSEC-anchored attribution (see [Attribution Capture](./SBO%20Specification.md#attribution-capture) in the Core Specification and the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md) for the mechanism and formats). **Key-rooted** identities (`identity.v1`) are retained for genesis roots and self-sovereign users. The document also defines domain objects (`domain.v1`), profiles (`profile.v1`), the `/sys/names/` namespace, resolution and grounding rules, and the identity tiers.
 
 ## Identity Kinds
 
@@ -96,14 +96,14 @@ resolve_controller(ref, seen = {}):
 
 - Resolution MUST terminate at an `EmailController` or a `KeyController` within a bounded number of hops (implementations MUST enforce a hop limit).
 - A cycle, a missing record, or exceeding the hop limit yields `Unresolved`; a message whose owner is `Unresolved` is not authorized (it is disregarded on replay, per the Core Specification).
-- An email controller MUST be groundable to the DNS root KSK via DNSSEC at the message's inclusion time (see the Authorization Specification). An email that is not DNSSEC-groundable cannot control objects.
+- An email controller MUST be groundable to the DNS root KSK via DNSSEC at the message's inclusion time (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)). An email that is not DNSSEC-groundable cannot control objects.
 
 ### Authorization
 
 A message signed by key `E` is authorized for an object owned by `O` when `resolve_controller(O)` yields:
 
 - `KeyController(K)` and `E == K` (direct signature); or
-- `EmailController(addr)` and the message's `Auth-Cert` attributes `E` to `addr`, valid at the inclusion time (see the Authorization Specification).
+- `EmailController(addr)` and the message's `Auth-Cert` attributes `E` to `addr`, valid at the inclusion time (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)).
 
 Because every step is deterministic given the message, on-chain state, and the pinned DNS root KSK, all correct clients reach the same decision (see [Validity Layers](./SBO%20Specification.md#validity-layers)).
 
@@ -230,7 +230,7 @@ A `domain.v1` object at `/sys/domains/<domain>` establishes a domain as a **root
 | Trust | On-chain, repository-scoped | DNSSEC to the pinned DNS root KSK |
 | Role | Certifies repository-internal identities (`sys`) | Attributes user writes (`Auth-Cert`) |
 
-A single domain (e.g. `community.org`) MAY play both roles, but they are distinct mechanisms with distinct keys. Provider/email-domain keys are **never** mirrored on chain; they are proven via DNSSEC per message (see the Authorization Specification).
+A single domain (e.g. `community.org`) MAY play both roles, but they are distinct mechanisms with distinct keys. Provider/email-domain keys are **never** mirrored on chain; they are proven via DNSSEC per message (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)).
 
 ## Community-Issued Identities (T1)
 
@@ -332,7 +332,7 @@ _sbo.example.com. IN TXT "v=sbo1 r=sbo+raw://avail:turing:506/ h=https://sbo.exa
 
 See the [URI Specification](./SBO%20URI%20Specification.md) and the [Genesis Specification](./SBO%20Genesis%20Specification.md) for the full resolution and bootstrap flow.
 
-> Authentication-provider discovery (`_browserid` and the provider's service endpoints) is part of browserid and is described in the SBO Authorization Specification, not here.
+> Authentication-provider discovery (`_browserid` and the provider's service endpoints) is part of browserid and is described in the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md), not here.
 
 ## Pseudonymous Identities (T2) — Roadmap
 
@@ -347,7 +347,7 @@ This makes an identity pseudonymous even to the issuer, with no trusted de-anony
 
 - **Provider compromise.** A compromised provider can attribute a user's email to an attacker's key (the standard email-trust assumption). Multi-provider backing (roadmap) and T2 reduce reliance on any single provider.
 - **Name squatting.** First-come name creation means names are claimed by whoever registers first; deployments may use stricter `/sys/names/*` policies.
-- **DNSSEC dependence.** Attribution rests on DNSSEC and the pinned DNS root KSK; see the Authorization Specification for the trust analysis.
+- **DNSSEC dependence.** Attribution rests on DNSSEC and the pinned DNS root KSK; see the [Authorization Specification](./SBO%20Authorization%20Specification.md) for the trust analysis.
 
 ## Privacy Considerations
 
