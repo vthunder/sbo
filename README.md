@@ -161,17 +161,17 @@ Create NFTs with programmable policies—not smart contracts. Define who can min
 
 ### Decentralized Identity
 
-Claim your name. Link your keys across chains. Build a verifiable identity that you control—and use it to log in to web apps.
+Your identity is your email. Sign in with it, claim a name, and build a verifiable identity and reputation you own—portable across every app.
 
 ```
-/sys/names/alice
-→ {"display_name":"Alice","public_key":"ed25519:..."}
+/sys/names/alice              (controlled by alice@example.com)
+→ {"profile":"/alice/profile"}
 
 /alice/profile
-→ {"bio":"Building the future","links":{"twitter":"@alice"}}
+→ {"display_name":"Alice","bio":"Building the future"}
 ```
 
-Web apps can authenticate users via SBO identities using email-style discovery (`alice@domain.com` → SBO identity) and challenge-response signatures. No passwords, no OAuth providers—just your key.
+Web apps authenticate users by **email identity via browserid** (DNSSEC-anchored)—no passwords, no OAuth providers. Your identity, profile, and reputation are objects you own, verifiable by anyone and portable across apps.
 
 ### User-Controlled Data
 

@@ -23,6 +23,8 @@ This document defines the state commitment structure for SBO, enabling lightweig
 - Non-existence of a path
 - Completeness of a subtree (all objects under a path)
 
+State commitment is an **optional performance and light-client feature**, not a source of canonical truth. Canonical state is defined by replaying the ordered chain and applying SBO validity (see [Validity Layers](./SBO%20Specification.md#validity-layers)); the trie and checkpoints let clients verify and sync efficiently without changing what is valid. In particular, **attribution durability does not depend on checkpoints**: a write's attribution evidence is self-authenticating against the pinned DNS root KSK (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)), so it remains verifiable by replay whether or not any checkpoint exists.
+
 ---
 
 ## Object Hash
@@ -405,7 +407,7 @@ If the subtree contains collections, it can be nested:
 
 ## Checkpoints
 
-Checkpoints are periodic on-chain commitments to state roots, enabling lite clients to sync without replaying all history.
+Checkpoints are periodic on-chain commitments to state roots, enabling lite clients to sync without replaying all history. They are **optional**: they accelerate sync but are not required for correctness, and attribution does not rely on them (see [Overview](#overview)).
 
 ### Checkpoint Object
 

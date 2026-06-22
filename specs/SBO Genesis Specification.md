@@ -172,6 +172,17 @@ This policy is recommended but not required. Deployers may use different policie
 
 ---
 
+## Trust Anchors
+
+To authorize **email-rooted** identities (the default — see the [Identity Specification](./SBO%20Identity%20Specification.md)), a repository establishes two governance-maintained trust objects, defined in the [Authorization Specification](./SBO%20Authorization%20Specification.md):
+
+- `/sys/trust/dns-root` (`dns-root.v1`) — the pinned DNS root KSK history; the single anchor for DNSSEC attribution.
+- `/sys/trust/brokers` (`brokers.v1`) — recognized fallback brokers (optional; only needed to accept emails whose domain runs no provider).
+
+These are ordinary `sys`-signed objects (authorized by the `sys` key under the root policy), not specially-validated genesis objects. They SHOULD be established at genesis or immediately after, so email-rooted writes can be authorized from the start. A repository that uses only key-rooted identities does not require them.
+
+---
+
 ## Genesis Validation
 
 ### Mode A Validation
@@ -374,15 +385,13 @@ After genesis, sys (or authorized identities per policy) can create additional d
 POST /sys/domains/other.com
 ```
 
-See [SBO Identity Specification](./SBO%20Identity%20Specification.md) for domain schema.
+`/sys/domains/*` objects are **repository root-of-trust domains** (used to certify repository-internal identities such as `sys`). They are distinct from users' email-provider domains, which are attributed via DNSSEC and never stored on chain — see the two-senses-of-domain note in the [SBO Identity Specification](./SBO%20Identity%20Specification.md#domain-objects-domainv1).
 
 ### User Identity Claims
 
-Users claim identities by posting to `/sys/names/*`. Identities may be:
-- **Self-signed** (`iss: "self"`) - for sovereign users
-- **Domain-certified** (`iss: "domain:<domain>"`) - for email-verified users
+Users claim identities by posting to `/sys/names/*`. The default kind is **email-rooted**: a name record (`identity.email.v1`) whose `Owner` is the controlling email, authorized by DNSSEC-anchored attribution. **Key-rooted** identities (`identity.v1`, self-signed) remain available for self-sovereign users. A bare email may also own objects directly, without registering a name.
 
-See [SBO Identity Specification](./SBO%20Identity%20Specification.md) for identity schema and validation rules.
+See the [SBO Identity Specification](./SBO%20Identity%20Specification.md) for identity kinds, schemas, and resolution, and the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md) for how writes are authorized.
 
 After claiming an identity:
 - User can post to `/{name}/**` (owner rule)

@@ -146,10 +146,13 @@ The `to` field in grants accepts these forms:
 |-------|---------|
 | `"owner"` | Owner of the path (from path segment) |
 | `"*"` | Anyone (public access) |
-| `"alice"` | Specific identity name (from `names/` namespace) |
-| `{"key": "secp256k1:02..."}` | Specific public key |
+| `"alice@example.com"` | A specific email-rooted identity |
+| `"alice"` | A specific name (from the `/sys/names/` namespace) |
+| `{"key": "secp256k1:02..."}` | A specific public key (key-rooted identity) |
 | `{"role": "admin"}` | Anyone with this role |
-| `{"any": ["alice", "bob"]}` | Any of these identities |
+| `{"any": ["alice@example.com", "bob"]}` | Any of these identities |
+
+A requesting message matches an identity reference when its signer **resolves** to that identity (see [Authorization](./SBO%20Identity%20Specification.md#authorization)): an email or name reference matches when the signer is attributed to that email-rooted controller; a `{"key": ...}` reference matches a direct signature by that key. Because a name and the email that controls it resolve to the same controller, both forms identify the same party — a policy MAY grant to either.
 
 ---
 
