@@ -4,7 +4,9 @@ license: CC-BY-4.0
 
 > This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-# SBO Auth Specification v0.1
+# SBO Auth Specification
+
+**Part of SBO Protocol v0.5**
 
 **Status:** Draft
 
@@ -18,7 +20,7 @@ This specification defines a protocol for web authentication using SBO identitie
 - User's key cryptographically involved in all modes
 - Domain endorsement of session bindings
 
-This specification builds on the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) which defines identity and domain objects.
+This specification builds on the [SBO Identity Specification](./SBO%20Identity%20Specification.md) which defines identity and domain objects.
 
 ## Overview
 
@@ -65,7 +67,7 @@ SBO Auth uses **nested JWTs** for web authentication. The user signs a delegatio
 | **Auth assertion** | A JWT signed by the ephemeral key proving identity to an application |
 | **Trusted root** | A user key or domain key that can be verified on-chain |
 
-For identity-related terms (domain, identity, user key), see the [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md).
+For identity-related terms (domain, identity, user key), see the [SBO Identity Specification](./SBO%20Identity%20Specification.md).
 
 ## Identity and Custody
 
@@ -338,7 +340,7 @@ def fetch_domain_key(domain):
 
 ## Service Discovery
 
-Applications discover a domain's SBO services via DNS and the `.well-known/sbo` document. See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md#dns-discovery) for the full discovery flow.
+Applications discover a domain's SBO services via DNS and the `.well-known/sbo` document. See [SBO Identity Specification](./SBO%20Identity%20Specification.md#dns-discovery) for the full discovery flow.
 
 The discovery document provides:
 - `authentication`: Path to user-visible login page
@@ -596,8 +598,8 @@ For automatic authentication on return visits:
 
 ## References
 
-- [SBO Identity Specification v0.1](./SBO%20Identity%20Specification%20v0.1.md)
-- [SBO Specification v0.4](./SBO%20Specification%20v0.4.md)
+- [SBO Identity Specification](./SBO%20Identity%20Specification.md)
+- [SBO Specification](./SBO%20Specification.md)
 - RFC 7519: JSON Web Token (JWT)
 - RFC 8037: EdDSA Signatures in JOSE
 

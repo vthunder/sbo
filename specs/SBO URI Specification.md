@@ -4,7 +4,9 @@ license: CC-BY-4.0
 
 > This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-# SBO URI Format (v0.3)
+# SBO URI Specification
+
+**Part of SBO Protocol v0.5**
 
 ## Overview
 

@@ -4,7 +4,9 @@ license: CC-BY-4.0
 
 > This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-# SBO v0.4 - Simple Blockchain Objects
+# SBO — Simple Blockchain Objects
+
+**Part of SBO Protocol v0.5**
 
 ## Status
 Draft
@@ -76,23 +78,23 @@ SBO does not define a hard-coded (assumed) ownership semantics for paths, but th
 
 Object references may be relative to the path of the object they are in, or absolute. For example, given two objects in the same collection, one object may refer to the other without a path.
 
-Note that some references (owner, creator in particular) refer to identity objects in the names/ namespace as specified in the [Name Resolution Spec](#name-resolution-spec-v01).
+Note that some references (owner, creator in particular) refer to identity objects in the names/ namespace as specified in the [Identity Specification](./SBO%20Identity%20Specification.md).
 
 ## Creators
 
-SBO includes an identity name resolution system that allows users to map human-readable names to public keys or other identity objects. See the [Name Resolution Spec](#name-resolution-spec-v01) for details.
+SBO includes an identity name resolution system that allows users to map human-readable names to public keys or other identity objects. See the [Identity Specification](./SBO%20Identity%20Specification.md) for details.
 
 When an object is owned by the same identity as the collection it is in, references to the object may omit the creator's identity (e.g. `abc` instead of `userA:abc`). Otherwise, the creator's identity must be specified to prevent collisions and ambiguity.
 
 ## URIs
 
-SBO objects may be referenced using SBO URIs, which provide a more complete way to identify objects including cross-chain references and historical states. See the [SBO URI Format](#sbo-uri-format-v02) for details.
+SBO objects may be referenced using SBO URIs, which provide a more complete way to identify objects including cross-chain references and historical states. See the [SBO URI Specification](./SBO%20URI%20Specification.md) for details.
 
 ## On-Chain Messages
 
 Objects are defined and manipulated via messages posted on chain. These messages represent specific actions (post, transfer, delete, etc.).
 
-Each message contains a header envelope and (where appropriate) a payload. The canonical wire format is defined in the [SBO Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md).
+Each message contains a header envelope and (where appropriate) a payload. The canonical wire format is defined in the [SBO Wire Format Specification](./SBO%20Wire%20Format%20Specification.md).
 
 ### Envelope Format
 
@@ -117,7 +119,7 @@ Another-Header: value
 | `Content-Type` | MIME type of payload (required if payload present) |
 | `Content-Length` | Size of the payload in bytes (required if payload present) |
 | `Content-Hash` | Hash of payload with algorithm prefix (required if payload present) |
-| `Signing-Key` | Public key with algorithm prefix, e.g. `secp256k1:02a1b2...` |
+| `Public-Key` | Public key with algorithm prefix, e.g. `secp256k1:02a1b2...` |
 | `Signature` | Signature bytes in lowercase hex |
 
 **Note:** Content headers (`Content-Type`, `Content-Length`, `Content-Hash`) are required when a payload is present. For `Type: object`, payload is always required. For `Type: collection`, payload is optional (used for metadata like name, description).
@@ -142,7 +144,7 @@ Another-Header: value
 | `Object-Path` | Destination path for `import` action |
 | `Attestation` | Base64-encoded attestation for `import` action |
 
-See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for complete details on header ordering, cryptographic formats, and signature computation.
+See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) for complete details on header ordering, cryptographic formats, and signature computation.
 
 ### ID, Path, and Type
 
@@ -165,7 +167,7 @@ Valid values for `action` are:
 - `post`: Create a new object or post an updated version. This is the only action used to create or mutate object content or headers.
 - `transfer`: Move, rename, and/or change ownership of an object. Requires at least one of `New-Owner`, `New-Path`, or `New-ID`. For bridge unlocks, requires `Proof-Type` and `Proof` headers with oracle attestation.
 - `delete`: Mark an object as removed. Modeled as a transfer to a null owner (`null:`).
-- `import`: Atomically create a registry entry and object for cross-chain imports. Requires `Origin`, `Registry-Path`, `Object-Path`, and `Attestation` headers. See [Bridge Specification](./SBO%20Bridge%20Specification%20v0.2.md).
+- `import`: Atomically create a registry entry and object for cross-chain imports. Requires `Origin`, `Registry-Path`, `Object-Path`, and `Attestation` headers. See [Bridge Specification](./SBO%20Bridge%20Specification.md).
 
 ### Related Objects
 
@@ -179,7 +181,9 @@ Example: `Related: [{"rel":"license","ref":"sbo+raw://avail:mainnet:13/licenses/
 
 The signature covers all header bytes (in canonical order) plus the trailing blank line, **excluding the `Signature` header entirely**. The payload is protected indirectly via `Content-Hash`.
 
-See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for the exact signature computation algorithm.
+See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) for the exact signature computation algorithm.
+
+**Note:** `Content-Hash` covers only the payload. Separately, the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md) defines an `object_hash` over the complete wire-format message (headers + payload); that hash, not `Content-Hash`, is what the state trie commits to.
 
 ## Rules
 
@@ -193,7 +197,7 @@ See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1
 
 ### Object Ownership
 
-Ownership of an object is determined by the `Owner` header. This header points to an identity record as specified in the [Name Resolution Specification](./SBO%20Name%20Resolution%20Specification%20v0.1.md).
+Ownership of an object is determined by the `Owner` header. This header points to an identity record as specified in the [Identity Specification](./SBO%20Identity%20Specification.md).
 
 Ownership may be transferred to another identity via a transfer message.
 
@@ -237,7 +241,7 @@ For example, to post to `/foo/bar/baz`:
 3. Use the first collection object with `Policy-Ref` found
 4. If none exists, the message is considered invalid and discarded.
 
-Policy objects themselves are specified in ... (a future spec).
+Policy objects themselves are specified in the [Policy Specification](./SBO%20Policy%20Specification.md).
 
 ## Future Extensions
 - The `update_type` field supports future merge strategies (e.g., diffs, CRDTs).

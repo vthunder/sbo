@@ -4,7 +4,9 @@ license: CC-BY-4.0
 
 > This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-# SBO Identity Specification v0.1
+# SBO Identity Specification
+
+**Part of SBO Protocol v0.5**
 
 **Status:** Draft
 
@@ -43,7 +45,7 @@ Genesis
                         └── /sys/names/* (domain-certified users)
 ```
 
-See [SBO Genesis Specification](./SBO%20Genesis%20Specification%20v0.1.md) for bootstrap details.
+See [SBO Genesis Specification](./SBO%20Genesis%20Specification.md) for bootstrap details.
 
 ## Identity Schema (`identity.v1`)
 
@@ -388,7 +390,7 @@ POST https://sbo.example.com/sbo/session?domain=example.com
 POST https://sbo.example.com/sbo/session/poll?domain=example.com
 ```
 
-See [SBO Auth Specification](./SBO%20Auth%20Specification%20v0.1.md) for session binding details.
+See [SBO Auth Specification](./SBO%20Auth%20Specification.md) for session binding details.
 
 ## Security Considerations
 
@@ -416,9 +418,9 @@ See [SBO Auth Specification](./SBO%20Auth%20Specification%20v0.1.md) for session
 
 ## References
 
-- [SBO Specification v0.4](./SBO%20Specification%20v0.4.md)
-- [SBO Wire Format Specification v0.1](./SBO%20Wire%20Format%20Specification%20v0.1.md)
-- [SBO Genesis Specification v0.1](./SBO%20Genesis%20Specification%20v0.1.md)
-- [SBO Auth Specification v0.1](./SBO%20Auth%20Specification%20v0.1.md)
+- [SBO Specification](./SBO%20Specification.md)
+- [SBO Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)
+- [SBO Genesis Specification](./SBO%20Genesis%20Specification.md)
+- [SBO Auth Specification](./SBO%20Auth%20Specification.md)
 - RFC 7519: JSON Web Token (JWT)
 - RFC 8037: EdDSA Signatures in JOSE

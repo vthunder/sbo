@@ -209,17 +209,20 @@ The [reference implementation README](./reference_impl/README.md) includes quick
 
 ## Specifications
 
+The specs collectively define **SBO Protocol v0.5** (the authoritative protocol version, carried in the `SBO-Version` message header). Individual spec documents are no longer separately versioned; each declares the protocol version it belongs to.
+
 | Spec | What it covers |
 |------|----------------|
-| [Core Spec](./specs/SBO%20Specification%20v0.4.md) | Object model, actions, paths, ownership |
-| [Wire Format](./specs/SBO%20Wire%20Format%20Specification%20v0.1.md) | Message serialization, signatures |
-| [URI Spec](./specs/SBO%20URI%20Specification%20v0.3.md) | Cross-chain references |
-| [Policy Spec](./specs/SBO%20Policy%20Specification%20v0.2.md) | Declarative access control |
-| [Name Resolution](./specs/SBO%20Name%20Resolution%20Specification%20v0.1.md) | Identity and naming |
-| [Identity Spec](./specs/SBO%20Identity%20Specification%20v0.1.md) | Web authentication, identity schema |
-| [Genesis Spec](./specs/SBO%20Genesis%20Specification%20v0.1.md) | Bootstrap sequence |
-| [Bridge Spec](./specs/SBO%20Bridge%20Specification%20v0.2.md) | Cross-chain imports |
-| [State Commitment](./specs/SBO%20State%20Commitment%20Specification%20v0.2.md) | Trie proofs |
+| [Core Spec](./specs/SBO%20Specification.md) | Object model, actions, paths, ownership |
+| [Wire Format](./specs/SBO%20Wire%20Format%20Specification.md) | Message serialization, signatures |
+| [URI Spec](./specs/SBO%20URI%20Specification.md) | Cross-chain references |
+| [Policy Spec](./specs/SBO%20Policy%20Specification.md) | Declarative access control |
+| [Identity Spec](./specs/SBO%20Identity%20Specification.md) | Identity, domain, and profile schemas; name resolution |
+| [Auth Spec](./specs/SBO%20Auth%20Specification.md) | Web authentication with SBO identities |
+| [Genesis Spec](./specs/SBO%20Genesis%20Specification.md) | Bootstrap sequence |
+| [Bridge Spec](./specs/SBO%20Bridge%20Specification.md) | Cross-chain imports |
+| [State Commitment](./specs/SBO%20State%20Commitment%20Specification.md) | Trie proofs |
+| [NFT Schema](./specs/SBO%20NFT%20Schema.md) | Embedded-media NFT payload schema |
 
 ---
 

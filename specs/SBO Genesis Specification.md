@@ -4,7 +4,9 @@ license: CC-BY-4.0
 
 > This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-# SBO Genesis Specification (v0.1)
+# SBO Genesis Specification
+
+**Part of SBO Protocol v0.5**
 
 ## Status
 Draft
@@ -50,7 +52,7 @@ A domain is established first, then sys is certified by that domain.
 
 ## Genesis Objects
 
-All identity and domain objects use JWT format as defined in [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md).
+All identity and domain objects use JWT format as defined in [SBO Identity Specification](./SBO%20Identity%20Specification.md).
 
 ### Domain Object (Mode B only)
 
@@ -372,7 +374,7 @@ After genesis, sys (or authorized identities per policy) can create additional d
 POST /sys/domains/other.com
 ```
 
-See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for domain schema.
+See [SBO Identity Specification](./SBO%20Identity%20Specification.md) for domain schema.
 
 ### User Identity Claims
 
@@ -380,7 +382,7 @@ Users claim identities by posting to `/sys/names/*`. Identities may be:
 - **Self-signed** (`iss: "self"`) - for sovereign users
 - **Domain-certified** (`iss: "domain:<domain>"`) - for email-verified users
 
-See [SBO Identity Specification](./SBO%20Identity%20Specification%20v0.1.md) for identity schema and validation rules.
+See [SBO Identity Specification](./SBO%20Identity%20Specification.md) for identity schema and validation rules.
 
 After claiming an identity:
 - User can post to `/{name}/**` (owner rule)
@@ -415,6 +417,6 @@ This distinction allows policies to grant `create` without `update` (e.g., first
 
 ## References
 
-- [SBO Identity Specification v0.1](./SBO%20Identity%20Specification%20v0.1.md)
-- [SBO Specification v0.4](./SBO%20Specification%20v0.4.md)
-- [SBO Policy Specification v0.2](./SBO%20Policy%20Specification%20v0.2.md)
+- [SBO Identity Specification](./SBO%20Identity%20Specification.md)
+- [SBO Specification](./SBO%20Specification.md)
+- [SBO Policy Specification](./SBO%20Policy%20Specification.md)

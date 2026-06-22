@@ -6,6 +6,8 @@ license: CC-BY-4.0
 
 # SBO NFT Schema: `nft.v1`
 
+**Part of SBO Protocol v0.5**
+
 ## Status
 Draft
 
@@ -86,6 +88,6 @@ Content-Schema: nft.v1
 
 - The full payload (including embedded media) is protected by `Content-Hash`, which is covered by the SBO signature.
 - Objects using this schema can be referenced, transferred, or bridged according to the core SBO rules.
-- See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification%20v0.1.md) for signature computation details.
+- See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) for signature computation details.
 
 ---
