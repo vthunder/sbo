@@ -222,6 +222,7 @@ The specs collectively define **SBO Protocol v0.5** (the authoritative protocol 
 | [Attestation Spec](./specs/SBO%20Attestation%20Specification.md) | Signed claims (membership, roles, vouches, credentials); off-chain reputation |
 | [Community Spec](./specs/SBO%20Community%20Specification.md) | Self-owned communities: membership, roles, moderation, governance |
 | [Content Spec](./specs/SBO%20Content%20Specification.md) | Posts, comments, reactions; local-first write model (HLC, tip/confirmed, durability tiers) |
+| [Indexer & Client Spec](./specs/SBO%20Indexer%20and%20Client%20Specification.md) | Verifiable reads against untrusted indexers; client conformance |
 | [Genesis Spec](./specs/SBO%20Genesis%20Specification.md) | Bootstrap sequence |
 | [Bridge Spec](./specs/SBO%20Bridge%20Specification.md) | Cross-chain imports |
 | [State Commitment](./specs/SBO%20State%20Commitment%20Specification.md) | Trie proofs |
