@@ -40,6 +40,8 @@ Within either layout, a community subdivides into **spaces** (channels, subforum
 
 Deployments SHOULD prefer repository-per-community where self-ownership matters; aggregation is an explicit trade of sovereignty for shared operation.
 
+The two layouts **may coexist in one repository**: a `/sys/community` descriptor (the repo is itself a community, with members and spaces) alongside `/communities/<id>` hosted sub-communities. This models a top-level community that also hosts others. Their subtrees are disjoint, so every object's governing community is unambiguous — whichever descriptor's subtree contains it — provided the repo-level community's `members`/`spaces` paths do not overlap `/communities/` (the defaults do not). A hosted sub-community is **not sovereign**: because [policies cascade](./SBO%20Policy%20Specification.md) down the hierarchy, its policy operates under the repository's root policy, which can override or lock its paths. Full sovereignty requires repository-per-community.
+
 ## The `community.v1` Object
 
 ### Envelope
