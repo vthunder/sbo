@@ -206,8 +206,10 @@ Optional headers appear after required headers, in alphabetical order:
 | `Content-Encoding` | enum | `utf-8`, `gzip`, or `base64` |
 | `Content-Schema` | string | Payload schema identifier (e.g., `nft.v1`) |
 | `Creator` | identity ref | Original creator (defaults to signer) |
+| `HLC` | `<physical>.<counter>` | Author hybrid logical clock — ordering key for the write model (see the [Content Specification](./SBO%20Content%20Specification.md#author-clock-hlc)) |
 | `Owner` | identity ref | Current owner (defaults to creator) |
 | `Policy-Ref` | SBO URI | Reference to governing policy object |
+| `Prev` | prefixed | `object_hash` of the prior observed version — causal link for mutable write-model objects (see the [Content Specification](./SBO%20Content%20Specification.md#causal-links-prev)) |
 | `Proof` | base64 | Proof data for bridge unlocks |
 | `Proof-Type` | string | Type of proof (e.g., `burn`) |
 | `Related` | JSON array | Related object references (see below) |
@@ -228,21 +230,23 @@ For signature computation, headers MUST appear in this order:
 10. `Attestation` (if present)
 11. `Content-Schema` (if present)
 12. `Creator` (if present)
-13. `New-ID` (if present)
-14. `New-Owner` (if present)
-15. `New-Path` (if present)
-16. `Object-Path` (if present)
-17. `Origin` (if present)
-18. `Owner` (if present)
-19. `Policy-Ref` (if present)
-20. `Proof` (if present)
-21. `Proof-Type` (if present)
-22. `Registry-Path` (if present)
-23. `Related` (if present)
-24. `Auth-Cert` (if present)
-25. `Auth-Evidence` (if present)
-26. `Public-Key`
-27. `Signature`
+13. `HLC` (if present)
+14. `New-ID` (if present)
+15. `New-Owner` (if present)
+16. `New-Path` (if present)
+17. `Object-Path` (if present)
+18. `Origin` (if present)
+19. `Owner` (if present)
+20. `Policy-Ref` (if present)
+21. `Prev` (if present)
+22. `Proof` (if present)
+23. `Proof-Type` (if present)
+24. `Registry-Path` (if present)
+25. `Related` (if present)
+26. `Auth-Cert` (if present)
+27. `Auth-Evidence` (if present)
+28. `Public-Key`
+29. `Signature`
 
 `Auth-Cert` and `Auth-Evidence` precede `Public-Key`, so they are inside the signed header block: the signer commits to its own authentication certificate and DNSSEC evidence, and neither can be stripped or substituted.
 
