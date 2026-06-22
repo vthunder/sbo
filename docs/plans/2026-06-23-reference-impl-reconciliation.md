@@ -65,6 +65,46 @@ Verifiable query responses (results + State Commitment proofs + state root); com
 
 ---
 
+## Phase 1 — detail (research locked 2026-06-23)
+
+### Tech choices (locked)
+- **`browserid-core`** (path-local crate at `~/src/browserid-ng/browserid-core`, reusable, not on crates.io) — depend on it directly. Provides `Certificate` (parse/verify/is_expired), `DnsRecord::parse` (`_browserid` TXT: `v=browserid1; public-key-algorithm=Ed25519; public-key=<b64url>`), `PublicKey`, `KeyPair`. **Cert = EdDSA JWT**, claims `CertificateClaims { iss, exp, iat?, public_key, principal: Email{email} }`; signed by the issuer (provider/broker) key; binds the ephemeral `public_key` (= SBO `Public-Key` header) ↔ email.
+- **`dnssec-prover`** (crates.io, TheBlueMatt; no-std+alloc, minimal deps) — RFC 9102 transferable DNSSEC proofs. Default `validation` feature = OFFLINE verify a proof against a single pinned root key (THE deterministic verifier). `std`/`query` feature = build the proof by querying a resolver (the capture step). No-std means it can later run inside the zkVM guest.
+- browserid-ng's own DNSSEC is LIVE-query + AD-flag only (`browserid-broker/src/dns_fetcher.rs`, hickory-client) — NOT reusable for deterministic verification; that's why we use `dnssec-prover`.
+
+### Auth-Cert / Auth-Evidence formats
+- **`Auth-Cert`** = the browserid `Certificate` JWT (base64url JOSE), as defined by browserid-core.
+- **`Auth-Evidence`** = an RFC 9102 DNSSEC proof of `_browserid.<provider-domain>` (the provider key), serialized; inline (`inline:<b64>`) or `ref:<sbo-ref>` to a self-authenticating `dnssec.v1` object (post-once-reference-many).
+
+### Deterministic verifier algorithm (the L2 attribution check)
+Given a message, its `Auth-Cert`, `Auth-Evidence`, `Public-Key`, and the DA block **inclusion time** `t`, plus pinned anchors `/sys/trust/dns-root` (root KSK) and `/sys/trust/brokers`:
+1. Parse `Auth-Cert` → `iss` (domain), `principal.email`, `public_key`, `exp`, `iat`. Require `public_key == Public-Key` header.
+2. Verify `Auth-Evidence` (RFC 9102 proof) against the pinned **root KSK** → yields the validated `_browserid.<iss>` provider key + the proof's RRSIG validity window. (No live DNS.)
+3. Check the inclusion time `t` lies within: the proof's RRSIG window AND the cert `[iat, exp]`.
+4. Verify the cert signature against the validated provider key.
+5. Authority binding: `email`'s domain == `iss` (primary), OR `iss` ∈ pinned `/sys/trust/brokers` (broker path; broker enforces DNSSEC itself).
+→ Conclusion: `Public-Key` speaks for `email` at inclusion time `t`. (Deterministic ⇒ all replayers converge.)
+
+### Capture flow (client/online; real broker)
+Broker `id.sandmill.org`: `GET /.well-known/browserid` → `{public-key, authentication:/auth, provisioning:/provision}`. `/auth` = `/wsapi/authenticate_user` `{email, pass}` → session cookie. `/provision` = `/wsapi/cert_key` `{email, pubkey:{algorithm,publicKey}, ephemeral}` → `{success, cert, reason}`. Then build the `_browserid` RFC 9102 proof via `dnssec-prover` query. Tests mock all of this.
+
+### Delete-map (browserid-clone auth — the "actively wrong" code)
+- **`sbo-core/src/jwt.rs`**: DELETE `UserDelegationClaims`/`SessionBindingClaims`/`AuthAssertionClaims`/`VerifiedAuth` (≈150–204), `create_user_delegation`/`create_auth_assertion` (≈444–485), the 3 `decode_*_claims` for them (≈487–500), `verify_session_binding`/`verify_user_delegation`/`verify_auth_assertion`/`verify_auth_chain` (≈502–642), and their tests (≈753–930). **KEEP** generic JWT infra (JwtError/Algorithm/JwtHeader/Issuer), `IdentityClaims` (identity.v1), `DomainClaims` (domain.v1), `Profile`, encode/decode/verify helpers, `create_self_signed_identity`/`create_domain_certified_identity`/`create_domain` + their verifies + tests.
+- **`sbo-core/src/dns.rs`**: DELETE `DiscoveryDocument`+`fetch_discovery*` (`.well-known/sbo` auth discovery, ≈174–247), `_sbo-id` email-identity discovery (`SboIdRecord`/`IdentityDiscoveryResponse`/`parse_sbo_id_record`/`resolve_identity_host`/`resolve_email`, ≈264–380). **KEEP** `SboRecord`/`parse_sbo_record`/`resolve`/`is_dns_uri`/`resolve_uri` (domain/repo discovery), `parse_email`.
+- **`sbo-cli`**: DELETE `commands/auth.rs` + `commands/session.rs` entirely; remove their `mod` decls in `commands/mod.rs`; remove `AuthCommands` enum + dispatch in `main.rs`; REWRITE the email-identity flows in `commands/identity.rs` (`import_email`/`create_domain_certified`/`resolve`, ≈713–1184) for the new model (or stub until built).
+- **`sbo-daemon`**: DELETE the 4 IPC handlers `RequestSessionBinding`/`PollSessionBinding`/`RequestIdentityProvisioning`/`PollIdentityProvisioning` (`main.rs` ≈1406–1838) + their state maps + the Request variants in `ipc.rs`.
+- **`sbo-auth-demo`**: DELETE the entire crate + remove from root `Cargo.toml` `members`.
+
+### Sub-step sequencing (each build-green, commit)
+1. **Delete** the browserid-clone (above). Build green, tests pass (functionality reduced — no auth flow yet). Reviewable commit.
+2. **`identity.email.v1`** schema + validation (controller = `Owner`, payload `{profile?, iat}`); keep key-rooted `identity.v1` for roots.
+3. **Attribution module**: depend on `browserid-core` + `dnssec-prover`; implement the verifier algorithm above; pin `/sys/trust/dns-root` + `/sys/trust/brokers`; mock cert + mock RFC 9102 proof + test root KSK fixtures + tests.
+4. **resolve_controller** (email vs key) + Owner→name→email indirection + hop limits + grounding.
+5. **Two-layer validity wiring**: L1 envelope validity deterministic; L2 attribution at inclusion time; well-formed-but-unattributed carried-but-filtered.
+6. **Capture** (CLI/daemon): real broker `/provision` + `dnssec-prover` query to emit `Auth-Cert`/`Auth-Evidence`; rewrite the CLI identity flows. (browserid HTTP endpoint cert wrinkle may force mock issuance temporarily — DNS evidence is real.)
+
+---
+
 ## Conventions
 - Rust workspace; `cargo build` + `cargo test` green at each phase. Optional `--features zkvm`.
 - Commit per phase (style: `feat(impl): ...` or similar). On `main` per user preference unless a phase risks a long red build — then a branch.
