@@ -201,6 +201,7 @@ Optional headers appear after required headers, in alphabetical order:
 
 | Header | Format | Description |
 |--------|--------|-------------|
+| `Auth-Cert` | JWT (base64url) | Authentication certificate binding `Public-Key` to an identity (see below) |
 | `Content-Encoding` | enum | `utf-8`, `gzip`, or `base64` |
 | `Content-Schema` | string | Payload schema identifier (e.g., `nft.v1`) |
 | `Creator` | identity ref | Original creator (defaults to signer) |
@@ -237,8 +238,11 @@ For signature computation, headers MUST appear in this order:
 21. `Proof-Type` (if present)
 22. `Registry-Path` (if present)
 23. `Related` (if present)
-24. `Public-Key`
-25. `Signature`
+24. `Auth-Cert` (if present)
+25. `Public-Key`
+26. `Signature`
+
+`Auth-Cert` precedes `Public-Key`, so it is inside the signed header block: the signer commits to its own authentication certificate and it cannot be stripped or substituted.
 
 ---
 
@@ -384,6 +388,14 @@ Identity references appear in:
 - `New-Owner` header
 
 ---
+
+## Authentication Certificate
+
+The `Auth-Cert` header carries the evidence that binds the signing key (`Public-Key`) to an identity — the **attribution** evidence required by the Validity Layers model in the [Core Specification](./SBO%20Specification.md). For email-rooted identities, its value is an authentication certificate (a JWT issued by an external identity provider) asserting that the signing key speaks for a given email address. The SBO envelope itself serves as the proof-of-possession: the identity provider issues the certificate over the signing key, and that key signs the message — so no separate, audience-bound assertion is needed, and a signature cannot be replayed to authorize a different message.
+
+The certificate is verified together with **DNSSEC evidence** that anchors the issuing provider's key to the pinned DNS root KSK (see Attribution Capture in the [Core Specification](./SBO%20Specification.md)). That evidence may be carried inline or referenced from a self-authenticating evidence object already on chain; either way attribution is verifiable from the replayable record alone, with no network access.
+
+`Auth-Cert` is OPTIONAL at the wire level (genesis roots and key-rooted identities authorize directly via `Public-Key` and need no certificate). When attribution is required to authorize a message, the certificate MUST be present so the evidence is recorded on chain at inclusion. The certificate and DNSSEC-evidence formats, issuance, validity windows, and verification are defined in the SBO Authorization Specification.
 
 ## Related Objects
 

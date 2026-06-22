@@ -195,13 +195,44 @@ See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) fo
   - Other specific rules as defined below
 - Unless otherwise specified or constrained by a policy object, the canonical state of an object is determined using a Last-Write-Wins (LWW) policy.
 
-### Object Ownership
+### Validity Layers
 
-Ownership of an object is determined by the `Owner` header. This header points to an identity record as specified in the [Identity Specification](./SBO%20Identity%20Specification.md).
+SBO distinguishes two layers of validity, because they have fundamentally different verification properties:
 
-Ownership may be transferred to another identity via a transfer message.
+- **Envelope validity (Layer 1)** is self-contained and deterministic. It depends only on the message bytes and on prior on-chain state: well-formedness (see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)), a correct `Signature` over the canonical headers, a matching `Content-Hash`, and conformance to the applicable policy evaluated over keys and objects already on chain. Layer 1 is therefore *objective*: every client that replays the chain computes the same result, from genesis, forever. SBO is a based design — writers post directly to the data-availability layer and nothing SBO-aware gatekeeps inclusion — so Layer 1 is established by clients on replay, not enforced by a privileged operator. Its objectivity comes from determinism, not from a sequencer.
+
+- **Attribution (Layer 2)** binds a signing key to an *identity* — for example, an email address controlled through an external identity provider. Attribution concerns data that originates outside the chain (the provider's keys), so it does not become objective for free. SBO makes it objective by requiring that the evidence be **self-authenticating against a single on-chain anchor** and carried in (or referenced from) the replayable record — see [Attribution Capture](#attribution-capture). Until that evidence is present a message's attribution is unverifiable, and clients MUST NOT assume any inclusion-time party verified it; each reader establishes attribution itself from the captured evidence. With the evidence present, attribution too is a deterministic function of on-chain data, and all correct clients converge.
+
+#### Attribution Capture
+
+Because attribution originates outside the chain, any authorization that depends on it MUST carry **self-authenticating evidence** — verifiable against an on-chain anchor without any network access or trusted intermediary — in the message, or reference such evidence already recorded on chain. Email-rooted identities achieve this by anchoring attribution to the global DNS hierarchy. Two pieces of evidence establish that a signing key speaks for an email address:
+
+1. An **authentication certificate** (`Auth-Cert` header) — a browserid certificate, signed by an identity provider's key, binding the signing key (`Public-Key`) to an email address.
+2. **DNSSEC evidence** — the DNSSEC chain proving the provider's key was published at `_browserid.<provider-domain>`, with signature-validity windows covering the message's inclusion time, terminating at the **DNS root key-signing key (KSK)**.
+
+The protocol pins exactly one global anchor on chain: the **DNS root KSK**, as a short, governance-maintained history that spans root-key rollovers. Given that anchor and the message's inclusion timestamp, verifying attribution — certificate signature, DNSSEC chain, and validity windows — is a **deterministic function of on-chain data**. Consequently:
+
+- **All correct clients converge** on the same attribution; no sequencer, checkpoint, or trusted recorder is required.
+- **A from-scratch replayer can verify any past message** with no network access: the captured DNSSEC evidence proves the provider's key *as of the inclusion time*, independent of any later key rotation.
+
+Because DNSSEC is required end to end — a domain that does not run its own provider is served by a recognized broker that itself enforces DNSSEC — every attribution chains to the root KSK. There is no coverage gap and no need to mirror provider keys on chain. Trust reduces to exactly what email identity already implies: the DNS root and DNSSEC correctness, plus the deployment's designation of recognized broker(s).
+
+See the SBO Authorization Specification for the certificate and evidence formats, evidence reuse (large DNSSEC evidence may be posted once as a self-authenticating on-chain object and referenced by later writes), the required DNSSEC algorithms, and the inclusion-time clock. A zero-knowledge proof of this verification is a later optimization that shrinks evidence size and can additionally conceal the provider domain and email (enabling pseudonymous identities); it does not change the trust model.
+
+### Object Ownership and Authorization
+
+Ownership of an object is determined by the `Owner` header, which references an identity record as specified in the [Identity Specification](./SBO%20Identity%20Specification.md). If `Owner` is absent, the owner is the creator.
+
+A message is **authorized** to act on an object when its signer resolves to the object's owner. Resolution proceeds in two steps:
+
+1. **Attribution (Layer 2):** the signing key (`Public-Key`) is bound to an identity via the evidence carried in the message (see [Attribution Capture](#attribution-capture)). For email-rooted identities the `Auth-Cert` certificate binds the signing key to an email address.
+2. **Ownership resolution (Layer 1 over on-chain state):** the resolved identity is matched against the object's `Owner`. Ownership references may be indirect — an owner naming an identity (e.g. `alice@community.org`) resolves through that identity's record under `/sys/names/` to its controlling identity, and so on, until it grounds in a directly-controlled identity. An object is writable by whoever controls the identity at the end of this chain. See the [Identity Specification](./SBO%20Identity%20Specification.md) for resolution and grounding rules.
+
+Both steps are deterministic given the message and on-chain state (including the captured attribution evidence and the pinned DNS root KSK), so all correct clients reach the same authorization decision. As with all validity in a based design, the decision is established by each reader on replay rather than gatekept at inclusion: a message whose signer does not resolve to the owner is disregarded, not rejected by the base layer. Ownership may be transferred to another identity via a transfer message.
 
 ### Action Specific Rules
+
+In the rules below, "the current owner" means a signer authorized per [Object Ownership and Authorization](#object-ownership-and-authorization) — that is, a signer whose key resolves, through attribution and ownership resolution, to the object's owner.
 
 #### post
 - Object creation is idempotent: it may create a new object or update an existing one.
