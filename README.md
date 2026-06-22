@@ -220,6 +220,7 @@ The specs collectively define **SBO Protocol v0.5** (the authoritative protocol 
 | [Identity Spec](./specs/SBO%20Identity%20Specification.md) | Identity, domain, and profile schemas; name resolution |
 | [Authorization Spec](./specs/SBO%20Authorization%20Specification.md) | How browserid certificates + DNSSEC authorize on-chain writes |
 | [Attestation Spec](./specs/SBO%20Attestation%20Specification.md) | Signed claims (membership, roles, vouches, credentials); off-chain reputation |
+| [Community Spec](./specs/SBO%20Community%20Specification.md) | Self-owned communities: membership, roles, moderation, governance |
 | [Genesis Spec](./specs/SBO%20Genesis%20Specification.md) | Bootstrap sequence |
 | [Bridge Spec](./specs/SBO%20Bridge%20Specification.md) | Cross-chain imports |
 | [State Commitment](./specs/SBO%20State%20Commitment%20Specification.md) | Trie proofs |

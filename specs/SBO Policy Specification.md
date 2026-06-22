@@ -136,6 +136,26 @@ A map of role names to arrays of members. Roles group identities for reuse in gr
 }
 ```
 
+### Attestation-Defined Roles
+
+A role member may be an **attestation source** instead of a literal identity. This binds the role to on-chain attestations (see the [Attestation Specification](./SBO%20Attestation%20Specification.md)) rather than a static list, so role membership changes by *issuing* or *expiring* an attestation — no policy edit required. This is the mechanism by which a community grants roles (e.g. an admin appoints a moderator) without amending its root policy.
+
+```json
+{
+  "roles": {
+    "moderator": [{"attested": {"type": "role:moderator", "by": "cooks@example.org"}}],
+    "member": [{"attested": {"type": "membership"}}]
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | Attestation `type` to match |
+| `by` | No | Issuer identity (the attestation's `Owner`) whose attestations count. Omit to accept **any** issuer, including the subject's own self-attestation. |
+
+A requester matches an `attested` source when an `attestation.v1` exists whose `type` equals `type`, whose issuer matches `by` (when given), whose `subject` resolves to the **same controller** as the requester, and which is **in force** at the message's inclusion time (`issued_at` ≤ inclusion time, and `expires` absent or > inclusion time). Expiry of the attestation removes the role automatically. An `attested` source references data objects, not roles, so it cannot participate in a role cycle.
+
 ---
 
 ## Identity Syntax
@@ -194,6 +214,10 @@ Used in the `require` field of restrictions:
 | `{"schema": "nft.v1"}` | Object must use specified content schema |
 | `{"schema": {"any": ["a.v1", "b.v1"]}}` | Object must use one of specified schemas |
 | `{"content_type": "application/json"}` | Object must have specified content type |
+| `{"attested": {"type": "membership", "by": "cooks@example.org"}}` | The acting user (`$user`) must be the **in-force subject** of such an attestation |
+| `{"not_attested": {"type": "ban", "by": "cooks@example.org"}}` | The acting user must **not** be the in-force subject of such an attestation |
+
+`attested` / `not_attested` use the same matching rules as an [attestation-defined role](#attestation-defined-roles) (`type`, optional `by`, subject resolves to the acting user's controller, in force at inclusion time). They let a policy gate actions on a positive claim (membership, a credential) or a negative one (a ban) without listing identities.
 
 ---
 
@@ -275,5 +299,6 @@ Invalid policies must be rejected. Objects posted under an invalid policy are th
 - `policy.v2` requires no scripting engine, enabling lightweight client implementations
 - Evaluation is fully deterministic across all conforming implementations
 - Lite clients can evaluate policies without trusting external indexers
+- Attestation-defined roles and `attested`/`not_attested` conditions read on-chain attestation objects and the message's inclusion time. Evaluation stays deterministic (a pure function of on-chain state and inclusion time, no external scoring), but reads more state than a self-contained policy: an evaluator must follow the referenced attestation paths. This is a deliberate trade — dynamic, expiry-aware governance in exchange for a larger evaluation footprint.
 
 ---
