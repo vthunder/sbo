@@ -95,6 +95,9 @@ Broker `id.sandmill.org`: `GET /.well-known/browserid` → `{public-key, authent
 - **`sbo-daemon`**: DELETE the 4 IPC handlers `RequestSessionBinding`/`PollSessionBinding`/`RequestIdentityProvisioning`/`PollIdentityProvisioning` (`main.rs` ≈1406–1838) + their state maps + the Request variants in `ipc.rs`.
 - **`sbo-auth-demo`**: DELETE the entire crate + remove from root `Cargo.toml` `members`.
 
+### OPEN DESIGN ITEM surfaced by code contact (2026-06-23) — owner representation
+The impl parses `Owner`/`Creator` as the `Id` type (RFC 3986 unreserved: ALPHA/DIGIT/-._~) and uses `creator` as a **literal trie path segment** (`state/db.rs object_to_segments`) and in the trie key `format!("{}:{}:{}", path, creator, id)` + filesystem paths. So an email controller `alice@gmail.com` fails (`@` invalid; a `:`-containing ref would break the key delimiter). Today owners/creators are always Id-valid NAMES. Email-rooted ownership needs a decision (ripples into the State Commitment "creator as literal segment" model + filesystem sync). Options: (A) ownership via `/sys/names/<name>` only — bare-email owners disallowed (needs a spec tweak; adds a name-registration step); (B) email-capable `IdentityRef` on the wire + encoded/hashed storage segment (supports spec's bare-email owner; segments become opaque → State Commitment spec update); (C) relax `Id` to allow `@` (not `:`) + change the trie-key delimiter off `:` (minimal, human-readable segments, `@` ok on POSIX; key-rooted owners still go via `/sys/` names). **PENDING USER DECISION before 1.4/1.5.** 1.2 (identity.email.v1 schema) merges into 1.4 since its controller = Owner depends on this.
+
 ### Sub-step sequencing (each build-green, commit)
 1. **Delete** the browserid-clone (above). Build green, tests pass (functionality reduced — no auth flow yet). Reviewable commit.
 2. **`identity.email.v1`** schema + validation (controller = `Owner`, payload `{profile?, iat}`); keep key-rooted `identity.v1` for roots.
