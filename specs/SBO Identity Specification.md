@@ -51,9 +51,12 @@ A repository **without its own domain** (addressed only by a chain URI) cannot r
 | Form | Example | Meaning |
 |------|---------|---------|
 | Bare email | `alice@gmail.com` | An email-rooted identity, attributed directly |
+| Bare key | `ed25519:<hex>` | A key-rooted identity, authorized by direct signature |
 | Local name | `alice` | The record at `/sys/names/alice` in the current repository |
 | Cross-repo name | `avail:mainnet:13/alice` or an [SBO URI](./SBO%20URI%20Specification.md) | A name in another repository |
 | Null (delete) | `null:` | No owner (see the Core Specification) |
+
+The bare-key form is what `effective_owner` (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)) yields when a message carries neither `Owner` nor `Creator`: the effective owner is the signing key, which resolves directly to a key controller.
 
 The canonical reference for an email-rooted identity is its **email**, which is globally unambiguous and browserid-resolvable from anywhere. Compact handle forms:
 
@@ -78,6 +81,9 @@ resolve_controller(ref, seen = {}):
 
     if ref is a bare email:
         return EmailController(ref)            # proven via attribution
+
+    if ref is a bare key (algorithm-prefixed, e.g. ed25519:<hex>):
+        return KeyController(ref)              # direct signature; the signer-fallback owner
 
     # ref names a record under /sys/names/
     if ref in seen:                            # cycle
