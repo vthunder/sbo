@@ -48,6 +48,11 @@ Add `Auth-Cert`, `Auth-Evidence`, `HLC`, `Prev` as optional `Option<String>` fie
 ### Phase 2 — Two-layer validity & state
 Separate L1 envelope validity (deterministic, replayable) from L2 attribution (read-time/optimistic per spec). Align replay/state so canonical state matches the Validity-Layers model; well-formed-but-unattributed writes carried but filtered. **Includes the block-inclusion-time plumbing deferred from 1.5:** decode the Avail `timestamp.set` inherent (in `rpc.rs::fetch_block_data_for_app_ids`, where the full block is already fetched) → carry it on `BlockData`/`Block` → pass as `L2Context::inclusion_time` instead of `None`. (Replay-side concern; nothing works end-to-end live until capture (1.6) also exists, so sequenced after 1.6.)
 
+### Review fixes (2026-06-23, post Phase 1)
+Pre-Phase-2 adversarial review of the L2 code found + fixed two issues:
+- **Email-identity name-claim rotation bug:** `validate_name_claim` matched the rotating ephemeral signer key, locking email owners out after browserid cert rotation. Now email-rooted name records re-authorize via L2 against the stored `owner_ref` (mirrors `validate_post`'s update branch).
+- **`/sys/trust/brokers` never seeded:** broker-path attribution (email domain ≠ cert issuer, e.g. `@sandmill.org` via `id.sandmill.org`) failed closed on a live daemon. Added `presets::set_trust_brokers` to post the list **on-chain** (required for deterministic replay — a local-config fallback would diverge). **Genesis must include it** (seed in genesis mode, or via an authorized key once policy governs `/sys/trust/`). `load_trust_anchors` already reads it. Regression tests added in `l2_authorization.rs`.
+
 ### Phase 3 — Attestation
 `attestation.v1` schema + validation (issuer = Owner; fields subject/type/value/issued_at/expires?/evidence?; type regex; expires ≥ issued_at). Issuer-namespace storage convention. In-force check helper (issued_at ≤ t < expires) — consumed by Phase 4.
 
