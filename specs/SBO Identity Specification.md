@@ -113,6 +113,10 @@ A message signed by key `E` is authorized for an object owned by `O` when `resol
 
 Because every step is deterministic given the message, on-chain state, and the pinned DNS root KSK, all correct clients reach the same decision (see [Validity Layers](./SBO%20Specification.md#validity-layers)).
 
+### The stored creator
+
+An object's durable **creator** — the author identity recorded in the state trie (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#creator-as-path-segment)) — is the author's *resolved controller*, not the (possibly ephemeral) signing key: the explicit `Creator` header, else the **attributed email** when the signer carries a valid attribution, else the signer's claimed name, else a stable encoding of the signing key. For an email-rooted author this keeps a single, stable creator across browserid key rotation; like authorization, it is pinned to the inclusion-time clock and so is deterministic on replay.
+
 ## The `/sys/names/` Namespace
 
 `/sys/names/<name>` records register names. A name record provides a stable, human-friendly handle, optionally points to a profile, and — for email-rooted names — anchors reputation and other claims to a stable subject even as the controlling email changes.

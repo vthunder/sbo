@@ -14,6 +14,7 @@ Draft
 ## Changelog
 
 - **v0.2**: Changed leaf value from `Content-Hash` to `object_hash` (SHA-256 of complete raw SBO bytes). This ensures proofs commit to the full object including headers, not just payload. Added creator as path segment for disambiguation.
+- **v0.2.1**: Specified that the creator path segment is the author's *resolved controller* (attributed email for email-rooted authors), not the signing key — so an author's objects do not fragment across browserid key rotation. Still deterministic (inclusion-time-pinned).
 
 ## Overview
 
@@ -119,6 +120,8 @@ The leaf hashes (`sha256:111...`, etc.) are the **object hashes** (SHA-256 of co
 In SBO, objects are uniquely identified by `(path, creator, id)` rather than just `(path, id)`. Multiple creators can post objects with the same ID at the same path. To handle this in the trie, the **creator** is included as a path segment between the path and the ID.
 
 **Full path segments:** `[path_segments..., creator, id]`
+
+**The creator segment is the author's resolved controller, not the signing key.** It is derived deterministically from the message and chain state at inclusion time: the explicit `Creator` header if present, else — when the signer carries a valid attribution — the **attributed email** (the address the signer is proven to speak for; see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)), else the signer's claimed name, else a stable encoding of the signing key. Using the attributed email means an email-rooted author's objects share one creator segment **across browserid key rotation**, rather than fragmenting under each ephemeral cert key — and because attribution is pinned to the inclusion-time clock, the segment is a deterministic function of message + on-chain state, so a from-genesis replayer reconstructs the identical trie.
 
 **Example:**
 
