@@ -46,7 +46,7 @@ Add `Auth-Cert`, `Auth-Evidence`, `HLC`, `Prev` as optional `Option<String>` fie
 - **browserid integration:** real certs from browserid.sandmill.org; mocks in tests.
 
 ### Phase 2 — Two-layer validity & state
-Separate L1 envelope validity (deterministic, replayable) from L2 attribution (read-time/optimistic per spec). Align replay/state so canonical state matches the Validity-Layers model; well-formed-but-unattributed writes carried but filtered.
+Separate L1 envelope validity (deterministic, replayable) from L2 attribution (read-time/optimistic per spec). Align replay/state so canonical state matches the Validity-Layers model; well-formed-but-unattributed writes carried but filtered. **Includes the block-inclusion-time plumbing deferred from 1.5:** decode the Avail `timestamp.set` inherent (in `rpc.rs::fetch_block_data_for_app_ids`, where the full block is already fetched) → carry it on `BlockData`/`Block` → pass as `L2Context::inclusion_time` instead of `None`. (Replay-side concern; nothing works end-to-end live until capture (1.6) also exists, so sequenced after 1.6.)
 
 ### Phase 3 — Attestation
 `attestation.v1` schema + validation (issuer = Owner; fields subject/type/value/issued_at/expires?/evidence?; type regex; expires ≥ issued_at). Issuer-namespace storage convention. In-force check helper (issued_at ≤ t < expires) — consumed by Phase 4.
