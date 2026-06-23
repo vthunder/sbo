@@ -74,8 +74,10 @@ The 1.6 CLI conflated "capture attribution" with "register a `/sys/names/` name"
 - external email / no-domain repo (T0) → **no** name by default (own directly as `Owner: <email>`); an explicit `name` registers a handle, with a privacy warning that it reveals the email.
 `import_email` now just *verifies* control (no fabricated name). Dropped the lossy `name_from_email`. The daemon resolution side was already spec-correct. (Specs unchanged — this was an impl gap.)
 
-### Phase 3 — Attestation
+### Phase 3 — Attestation  ✅ DONE (2026-06-24)
 `attestation.v1` schema + validation (issuer = Owner; fields subject/type/value/issued_at/expires?/evidence?; type regex; expires ≥ issued_at). Issuer-namespace storage convention. In-force check helper (issued_at ≤ t < expires) — consumed by Phase 4.
+
+**Implemented** (`sbo-core/src/schema/attestation.rs`, wired into `validate_schema`): `Attestation` payload type; `validate_attestation` (Validation rules 2–5 — required fields via serde, `type` regex `[a-z0-9]+(:[a-z0-9-]+)*` hand-rolled, `expires ≥ issued_at`, advisory payload `issuer` must equal `Owner`); `Attestation::is_in_force(t)` (`issued_at ≤ t < expires`, no-expires = never self-expires) for Phase 4; `storage_path(issuer, subject)` = `/<issuer>/attestations/<subject>/` (ID = `<type>`). Authorization (issuer = Owner) is the existing L2 gate — no new auth code. Path convention is *not* a validity rule (issuers MAY use other layouts), so it is not enforced. Tests: type-regex accept/reject, in-force window (incl. half-open + no-expires), expires/issuer/missing-field validation through `validate_schema`, and daemon `validate_message` schema-gating.
 
 ### Phase 4 — Policy extension
 Attestation-defined roles `{attested:{type, by?}}` + `attested`/`not_attested` restriction conditions, resolved against in-force attestations by resolved subject at inclusion time. Extends `policy/evaluate.rs`.
