@@ -36,7 +36,7 @@ Each object in the system is identified by an ID, a creator, and a path. The ful
 
 IDs, path segments, and creator names share the same syntax rules:
 
-**Allowed characters:** `A-Z a-z 0-9 - _ . ~` (the "unreserved" character set from [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-2.3))
+**Allowed characters:** `A-Z a-z 0-9 - _ . ~` (the "unreserved" character set from [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-2.3)), plus `@` and `:`. `@` carries email-rooted identity references (`alice@gmail.com`; see the [Identity Specification](./SBO%20Identity%20Specification.md)). `:` carries namespaced identifiers — attestation type IDs (`role:moderator`; see the [Attestation Specification](./SBO%20Attestation%20Specification.md)) and algorithm-prefixed key references (`ed25519:…`). Both are unambiguous because the canonical state-key delimiter is the ASCII Unit Separator (`0x1F`), not `:`.
 
 **Length:** 1-256 characters
 
@@ -47,7 +47,7 @@ IDs, path segments, and creator names share the same syntax rules:
 **Grammar (ABNF):**
 ```
 id       = 1*256id_char
-id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~"
+id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~" / "@" / ":"
 segment  = id
 path     = "/" *(segment "/")
 creator  = id
