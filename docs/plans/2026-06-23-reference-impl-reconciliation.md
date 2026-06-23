@@ -67,6 +67,16 @@ Verifiable query responses (results + State Commitment proofs + state root); com
 
 ## Phase 1 — detail (research locked 2026-06-23)
 
+### Progress (2026-06-23)
+- ✅ 1.1 delete browserid-clone (`4de7d7f`)
+- ✅ 1.3 attribution verifier `sbo-core/src/attribution.rs` (`450cbec`) — cert+DNSSEC→email, browserid-core + dnssec-prover, 9 offline tests + 1 #[ignore] live
+- ✅ owner-repr = option C (decided)
+- ✅ 1.4a + 1.2 email-capable `Id` (`@`) + trie delimiter `\x1f` + `identity.email.v1` schema (`f03056b`)
+- ✅ 1.4b `sbo-core/src/resolve.rs` resolve_controller + is_authorized (`54a34e9`)
+- ⬜ 1.5 wire L1/L2 into validate+replay (daemon): needs block inclusion time + pinned `/sys/trust/*` objects; call resolve_controller + attribution::verify_attribution; well-formed-but-unattributed carried-but-filtered. **NEXT — bigger integration, crosses into sbo-daemon.**
+- ⬜ 1.6 capture flow: real broker `/provision` + dnssec-prover query to emit Auth-Cert/Auth-Evidence; rewrite stubbed CLI identity flows.
+
+
 ### Tech choices (locked)
 - **`browserid-core`** (path-local crate at `~/src/browserid-ng/browserid-core`, reusable, not on crates.io) — depend on it directly. Provides `Certificate` (parse/verify/is_expired), `DnsRecord::parse` (`_browserid` TXT: `v=browserid1; public-key-algorithm=Ed25519; public-key=<b64url>`), `PublicKey`, `KeyPair`. **Cert = EdDSA JWT**, claims `CertificateClaims { iss, exp, iat?, public_key, principal: Email{email} }`; signed by the issuer (provider/broker) key; binds the ephemeral `public_key` (= SBO `Public-Key` header) ↔ email.
 - **`dnssec-prover`** (crates.io, TheBlueMatt; no-std+alloc, minimal deps) — RFC 9102 transferable DNSSEC proofs. Default `validation` feature = OFFLINE verify a proof against a single pinned root key (THE deterministic verifier). `std`/`query` feature = build the proof by querying a resolver (the capture step). No-std means it can later run inside the zkVM guest.
