@@ -45,8 +45,13 @@ Add `Auth-Cert`, `Auth-Evidence`, `HLC`, `Prev` as optional `Option<String>` fie
 - **Resolution:** `resolve_controller` (email vs key), Owner→name→email indirection, hop limits, grounding rules.
 - **browserid integration:** real certs from browserid.sandmill.org; mocks in tests.
 
-### Phase 2 — Two-layer validity & state
-Separate L1 envelope validity (deterministic, replayable) from L2 attribution (read-time/optimistic per spec). Align replay/state so canonical state matches the Validity-Layers model; well-formed-but-unattributed writes carried but filtered. **Includes the block-inclusion-time plumbing deferred from 1.5:** decode the Avail `timestamp.set` inherent (in `rpc.rs::fetch_block_data_for_app_ids`, where the full block is already fetched) → carry it on `BlockData`/`Block` → pass as `L2Context::inclusion_time` instead of `None`. (Replay-side concern; nothing works end-to-end live until capture (1.6) also exists, so sequenced after 1.6.)
+### Phase 2 — Two-layer validity & state  ⟢ NEXT (see `2026-06-23-phase2-handoff.md`)
+Align canonical state + policy with the Validity-Layers model now that the L2 gate exists. Block-inclusion-time plumbing (`2219521`) and the carry-but-filter gate (`ad2c67f`) already landed in Phase 1. **Concrete scope discovered during the Phase-1 review:**
+- **Stored-owner model is wrong for email owners.** `message_to_stored_object` (`sbo-daemon/src/validate.rs` ~419) sets `StoredObject.owner = signing_key`. For email-rooted objects that's the *ephemeral* key (meaningless); the real controller is in `owner_ref`. Make state + ownership checks key off the resolved controller, not the signer key.
+- **`effective_owner` fallback missing.** Spec `authorize()` (Authorization Spec §Verification Algorithm) uses `effective_owner = Owner → else Creator → else signer`. The impl's L2 gate only fires on an explicit `Owner` header (`if let Some(owner)`); ownerless writes bypass L2 via the legacy key path. Implement the fallback so the signer is the effective owner when no Owner/Creator is present.
+- **Policy `$owner` uses the old key model.** `policy/evaluate.rs:237` (`"owner" => owner == actor`) and `effective_owner` derivation compare against the signer-key owner; they must resolve `$owner` to the controller (email or key) for email-rooted objects.
+- **Evidence fallbacks unimplemented.** `authorize::parse_auth_evidence` only handles `inline:`; `ref:<sbo-ref>` and the `/sys/dnssec/` namespace lookup (Authorization Spec line 140) return unauthorized. Wire the referenced-evidence path.
+- **State Commitment:** `object_to_segments` uses `creator` as a literal trie segment — revisit against the State Commitment spec if the owner model change touches it.
 
 ### Review fixes (2026-06-23, post Phase 1)
 Pre-Phase-2 adversarial review of the L2 code found + fixed two issues:

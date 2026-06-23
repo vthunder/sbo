@@ -4,7 +4,7 @@
 > - **1.5** (`ad2c67f`): L2 attribution gate wired into daemon replay — `sbo-core::authorize` (pure `authorize_owner`/`authorize_message`), daemon `L2Context` + `/sys/names` resolver + carry-but-filter `ValidationStage::Attribution`; `StoredObject` gained `content_schema`+`owner_ref`; fixed a `:`→`\x1f` delimiter bug. **Block inclusion time is still `None`** (Avail `Block` has no timestamp) → deferred to **Phase 2** (decode the `timestamp.set` inherent in `rpc.rs`).
 > - **1.6** (`804b88a`, `a49ed45`): new **`sbo-capture`** crate (broker cert + live DNSSEC evidence; live test passes against real `_browserid.sandmill.org`); `presets::claim_email_identity`; CLI email flows de-stubbed. **TODO:** on-chain submit of attributed writes via daemon IPC not yet plumbed.
 >
-> **NEXT = Phase 2** (two-layer validity & state): includes the block-timestamp plumbing above. See the plan doc's Phase-1 progress block + Phase 2 entry. The rest of this file is the original 1.5 handoff, kept for context.
+> **NEXT = Phase 2** (two-layer validity & state). **→ Use the dedicated `docs/plans/2026-06-23-phase2-handoff.md`** (Phase 1 fully done + reviewed; concrete Phase 2 scope). The block-timestamp plumbing mentioned above already landed (`2219521`). The rest of this file is the original 1.5 handoff, kept for context.
 
 # (original) Reconciliation Handoff — resume at Phase 1.5
 
