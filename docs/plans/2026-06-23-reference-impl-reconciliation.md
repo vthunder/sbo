@@ -45,8 +45,18 @@ Add `Auth-Cert`, `Auth-Evidence`, `HLC`, `Prev` as optional `Option<String>` fie
 - **Resolution:** `resolve_controller` (email vs key), Owner→name→email indirection, hop limits, grounding rules.
 - **browserid integration:** real certs from browserid.sandmill.org; mocks in tests.
 
-### Phase 2 — Two-layer validity & state  ⟢ NEXT (see `2026-06-23-phase2-handoff.md`)
-Align canonical state + policy with the Validity-Layers model now that the L2 gate exists. Block-inclusion-time plumbing (`2219521`) and the carry-but-filter gate (`ad2c67f`) already landed in Phase 1. **Concrete scope discovered during the Phase-1 review:**
+### Phase 2 — Two-layer validity & state  ✅ DONE (see `2026-06-23-phase2-handoff.md`)
+Align canonical state + policy with the Validity-Layers model now that the L2 gate exists. Block-inclusion-time plumbing (`2219521`) and the carry-but-filter gate (`ad2c67f`) already landed in Phase 1.
+
+**Phase-2 progress (2026-06-24), all build+test-green (22 groups), committed on `main`:**
+- ✅ 2.1 `effective_owner` fallback + always-on L2 gate (`3ae9d75`) — gate authorizes the signer against `Owner → else Creator → else signer`; `resolve_controller` resolves bare algorithm-prefixed keys to `KeyController`; Identity spec gained the bare-key reference form.
+- ✅ 2.2 ownership checks key off the resolved controller (`fce5ba6`) — `message_to_stored_object` always records `owner_ref = effective owner`; update/name-claim/transfer/delete unified on `l2_authorize` against the stored controller (`stored_owner_ref`); `keys_match` removed.
+- ✅ 2.3 policy `owner` identity resolves to the controller (`c5a0c07`) — `to: owner` now keys off a `signer_is_owner` L2 decision (not the `owner == actor` creator-string compare); `check_policy` computes it; `$owner` path substitution unchanged.
+- ✅ 2.4 evidence fallbacks (`b95cc30`) — daemon `resolve_evidence` handles `inline:`/`ref:<sbo-path>`/absent-`/sys/dnssec/<issuer>`; `cert_issuer` parses iss without verifying.
+- ✅ 2.5 creator segment = attributed controller (`22fa02a`) — `resolve_creator` derives `Creator → attributed email → name → key-hex`, threading `L2Context` (fixes email-author storage fragmentation across key rotation); State Commitment + Identity specs pin the rule (State Commitment → v0.2.1).
+- ✅ 2.6 carry-but-filter audit + regression test (`f13473a`) — confirmed `Invalid → continue` gates all state/disk/witness effects; filtered write leaves the trie root unchanged. Tip-vs-confirmed does not surface yet (single apply path; Phase 6).
+
+**Concrete scope discovered during the Phase-1 review:**
 - **Stored-owner model is wrong for email owners.** `message_to_stored_object` (`sbo-daemon/src/validate.rs` ~419) sets `StoredObject.owner = signing_key`. For email-rooted objects that's the *ephemeral* key (meaningless); the real controller is in `owner_ref`. Make state + ownership checks key off the resolved controller, not the signer key.
 - **`effective_owner` fallback missing.** Spec `authorize()` (Authorization Spec §Verification Algorithm) uses `effective_owner = Owner → else Creator → else signer`. The impl's L2 gate only fires on an explicit `Owner` header (`if let Some(owner)`); ownerless writes bypass L2 via the legacy key path. Implement the fallback so the signer is the effective owner when no Owner/Creator is present.
 - **Policy `$owner` uses the old key model.** `policy/evaluate.rs:237` (`"owner" => owner == actor`) and `effective_owner` derivation compare against the signer-key owner; they must resolve `$owner` to the controller (email or key) for email-rooted objects.
