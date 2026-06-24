@@ -1,4 +1,4 @@
-# Demo UX Spec — "Commons"
+# Demo UX Spec — "Mingo"
 
 **Date:** 2026-06-24
 **Status:** Decisions locked (2026-06-24); spec/wireframe-first; no client code yet
@@ -9,10 +9,10 @@ reference client.
 
 ## Locked decisions (2026-06-24 review)
 
-1. **Name:** "Commons" (confirmed, no longer a placeholder).
-2. **Layout:** aggregated — one repo, many communities. Crucially, **Commons is
+1. **Name:** "Mingo" (locked). Domain: **`mingo.place`** (bare-word `.com`/`.club`/`.app` all taken; `mingo.place` chosen for the evocative "a place for your people" read).
+2. **Layout:** aggregated — one repo, many communities. Crucially, **Mingo is
    itself the meta-community and the T1 identity provider**: a user has **one
-   pseudonymous handle `<name>@commons`** issued by Commons (Reddit-like), not an
+   pseudonymous handle `<name>@mingo`** issued by Mingo (Reddit-like), not an
    exposed external email. One identity covers the whole hub.
 3. **Trust-weighted feed:** **cut from v1.** Start with a plain votes/recency
    feed; trust weighting is a documented fast-follow, not a launch feature.
@@ -27,7 +27,7 @@ reference client.
 
 ## 1. The product, in one sentence
 
-> **Commons** — topic communities where the reputation you earn is real,
+> **Mingo** — topic communities where the reputation you earn is real,
 > specific, and *yours*, and the communities are owned by the people in them, not
 > a platform that can sell, kill, or rug them.
 
@@ -46,7 +46,7 @@ Decided with the realism check in mind:
 - ✅ **Claim: reputation is specific and portable.** Not one fake karma number —
   earned badges/roles/vouches, each tied to a context, readable everywhere in the
   hub.
-- ⚠️ **We do NOT claim to fix mod tyranny.** You can be banned in a Commons
+- ⚠️ **We do NOT claim to fix mod tyranny.** You can be banned in a Mingo
   community exactly as on Reddit; moderation is still human and political. We
   don't pretend otherwise. (Self-ownership helps *founders* and *continuity*, not
   "never get banned.")
@@ -56,22 +56,24 @@ Decided with the realism check in mind:
   content export. Treated as a later/soft feature, not the spine.
 
 **The spine of the demo is the Reputation Passport** (portable earned standing),
-with a **trust-weighted feed** as the daily-use hook. Both are real, buildable,
-and mostly already supported by the protocol.
+with a plain votes/recency feed as the daily-use surface. (A trust-weighted feed
+is a documented fast-follow, cut from v1 — see Locked decisions.) Both the
+passport and the feed are real, buildable, and mostly already supported by the
+protocol.
 
 ## 3. Scope: a multi-community hub in ONE SBO repo
 
-### Identity: one Commons-issued pseudonym (T1)
+### Identity: one Mingo-issued pseudonym (T1)
 
-Commons is the **meta-community** and runs its own browserid provider, so every
-user gets a single **community-issued T1 identity** `<name>@commons` (see [SBO
+Mingo is the **meta-community** and runs its own browserid provider, so every
+user gets a single **community-issued T1 identity** `<name>@mingo` (see [SBO
 Identity Specification](../../specs/SBO%20Identity%20Specification.md#community-issued-identities-t1)).
-This is the Reddit model: you sign up with Commons, you get a **pseudonymous
+This is the Reddit model: you sign up with Mingo, you get a **pseudonymous
 handle**, and your real email (if used to authenticate to the provider) is never
 your public identity. One identity spans the whole hub — no per-community
 accounts. T0 (external-email) identities are not needed for the demo; T1 keeps it
-pseudonymous and gives Commons a clean onboarding funnel. (The provider half is
-the same machinery as Phase 1's capture/broker, pointed at the Commons domain.)
+pseudonymous and gives Mingo a clean onboarding funnel. (The provider half is
+the same machinery as Phase 1's capture/broker, pointed at the Mingo domain.)
 
 ### Aggregated layout
 
@@ -124,17 +126,17 @@ expressible; the client just aggregates and renders.
 
 ### 4.1 Sign in
 
-Sign up with Commons, pick a pseudonymous handle. Email is only used to
-authenticate to the Commons provider — your public identity is the handle.
+Sign up with Mingo, pick a pseudonymous handle. Email is only used to
+authenticate to the Mingo provider — your public identity is the handle.
 
 ```
 ┌─────────────────────────────────────────────┐
-│                  Commons                      │
+│                  Mingo                      │
 │        communities you actually own           │
 │                                               │
 │   Pick your handle                            │
 │   ┌─────────────────────────────────────┐    │
-│   │ alice                        @commons│    │
+│   │ alice                        @mingo│    │
 │   └─────────────────────────────────────┘    │
 │   ┌─────────────────────────────────────┐    │
 │   │  Continue                           │    │
@@ -142,15 +144,15 @@ authenticate to the Commons provider — your public identity is the handle.
 │   No wallet. No seed phrase. Pseudonymous.    │
 └─────────────────────────────────────────────┘
 ```
-→ Commons' browserid provider certifies `alice@commons`; the client posts an
-`identity.email.v1` (Owner = `alice@commons`, a T1 community-issued identity),
+→ Mingo's browserid provider certifies `alice@mingo`; the client posts an
+`identity.email.v1` (Owner = `alice@mingo`, a T1 community-issued identity),
 session key captured.
 
 ### 4.2 Hub home — communities + your feed
 
 ```
 ┌───────────────┬─────────────────────────────────────────────┐
-│  Commons      │   Your feed   ▸ trusted   ◦ everything        │
+│  Mingo      │   Your feed   ▸ trusted   ◦ everything        │
 │               │ ─────────────────────────────────────────────│
 │  COMMUNITIES  │  ▲ 142  r/cooks · alice                       │
 │  • cooks   ✓  │      Sourdough starter routine that actually… │
@@ -225,7 +227,7 @@ standing across every community in the hub.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  🎖  alice                                               │
-│      on Commons since April 2026                         │
+│      on Mingo since April 2026                         │
 │ ────────────────────────────────────────────────────────│
 │  BADGES & ROLES                                          │
 │   🥇 Top contributor      r/cooks      issued by r/cooks │
@@ -265,7 +267,7 @@ a mod) is portable and the founder can't be rugged.
 
 | # | Flow | SBO write(s) | Built? |
 |---|------|--------------|--------|
-| 1 | Sign up → pick handle | `identity.email.v1` for `<name>@commons` (T1, Commons provider) | ✅ Ph1 |
+| 1 | Sign up → pick handle | `identity.email.v1` for `<name>@mingo` (T1, Mingo provider) | ✅ Ph1 |
 | 2 | Join an open community | self-issued `membership` attestation | ✅ Ph3/5 |
 | 3 | Post | `post.v1` (HLC, batched tier) | ✅ Ph6 |
 | 4 | Comment | `comment.v1` (parent) | ✅ Ph6 |
@@ -279,11 +281,11 @@ a mod) is portable and the founder can't be rugged.
 
 **The protocol is done for this demo.** What's missing is *client* work: the
 passport aggregation (flow 7), a plain votes/recency feed, and the UI. No
-remaining protocol-layer work is required to build Commons v1.
+remaining protocol-layer work is required to build Mingo v1.
 
 ## 6. Tip / confirmed: cut for this demo (and why the analysis still matters)
 
-**Decision: do not build the tip overlay for Commons v1.** For Reddit-style
+**Decision: do not build the tip overlay for Mingo v1.** For Reddit-style
 posting, a couple-second wait for the post to land is perfectly acceptable; an
 optimistic echo adds rollback/reconcile complexity for no felt UX gain here.
 
@@ -311,8 +313,8 @@ now.**
 Phase 6's protocol layer is **complete** for this demo (6.1–6.4, 6.6 done; 6.5
 deferred by product decision). The remaining work is all **client + provider**:
 
-1. **Commons provider + genesis:** stand up the Commons browserid provider
-   (issues `<name>@commons` T1 identities) and the aggregated genesis repo with a
+1. **Mingo provider + genesis:** stand up the Mingo browserid provider
+   (issues `<name>@mingo` T1 identities) and the aggregated genesis repo with a
    hub root policy and the starter communities' `community.v1` + policies.
 2. **Reference client (web):** sign-up (pick handle → T1 identity) → submit writes
    via the daemon → read confirmed state from the daemon/indexer → render the
@@ -326,8 +328,8 @@ repo-per-community sovereignty graduation, "bring your reputation" cross-repo.
 
 ## 8. Open questions — resolved (2026-06-24)
 
-1. ~~Name~~ → **Commons** (locked).
-2. ~~Aggregated vs repo-per-community~~ → **aggregated for v1**; Commons is the
+1. ~~Name~~ → **Mingo** (locked).
+2. ~~Aggregated vs repo-per-community~~ → **aggregated for v1**; Mingo is the
    meta-community + T1 provider, one pseudonym per user. Repo-per-community is the
    graduation story.
 3. **Starter communities + seed content** — proposed trio **cooks / woodworking /
