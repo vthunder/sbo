@@ -1,11 +1,27 @@
-# Demo UX Spec — "Commons" (working title)
+# Demo UX Spec — "Commons"
 
 **Date:** 2026-06-24
-**Status:** Draft for review (spec/wireframe-first; no client code yet)
+**Status:** Decisions locked (2026-06-24); spec/wireframe-first; no client code yet
 **Purpose:** Define the end-user demo application — the product, the pitch, the
 screens, the flows, and how each maps onto the (already-built) SBO stack. This is
 the consumer-legible payoff of Phases 1–6 and the concrete target for Phase 7's
 reference client.
+
+## Locked decisions (2026-06-24 review)
+
+1. **Name:** "Commons" (confirmed, no longer a placeholder).
+2. **Layout:** aggregated — one repo, many communities. Crucially, **Commons is
+   itself the meta-community and the T1 identity provider**: a user has **one
+   pseudonymous handle `<name>@commons`** issued by Commons (Reddit-like), not an
+   exposed external email. One identity covers the whole hub.
+3. **Trust-weighted feed:** **cut from v1.** Start with a plain votes/recency
+   feed; trust weighting is a documented fast-follow, not a launch feature.
+4. **Tip / confirmed:** **not exercised in this demo.** For Reddit-style posting,
+   waiting a couple seconds for durability is fine and the optimistic-echo
+   complexity buys no real UX win here. The tip overlay is deferred to a future
+   use case where instant-write latency actually matters (e.g. chat/live
+   collaboration). Phase 6.5 is therefore **deferred by product decision**, not
+   built. See §6.
 
 ---
 
@@ -44,6 +60,20 @@ with a **trust-weighted feed** as the daily-use hook. Both are real, buildable,
 and mostly already supported by the protocol.
 
 ## 3. Scope: a multi-community hub in ONE SBO repo
+
+### Identity: one Commons-issued pseudonym (T1)
+
+Commons is the **meta-community** and runs its own browserid provider, so every
+user gets a single **community-issued T1 identity** `<name>@commons` (see [SBO
+Identity Specification](../../specs/SBO%20Identity%20Specification.md#community-issued-identities-t1)).
+This is the Reddit model: you sign up with Commons, you get a **pseudonymous
+handle**, and your real email (if used to authenticate to the provider) is never
+your public identity. One identity spans the whole hub — no per-community
+accounts. T0 (external-email) identities are not needed for the demo; T1 keeps it
+pseudonymous and gives Commons a clean onboarding funnel. (The provider half is
+the same machinery as Phase 1's capture/broker, pointed at the Commons domain.)
+
+### Aggregated layout
 
 We use the Community spec's **aggregated layout** ([SBO Community
 Specification](../../specs/SBO%20Community%20Specification.md#granularity-repository-or-object)):
@@ -94,21 +124,27 @@ expressible; the client just aggregates and renders.
 
 ### 4.1 Sign in
 
-Feels like "Sign in with Google." Browserid under the hood (Phase 1 capture).
+Sign up with Commons, pick a pseudonymous handle. Email is only used to
+authenticate to the Commons provider — your public identity is the handle.
 
 ```
 ┌─────────────────────────────────────────────┐
 │                  Commons                      │
 │        communities you actually own           │
 │                                               │
+│   Pick your handle                            │
 │   ┌─────────────────────────────────────┐    │
-│   │  ✉  Continue with email             │    │
+│   │ alice                        @commons│    │
 │   └─────────────────────────────────────┘    │
-│                                               │
-│   No wallet. No seed phrase. Just your email. │
+│   ┌─────────────────────────────────────┐    │
+│   │  Continue                           │    │
+│   └─────────────────────────────────────┘    │
+│   No wallet. No seed phrase. Pseudonymous.    │
 └─────────────────────────────────────────────┘
 ```
-→ produces an `identity.email.v1` (Owner = email), session key captured.
+→ Commons' browserid provider certifies `alice@commons`; the client posts an
+`identity.email.v1` (Owner = `alice@commons`, a T1 community-issued identity),
+session key captured.
 
 ### 4.2 Hub home — communities + your feed
 
@@ -152,28 +188,21 @@ Feels like "Sign in with Google." Browserid under the hood (Phase 1 capture).
 └───────────────┴─────────────────────────────────────────────┘
 ```
 
-### 4.4 Compose + the tip→confirmed moment
+### 4.4 Compose
 
-The save-a-file feel. The post appears **instantly** (tip), then a quiet status
-chip resolves to confirmed when its DA block lands.
+Plain compose-and-post. The post submits to the DA layer and appears in the feed
+once its block lands (a couple seconds) — a simple `posting… → posted` spinner,
+**no optimistic tip overlay** (see §6 for why we cut it).
 
 ```
-Compose:                          After hitting Post (optimistic):
-
-┌─────────────────────────────┐   ▲ 1  alice                    ⟳ posting…
-│ New post in r/cooks/general │      My first loaf!
-│ ┌─────────────────────────┐ │      just now
+┌─────────────────────────────┐
+│ New post in r/cooks/general │
+│ ┌─────────────────────────┐ │
 │ │ My first loaf!          │ │
-│ └─────────────────────────┘ │   …a few seconds later:
-│            [ Cancel ][Post] │   ▲ 1  alice                    ✅ confirmed
-└─────────────────────────────┘      My first loaf!
+│ └─────────────────────────┘ │
+│            [ Cancel ][Post] │   → posting…  → appears in feed
+└─────────────────────────────┘
 ```
-
-Status chip states: `⟳ posting…` (queued/submitted, in tip only) →
-`✅ confirmed` (its block included) — or, rarely, `↩ updated` if a concurrent
-higher-HLC write superseded a pending *edit* (rollback; spec's "tip is a
-prediction"). For append-only posts/comments, confirmation is lossless and
-rollback never happens — only edits/reactions can roll back.
 
 ### 4.5 Thread (comments are the product)
 
@@ -236,7 +265,7 @@ a mod) is portable and the founder can't be rugged.
 
 | # | Flow | SBO write(s) | Built? |
 |---|------|--------------|--------|
-| 1 | Sign in with email | `identity.email.v1` (capture cert + DNSSEC) | ✅ Ph1 |
+| 1 | Sign up → pick handle | `identity.email.v1` for `<name>@commons` (T1, Commons provider) | ✅ Ph1 |
 | 2 | Join an open community | self-issued `membership` attestation | ✅ Ph3/5 |
 | 3 | Post | `post.v1` (HLC, batched tier) | ✅ Ph6 |
 | 4 | Comment | `comment.v1` (parent) | ✅ Ph6 |
@@ -245,58 +274,66 @@ a mod) is portable and the founder can't be rugged.
 | 7 | View passport | read all attestations about a subject in-repo | ✅ data; client aggregates |
 | 8 | Appoint a mod | `role:moderator` attestation; policy role | ✅ Ph4/5 |
 | 9 | Ban | `ban` attestation; policy `not_attested` | ✅ Ph4/5 |
-| 10 | Instant post feel | tip overlay (confirmed ⊕ outbox) | ⏳ 6.5 (client-side) |
-| 11 | Trust-weighted feed | client ranking over reactions + passport | ⏳ Ph7 (client view) |
+| 10 | ~~Instant post feel (tip)~~ | — | ✂ cut (see §6) |
+| 11 | ~~Trust-weighted feed~~ | — | ✂ cut from v1 (fast-follow) |
 
-**The protocol is essentially done for this demo.** What's missing is *client*
-work: the tip overlay (flow 10), aggregation/ranking views (7, 11), and the UI.
+**The protocol is done for this demo.** What's missing is *client* work: the
+passport aggregation (flow 7), a plain votes/recency feed, and the UI. No
+remaining protocol-layer work is required to build Commons v1.
 
-## 6. Where "tip" lives (resolved by the UX)
+## 6. Tip / confirmed: cut for this demo (and why the analysis still matters)
 
-The only screen where tip surfaces is **4.4 (compose)** — and it's strictly the
-author's optimistic echo of *their own* write. In SBO's based/no-sequencer model
-there's no shared mempool, so:
+**Decision: do not build the tip overlay for Commons v1.** For Reddit-style
+posting, a couple-second wait for the post to land is perfectly acceptable; an
+optimistic echo adds rollback/reconcile complexity for no felt UX gain here.
+
+The architectural analysis that produced this decision still stands and is worth
+keeping, because it tells us *exactly* where tip goes **when** we build it (a
+future low-latency use case — chat, live collaboration, fast reactions):
 
 ```
 tip(user) = confirmed (from daemon/indexer)  ⊕  user's own outbox
                                              └─ same deterministic LWW (hlc::lww_wins)
 ```
 
-→ Tip is **client-side**: a small outbox + overlay module, pure and testable, in
-`sbo-core`, consumed by the web client. The **daemon stays the confirmed-state
-authority** and submission relay; it gets **no mempool**. This keeps confirmed
-state globally deterministic (different daemons must never disagree) while the
-optimistic prediction stays at the edge where it belongs.
+In SBO's based/no-sequencer model there is no shared mempool, so tip is strictly
+the author's echo of *their own* writes — **client-side**, a pure
+outbox+overlay module in `sbo-core`, consumed by a client. The **daemon stays the
+confirmed-state authority with no mempool**, keeping confirmed state globally
+deterministic. Sketch for the future: outbox entry
+`{ object_hash, hlc, key:(path,id), status }`, status ∈
+`queued → submitted → confirmed | rolled-back | needs-reissue`; reconcile when
+confirmed advances. **Phase 6.5 is deferred to that future feature, not built
+now.**
 
-Outbox entry: `{ object_hash, hlc, key:(path,id), status }` where status ∈
-`queued → submitted → confirmed | rolled-back | needs-reissue`. Reconcile when
-confirmed advances: object_hash present in confirmed → `confirmed`; a higher-HLC
-write confirmed for the same key → `rolled-back`; queued past cert window →
-`needs-reissue`.
+## 7. Build plan implication (Phase 7 — reference client)
 
-## 7. Build plan implication (for Phase 6.5 / Phase 7)
+Phase 6's protocol layer is **complete** for this demo (6.1–6.4, 6.6 done; 6.5
+deferred by product decision). The remaining work is all **client + provider**:
 
-1. **6.5 — `sbo-core/src/tip.rs`**: the pure Outbox + `tip_value()` overlay +
-   `reconcile()` state machine, unit-tested. No daemon/client I/O. *(This is the
-   only remaining Phase 6 protocol-layer item; everything else 6.x is done.)*
-2. **Phase 7 — reference client (web)**: browserid login → submit via daemon →
-   read confirmed from daemon/indexer → tip overlay → render the screens above →
-   passport aggregation → trust-weighted ranking. Plus verifiable query responses
-   (sboq) behind a quiet "how do I know this is real?" affordance for the
-   sovereignty-curious minority — never the main pitch.
+1. **Commons provider + genesis:** stand up the Commons browserid provider
+   (issues `<name>@commons` T1 identities) and the aggregated genesis repo with a
+   hub root policy and the starter communities' `community.v1` + policies.
+2. **Reference client (web):** sign-up (pick handle → T1 identity) → submit writes
+   via the daemon → read confirmed state from the daemon/indexer → render the
+   screens in §4 → **passport aggregation** (read all attestations about a
+   subject in-repo) → plain votes/recency feed.
+3. **Quiet verifiability affordance:** a "how do I know this is real?" panel
+   (sboq proofs) for the sovereignty-curious minority — never the main pitch.
 
-## 8. Open questions for review
+Deferred / fast-follow: trust-weighted feed (§4.2), tip overlay (§6),
+repo-per-community sovereignty graduation, "bring your reputation" cross-repo.
 
-1. **Name.** "Commons" is a placeholder. Want something punchier / less earnest?
-2. **Aggregated vs repo-per-community for the demo.** Spec recommends
-   repo-per-community for real sovereignty; aggregated is far simpler to demo and
-   makes the passport a local read. Proposal: **aggregated for v1 demo**, note the
-   sovereignty caveat, leave repo-per-community as the "graduation" story. OK?
-3. **How many communities + how much seed content** to make the feed and passport
-   feel alive (cooks / woodworking / homelab as the starter trio)?
-4. **Trust-weighted feed depth.** Full ranking algorithm, or a simple, legible
-   "boosted by people you trust" v1? (Recommend simple + legible first.)
-5. **Surface confirmation at all?** The tip→confirmed chip is honest and subtly
-   reinforces "this is durable," but could also be invisible for max
-   normal-app-feel. Show a quiet chip, or hide entirely?
+## 8. Open questions — resolved (2026-06-24)
+
+1. ~~Name~~ → **Commons** (locked).
+2. ~~Aggregated vs repo-per-community~~ → **aggregated for v1**; Commons is the
+   meta-community + T1 provider, one pseudonym per user. Repo-per-community is the
+   graduation story.
+3. **Starter communities + seed content** — proposed trio **cooks / woodworking /
+   homelab** with enough seed posts to make the feed and a sample passport feel
+   alive. *(Open: exact seed volume — settle at client-build time.)*
+4. ~~Trust-weighted feed depth~~ → **cut from v1**, fast-follow.
+5. ~~Confirmation chip~~ → moot; **no tip overlay**, just a plain `posting…`
+   spinner.
 ```

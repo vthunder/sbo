@@ -94,11 +94,26 @@ Attestation-defined roles `{attested:{type, by?}}` + `attested`/`not_attested` r
 
 **Not done (deliberately deferred):** the curated-community variant (membership `by: <issuer>`, admin `create` grant on `/<issuer>/attestations/**`) and presets — the machinery is identical to the open case + the existing `attestation_defined_role_gates_policy` test, so it's covered in principle; add a curated test if Phase 6/7 needs the fixture. No daemon helper for descriptor storage paths (`/sys/community` / `/communities/<id>`) — pure convention, not enforced.
 
-### Phase 6 — Content & write model
-`post.v1`/`comment.v1`/`reaction.v1` schemas; HLC ordering (header from Ph0) with validity bound `T_b−W ≤ physical ≤ T_b+ε`; `Prev` causal links; LWW-by-HLC (non-CRDT, deterministic tiebreak); **tip vs confirmed** in the daemon; durability tiers on-chain/batched (+ `collection.v1` descriptor). Reaction aggregation stays off-chain.
+### Phase 6 — Content & write model — **DONE** (protocol layer; on `main`)
+`post.v1`/`comment.v1`/`reaction.v1` schemas; HLC ordering with validity bound `T_b−W ≤ physical ≤ T_b+ε`; `Prev` causal links; LWW-by-HLC (non-CRDT, deterministic tiebreak); durability tiers on-chain/batched (+ `collection.v1` descriptor). Reaction aggregation stays off-chain.
 
-### Phase 7 — Indexer & client conformance + reference community client
-Verifiable query responses (results + State Commitment proofs + state root); completeness via subtree proofs (extend existing `sboq` trie proofs); client conformance (deterministic replay, inclusion-time attribution, deterministic policy incl. attestation roles, tip/confirmed). Then the **reference community client** wiring browserid (login) + SBO (data) into a working self-owned-community demo = the goal.
+**Implemented (per sub-step, each build-green + committed):**
+- **6.1 — content schemas** (`sbo-core/src/schema/content.rs`): `post.v1` (`body` req; `parent?`, `created_at?`), `comment.v1` (`body`+`parent` req), `reaction.v1` (`target`+`kind` req, `state` default true). Thin payload validation; `created_at` cosmetic/unverified. Wired into `validate_schema`.
+- **6.2 — HLC** (`sbo-core/src/hlc.rs`): `Hlc{physical,counter}` parse/`to_wire`/`Ord` (physical then counter); `within_bound(t_b, W, ε)`; default `W`=`ε`=5min. Daemon `validate.rs::check_hlc_bound` enforces the bound at a new **`ValidationStage::Ordering`** gate (after schema, before attribution); malformed HLC always rejected, bound enforced only when block timestamp known (fail-open on bound, like the attribution carry).
+- **6.3 — `Prev`** format gate (`validate.rs::check_prev`): when present must be 64-char hex (a 32-byte `object_hash`); existence of the referenced version is a read-side concern, not validity. Same Ordering stage.
+- **6.4 — LWW-by-HLC apply**: `StoredObject` gained `hlc`/`prev` (additive). `hlc::LwwKey`/`lww_wins` = total order (HLC, then signer pubkey, then object_hash). `validate.rs::lww_admits(msg, existing, object_hash)` (pure, tested) decides overwrite; `sync.rs::write_object` suppresses an HLC-bearing write that loses against an HLC-bearing current value (independent of inclusion order). Writes without HLC keep base inclusion-order semantics.
+- **6.6 — `collection.v1`** (`sbo-core/src/schema/collection.rs`): `{durability(on-chain|batched), batch_interval_s?, max_authoring_lag_s?, schema?}`; `Durability` enum (default on-chain). Daemon `collection_max_lag_ms` resolves per-collection `W` from a `_config` descriptor at the write's path, feeding `check_hlc_bound`; absent → default small `W`.
+
+**6.5 — tip vs confirmed: DEFERRED by product decision** (2026-06-24). Not built. Rationale fully captured in `docs/plans/2026-06-24-demo-ux-spec.md` §6: in SBO's based/no-sequencer model tip is the author's own optimistic echo, so it belongs **client-side** (a pure `sbo-core` outbox+overlay reusing `hlc::lww_wins`), **never a daemon mempool** (confirmed state must stay globally deterministic). The Commons demo doesn't need it (a couple-second post latency is fine for Reddit-style use); tip is deferred to a future low-latency feature (chat/live). The protocol primitives it would build on (`Hlc`, `lww_wins`) already exist.
+
+### Phase 7 — Reference client = the **Commons** demo (see `docs/plans/2026-06-24-demo-ux-spec.md`)
+The demo is locked: **Commons**, a multi-community hub in **one aggregated repo**, with Commons as the **meta-community + T1 identity provider** (one pseudonymous `<name>@commons` per user). Product spine = the **Reputation Passport** (portable earned attestations, a local in-repo read); pitch = "Reddit, except you keep what you build" (no blockchain/verification in the pitch). **Phase 6 leaves no protocol work for the demo** — remaining work is client + provider:
+1. **Commons provider + aggregated genesis** (browserid provider for `@commons`; hub root policy + starter communities `cooks`/`woodworking`/`homelab` with `community.v1` + policies).
+2. **Reference web client**: sign-up (pick handle → T1 identity) → submit via daemon → read confirmed state → render the §4 screens → passport aggregation → plain votes/recency feed.
+3. **Quiet verifiability affordance** (sboq proofs) behind a "how do I know this is real?" panel — never the main pitch.
+4. **Indexer/client conformance** (deterministic replay, inclusion-time attribution, deterministic policy incl. attestation roles); verifiable query responses (extend `sboq` trie proofs).
+
+Deferred/fast-follow: trust-weighted feed, tip overlay (6.5), repo-per-community sovereignty graduation, "bring your reputation" cross-repo.
 
 ### Carry-forward notes / known gaps (post Phase 4)
 Discovered during Phases 2–4; not yet addressed. None block Phase 5.
