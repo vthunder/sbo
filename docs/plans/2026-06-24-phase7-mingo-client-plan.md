@@ -17,11 +17,12 @@ step; pause for review per sub-phase, as in prior phases.
 ## Architecture
 
 ```
-┌────────────┐   browserid (login, cert)     ┌─────────────────────────┐
-│  Browser   │ ◀───────────────────────────▶ │  Mingo provider          │
-│  web app   │                                │  (browserid-ng broker    │
-│            │   sign envelopes (WASM)        │   @ DNSSEC mingo.place)   │
-│  ┌───────┐ │                                └─────────────────────────┘
+┌────────────┐  login → provision @mingo,    ┌─────────────────────────┐
+│  Browser   │  cert binds key↔email          │  Mingo IdP               │
+│  web app   │ ◀───────────────────────────▶ │  (browserid-ng broker    │
+│  build:wasm│                                │   @ DNSSEC mingo.place)   │
+│  sign:bid  │   (envelope built by sbo-wasm, └─────────────────────────┘
+│  ┌───────┐ │    signed by browserid key)
 │  │sbo-wasm│ │   HTTP read + submit
 │  └───────┘ │ ◀───────────────────────────▶ ┌─────────────────────────┐
 └────────────┘                                │  sbo-daemon + HTTP API   │
@@ -65,54 +66,79 @@ API**. Everything else is composition or UI.
 
 ---
 
-## Decisions to lock before building (§ Open questions)
+## Decisions — LOCKED (2026-06-24 review)
 
-1. **Browser signing: WASM vs TS reimpl.** *Recommend WASM.* Canonical signing
-   bytes must match `sbo-core::wire` exactly or every signature is invalid — a TS
-   reimplementation is a permanent divergence risk. Compile a **new `sbo-wasm`
-   crate** exposing just envelope-build + ed25519-sign + wire-serialize (depends
-   only on `sbo-core`'s wire/message/crypto — **not** state/daemon/RocksDB, which
-   won't compile to WASM). Risk to retire early: confirm the wire+crypto subset is
-   WASM-clean (a 7.0 spike).
-2. **DA target for the demo: real Avail/TurboDA testnet vs local dev DA.**
-   *Recommend a local dev DA harness for v1* (deterministic, free, no testnet
-   flakiness), with real Avail as a later switch. Confirm a local/mock DA path
-   exists or scope a thin one.
-3. **Client ↔ daemon transport.** *Recommend extending the daemon's existing axum
-   server* (`http.rs`) with read+submit routes (CORS for the browser), rather than
-   a separate gateway. The CLI keeps using the Unix-socket IPC.
-4. **Session key custody.** Ephemeral session key generated and held **in the
-   browser** (localStorage/IndexedDB), bound to `@mingo.place` by the provider
-   cert. Matches the spec's no-durable-key model. Re-login on cert expiry.
-5. **Seed identities.** Seed content needs authored writes → seed users need
-   certs. *Recommend* pre-provisioning a handful of `@mingo.place` seed accounts
-   via the provider and scripting their writes (7.5), so the feed/passport look
-   alive on first load.
+1. **Browser signing — `sbo-wasm` for serialization, browserid key for the
+   signature; spike first.** Canonical signing bytes must match `sbo-core::wire`
+   exactly, so we do **not** reimplement the envelope in TS. A new **`sbo-wasm`
+   crate** exposes envelope-build + wire-serialize (the canonical-bytes producer),
+   depending only on `sbo-core`'s wire/message subset — **not** state/daemon/RocksDB.
+   The **ed25519 signature is produced by browserid's existing in-browser key
+   component** (see #4), not a fresh key. The 7.0 spike validates this end to end
+   before we commit to the architecture; "if it works, it's the direction."
+2. **DA target — Avail testnet (then mainnet).** No local/mock DA. Avail is
+   practically free at today's prices, so we run against the real DA layer for the
+   demo (testnet first, mainnet a config switch). Simpler and more honest than a
+   home-grown harness; the daemon's `turbo`/light-client path already targets it.
+3. **Client ↔ daemon transport — extend the existing daemon.** Add read+submit
+   HTTP routes (CORS) to the daemon's axum server (`http.rs`); **no separate
+   gateway**. The CLI keeps the Unix-socket IPC.
+4. **Signing key = the browserid cert-bound browser key, extended to sign SBO
+   envelopes.** The SBO envelope **must** be signed by the same ephemeral key the
+   provider cert binds to the email — otherwise the signature isn't attributable
+   and the L2 check fails. So we **reuse browserid's in-browser key + signing
+   component** (which already signs *assertions* in JS) and **extend it to also
+   sign SBO canonical bytes**. This is a deliberate change to the browserid↔website
+   contract and must be designed **very** carefully (see Risks): a malicious RP
+   must not be able to coax the key into signing arbitrary content or forging
+   envelopes. Requires **domain separation** (a distinct, namespaced signing
+   operation for SBO envelopes vs assertions) and origin-gating. Cross-repo work in
+   `~/src/browserid-ng` (the JS browser component) + a careful contract spec.
+5. **Mingo = a browserid IdP that provisions a local identity.** `mingo.place`
+   runs a browserid IdP: a user **signs in with browserid** (via an existing
+   identity, e.g. their gmail, or a Mingo password account) and is then
+   **provisioned a local `<name>@mingo.place` identity** (T1 community-issued — the
+   Identity spec's community-as-IdP model; multi-IdP auth logic lives in the IdP).
+   The **demo hardcodes certain emails → admin** (a config mapping recognized
+   sign-ins to admin role attestations seeded at genesis). Seed content is authored
+   by a few pre-provisioned `@mingo.place` accounts (7.5).
 
 ---
 
 ## Sub-phases
 
-### 7.0 — Decisions + WASM spike (de-risk the crux)
-- Lock the decisions above.
-- **Spike `sbo-wasm`:** prove `sbo-core`'s wire+message+crypto compile to
-  `wasm32` and that a known envelope round-trips byte-identically to the native
-  serializer (golden-vector test: same headers/payload/key → identical signing
-  bytes + signature native vs WASM). If the subset isn't WASM-clean, carve a
+### 7.0 — `sbo-wasm` spike (de-risk the crux)
+The whole client architecture hinges on this; build it first, prove it, then commit.
+- **Spike `sbo-wasm`:** prove `sbo-core`'s wire+message subset compiles to `wasm32`
+  and produces **canonical signing bytes byte-identical to the native serializer**
+  (golden-vector test: same headers/payload → identical canonical bytes, native vs
+  WASM). If the subset isn't WASM-clean (e.g. a native-only dep leaks in), carve a
   `sbo-wire` crate free of native-only deps.
-- **Checkpoint:** a WASM module that signs one `post.v1` envelope, verified
-  byte-equal to `sbo-core` native.
+- **Prove the signing seam:** sign those canonical bytes with an ed25519 key **the
+  way browserid's browser component does**, and confirm `sbo-core`'s native verify
+  accepts it. This is the parity that matters — serialization (WASM) + signature
+  (browserid key) → a valid SBO envelope. Confirm the cert-bound key's algorithm
+  (Ed25519) matches the SBO `Public-Key` expectation.
+- **Checkpoint:** a browser-side build → (browserid-key) sign → `sbo-core` native
+  verify of one `post.v1` envelope, end to end.
 
-### 7.1 — Mingo provider bring-up
-- Deploy the browserid-ng broker as the Mingo IdP at a DNSSEC-signed domain
-  (`mingo.place`, broker at e.g. `id.mingo.place`), with a `_browserid.<domain>`
-  TXT key — mirroring the working `sandmill.org` setup.
+### 7.1 — Mingo provider bring-up (IdP that provisions local identities)
+- Deploy the browserid-ng broker as the Mingo **IdP** at a DNSSEC-signed domain
+  (`mingo.place`, IdP at e.g. `id.mingo.place`), with a `_browserid.<domain>` TXT
+  key — mirroring the working `sandmill.org` setup.
+- **Sign-in → provision flow:** a user authenticates (browserid via an existing
+  identity, or a Mingo account) and the IdP issues a cert for their local
+  `<name>@mingo.place` identity. Confirm the broker's account-creation
+  (`stage_user`/`complete_user_creation`) + `cert_key` path supports this as the
+  "native IdP" case (issuer == `mingo.place`).
+- **Admin mapping (demo):** a config list of recognized emails → admin; at genesis
+  these get `role:admin` attestations from the Mingo issuer (see 7.2/7.5).
 - Provision a few seed accounts (`alice@mingo.place`, …).
-- Verify `sbo-capture::capture_attribution` against the new broker yields a cert +
-  DNSSEC evidence that the **offline attribution verifier** accepts at a test
-  inclusion time (this is the seam that must converge).
-- **Checkpoint:** `capture_attribution(id.mingo.place, alice@mingo.place, …)` →
-  valid `Auth-Cert` + `Auth-Evidence`, accepted by `authorize_message`.
+- Verify `sbo-capture::capture_attribution` against the Mingo IdP yields a cert +
+  DNSSEC evidence the **offline attribution verifier** accepts at a test inclusion
+  time (the seam that must converge).
+- **Checkpoint:** sign in → provision `alice@mingo.place` → `capture_attribution`
+  → valid `Auth-Cert` + `Auth-Evidence`, accepted by `authorize_message`.
 
 ### 7.2 — Aggregated genesis + bootstrap tooling
 - Add a **bootstrap builder** (Rust binary or `presets` extension) that emits the
@@ -142,15 +168,24 @@ API**. Everything else is composition or UI.
 - **Checkpoint:** `curl` the Mingo communities, list `/communities/`, and submit a
   hand-signed `post.v1`; see it appear in confirmed state after inclusion.
 
-### 7.4 — Browser SBO library (`sbo-wasm` consumed by the client)
-- Flesh out `sbo-wasm` into the client's write/read kit:
-  - `buildEnvelope({action, path, id, schema, owner, payload, hlc?, prev?, authCert?, authEvidence?})` → canonical bytes.
-  - `sign(envelope, sessionKey)` → wire bytes ready for `POST /v1/submit`.
+### 7.4 — Browser SBO library + browserid signing extension
+Two parts: the serialization kit (`sbo-wasm`) and the **careful** browserid
+signing extension (#4).
+- **`sbo-wasm` (serialization kit):**
+  - `buildEnvelope({action, path, id, schema, owner, payload, hlc?, prev?, authCert?, authEvidence?})` → canonical bytes (+ the bytes to sign).
   - Schema payload helpers for `post/comment/reaction/membership(attestation)`.
   - HLC stamping (physical ms + counter) and `object_hash` (sha256 of wire).
+  - `assembleWire(envelope, signature)` → wire bytes for `POST /v1/submit`.
   - Thin read client over the 7.3 HTTP API; optional SBOQ verify (reuse `sboq`).
-- **Checkpoint:** from a browser console, build+sign+submit a `post.v1` as
-  `alice@mingo.place` (cert from 7.1) and read it back via the API.
+- **browserid signing extension (`~/src/browserid-ng` JS component):** add a
+  **namespaced** signing operation that signs SBO canonical bytes with the
+  cert-bound browser key — distinct from assertion signing, **domain-separated**
+  (e.g. a context tag the verifier checks) and **origin-gated** so only the Mingo
+  app origin can request it. Write a short contract note: what the key will/won't
+  sign, why a malicious RP can't forge envelopes or replay across origins. This is
+  the security-sensitive change flagged in #4 — design + review before coding.
+- **Checkpoint:** from the Mingo origin, build (`sbo-wasm`) + sign (browserid key)
+  + submit a `post.v1` as `alice@mingo.place` and read it back via the API.
 
 ### 7.5 — Seed content tooling (make it feel alive)
 - A script using the provider (7.1) + builders (7.2a/7.4) to author, as seed
@@ -191,17 +226,25 @@ API**. Everything else is composition or UI.
 
 ## Critical path & risks
 
-- **Critical path:** 7.0 (WASM spike) → 7.1 (provider) + 7.2 (genesis) → 7.3 (API)
-  → 7.4 (browser lib) → 7.6 (UI). 7.5/7.7/7.8/7.9 enrich but don't block the loop.
-- **Top risk — WASM signing parity.** If `sbo-core` wire/crypto won't compile to
-  `wasm32` cleanly, we carve a `sbo-wire` crate. Retire this in 7.0 before
-  committing to the client architecture. (Fallback: a tiny local signing helper
-  the browser calls — worse trust story, avoid.)
+- **Critical path:** 7.0 (`sbo-wasm` spike) → 7.1 (provider) + 7.2 (genesis) → 7.3
+  (API) → 7.4 (browser lib + signing extension) → 7.6 (UI). 7.5/7.7/7.8/7.9 enrich
+  but don't block the loop.
+- **Top risk — extending the browserid key to sign SBO envelopes (#4).** This
+  changes the browserid↔website contract: the cert-bound key must sign SBO
+  envelopes *without* opening a hole where a malicious RP forges envelopes, signs
+  arbitrary content, or replays across origins. Mitigations: strict **domain
+  separation** (assertion-signing vs SBO-envelope-signing are distinct, tagged
+  operations), **origin-gating** to the Mingo app, and a written contract +
+  security review before any code. Treat as a design gate within 7.4 (and touched
+  in the 7.0 spike to confirm the key can produce SBO-valid signatures at all).
+- **`sbo-wasm` serialization parity.** If the wire subset won't compile to `wasm32`
+  cleanly, carve a `sbo-wire` crate free of native-only deps. Retire in 7.0.
 - **Provider/DNSSEC ops.** The attribution seam needs a DNSSEC-signed Mingo domain
-  with `_browserid` TXT. Known-good recipe exists (`sandmill.org`); it's config,
-  but it's real infra to stand up.
-- **DA dependency.** Decide local-dev vs Avail testnet early (7.0) — it gates how
-  self-contained the demo is.
+  with `_browserid` TXT. Known-good recipe exists (`sandmill.org`); config, but
+  real infra.
+- **Avail testnet reliability.** Real DA (decision #2) means demo flows depend on
+  testnet liveness/latency; acceptable, but have a fallback RPC/endpoint and don't
+  block local dev iteration on it (read-path work can use a synced snapshot).
 - **Scope creep in the UI.** Keep 7.6 to the spec §4 screens; defer trust-weighted
   feed, repo-per-community, "bring your reputation," tip overlay.
 
