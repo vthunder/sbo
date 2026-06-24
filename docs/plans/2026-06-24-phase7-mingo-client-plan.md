@@ -110,7 +110,24 @@ API**. Everything else is composition or UI.
 
 ## Sub-phases
 
-### 7.0 — `sbo-wasm` spike (de-risk the crux)
+### 7.0 — `sbo-wasm` spike  ✅ DONE (2026-06-24)
+**Result: feasible — the crux risk is retired.** A new `reference_impl/sbo-wasm`
+crate `#[path]`-includes the exact `sbo-core` `error`/`crypto`/`message`/`wire`
+source (parity by construction), depending only on the lean wasm-clean subset
+(`ed25519-dalek`/`sha2`/`rand`/`thiserror`/`hex`; `getrandom` js feature on wasm).
+It **builds for `wasm32-unknown-unknown`** and a native test passes the full
+**build → sign → serialize → parse → verify** round-trip. Findings:
+- The subset has **zero native-only deps** — `Id`/`Path`/`ObjectType` are defined
+  in `message/envelope.rs` (not `sbo-types`), and the subset uses no serde, no
+  rocksdb/reqwest/dnssec. So it carves cleanly.
+- `#[path]`-include keeps `sbo-core` untouched and guarantees byte-identical
+  output; a proper `sbo-wire` crate carve is optional later, not needed to proceed.
+- Debug wasm is ~5.7 MB (unoptimized); release + `wasm-opt` will shrink it a lot —
+  fine, validate size in 7.4.
+- Next: 7.4 adds `wasm-bindgen` exports (build/serialize/hash) for the browser; the
+  browserid agent does the signing (per #4).
+
+*(original spike scope, for reference:)*
 The whole client architecture hinges on this; build it first, prove it, then commit.
 - **Spike `sbo-wasm`:** prove `sbo-core`'s wire+message subset compiles to `wasm32`
   and produces **canonical signing bytes byte-identical to the native serializer**
