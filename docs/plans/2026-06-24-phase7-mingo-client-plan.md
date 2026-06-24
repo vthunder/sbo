@@ -83,17 +83,20 @@ API**. Everything else is composition or UI.
 3. **Client ↔ daemon transport — extend the existing daemon.** Add read+submit
    HTTP routes (CORS) to the daemon's axum server (`http.rs`); **no separate
    gateway**. The CLI keeps the Unix-socket IPC.
-4. **Signing key = the browserid cert-bound browser key, extended to sign SBO
-   envelopes.** The SBO envelope **must** be signed by the same ephemeral key the
-   provider cert binds to the email — otherwise the signature isn't attributable
-   and the L2 check fails. So we **reuse browserid's in-browser key + signing
-   component** (which already signs *assertions* in JS) and **extend it to also
-   sign SBO canonical bytes**. This is a deliberate change to the browserid↔website
-   contract and must be designed **very** carefully (see Risks): a malicious RP
-   must not be able to coax the key into signing arbitrary content or forging
-   envelopes. Requires **domain separation** (a distinct, namespaced signing
-   operation for SBO envelopes vs assertions) and origin-gating. Cross-repo work in
-   `~/src/browserid-ng` (the JS browser component) + a careful contract spec.
+4. **Signing = a typed signing extension in browserid-ng's agent (reuse the key
+   it already holds; do NOT duplicate a keystore, do NOT sign as a separate
+   app-held key).** The SBO envelope must be signed by a cert-bound key. The
+   browserid agent **already holds** `(key, cert)` for `alice@mingo.place` in its
+   isolated broker origin. Rather than (a) duplicate an isolated signer in the app
+   or (b) hold a raw key in app JS (XSS-exfiltratable), we add a **typed,
+   domain-separated, gated signing operation** to the agent: it signs a *parsed,
+   well-formed SBO envelope* (Owner == its email, Public-Key == its key) with the
+   key it already manages, and returns signature + cert. This is **additive and
+   origin/consent-gated** — the existing assertion/federated-login contract for
+   ordinary RPs is unchanged. Full design + threat model:
+   **`~/src/browserid-ng/docs/plans/2026-06-24-typed-signing-extension-design.md`**.
+   Also hardens browserid-ng to **non-extractable `CryptoKey`** custody. Cross-repo
+   work; design-reviewed before code.
 5. **Mingo = a browserid IdP that provisions a local identity.** `mingo.place`
    runs a browserid IdP: a user **signs in with browserid** (via an existing
    identity, e.g. their gmail, or a Mingo password account) and is then
@@ -177,15 +180,16 @@ signing extension (#4).
   - HLC stamping (physical ms + counter) and `object_hash` (sha256 of wire).
   - `assembleWire(envelope, signature)` → wire bytes for `POST /v1/submit`.
   - Thin read client over the 7.3 HTTP API; optional SBOQ verify (reuse `sboq`).
-- **browserid signing extension (`~/src/browserid-ng` JS component):** add a
-  **namespaced** signing operation that signs SBO canonical bytes with the
-  cert-bound browser key — distinct from assertion signing, **domain-separated**
-  (e.g. a context tag the verifier checks) and **origin-gated** so only the Mingo
-  app origin can request it. Write a short contract note: what the key will/won't
-  sign, why a malicious RP can't forge envelopes or replay across origins. This is
-  the security-sensitive change flagged in #4 — design + review before coding.
-- **Checkpoint:** from the Mingo origin, build (`sbo-wasm`) + sign (browserid key)
-  + submit a `post.v1` as `alice@mingo.place` and read it back via the API.
+- **browserid-ng typed signing extension** (`~/src/browserid-ng`): implement the
+  design at `browserid-ng/docs/plans/2026-06-24-typed-signing-extension-design.md`
+  — a typed, **parse-then-sign** operation (`payload_type: sbo-envelope`) on the
+  agent that validates the envelope (well-formed; `Owner`/`Public-Key` bound to the
+  agent's identity), signs with the already-held cert-bound key, returns signature
+  + `Auth-Cert`. **Domain-separated by construction** (disjoint preimages),
+  **origin/consent-gated**, **non-extractable key** custody. Design-review +
+  threat-model sign-off **before** code.
+- **Checkpoint:** from the Mingo origin, build (`sbo-wasm`) → sign (browserid agent
+  typed op) → submit a `post.v1` as `alice@mingo.place`, read it back via the API.
 
 ### 7.5 — Seed content tooling (make it feel alive)
 - A script using the provider (7.1) + builders (7.2a/7.4) to author, as seed
@@ -229,14 +233,15 @@ signing extension (#4).
 - **Critical path:** 7.0 (`sbo-wasm` spike) → 7.1 (provider) + 7.2 (genesis) → 7.3
   (API) → 7.4 (browser lib + signing extension) → 7.6 (UI). 7.5/7.7/7.8/7.9 enrich
   but don't block the loop.
-- **Top risk — extending the browserid key to sign SBO envelopes (#4).** This
-  changes the browserid↔website contract: the cert-bound key must sign SBO
-  envelopes *without* opening a hole where a malicious RP forges envelopes, signs
-  arbitrary content, or replays across origins. Mitigations: strict **domain
-  separation** (assertion-signing vs SBO-envelope-signing are distinct, tagged
-  operations), **origin-gating** to the Mingo app, and a written contract +
-  security review before any code. Treat as a design gate within 7.4 (and touched
-  in the 7.0 spike to confirm the key can produce SBO-valid signatures at all).
+- **Top risk — the browserid-ng typed signing extension (#4).** Security-sensitive
+  (it lets an authorized app sign writes as the user). Bounded by design:
+  **parse-then-sign** (no opaque bytes), **domain separation by construction**
+  (disjoint preimages), **`Owner`/`Public-Key` binding**, **origin/consent gating**,
+  **non-extractable key**. It is **additive** — the existing assertion contract is
+  untouched and the capability is offered only to authorized SBO origins, so it is
+  *not* a federated-login contract change. Gate: design + threat-model review
+  (`browserid-ng/docs/plans/2026-06-24-typed-signing-extension-design.md`) signed
+  off before code; the 7.0 spike validates signing-parity feasibility first.
 - **`sbo-wasm` serialization parity.** If the wire subset won't compile to `wasm32`
   cleanly, carve a `sbo-wire` crate free of native-only deps. Retire in 7.0.
 - **Provider/DNSSEC ops.** The attribution seam needs a DNSSEC-signed Mingo domain
