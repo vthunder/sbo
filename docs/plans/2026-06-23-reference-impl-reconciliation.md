@@ -93,6 +93,14 @@ Attestation-defined roles `{attested:{type, by?}}` + `attested`/`not_attested` r
 ### Phase 7 — Indexer & client conformance + reference community client
 Verifiable query responses (results + State Commitment proofs + state root); completeness via subtree proofs (extend existing `sboq` trie proofs); client conformance (deterministic replay, inclusion-time attribution, deterministic policy incl. attestation roles, tip/confirmed). Then the **reference community client** wiring browserid (login) + SBO (data) into a working self-owned-community demo = the goal.
 
+### Carry-forward notes / known gaps (post Phase 4)
+Discovered during Phases 2–4; not yet addressed. None block Phase 5.
+- **`post` action does not expand to `create`/`update` in policy `can`.** `policy/evaluate.rs` matches actions exactly (`grant.can.contains(&action)`), but the Policy spec calls `post` "shorthand for create + update." A grant of `can: ["post"]` currently does **not** authorize a `create` or `update`. Communities will want `post` grants — **fix early in Phase 5/6** (expand `post` ⇒ {create, update} in `action_matches`, or normalize at parse). Low-risk, ~5 lines + tests.
+- **`attested` with `by` omitted is a full object scan** (`StateDb::list_objects_by_schema`). Correct + deterministic, but O(all objects). A production indexer keeps a reverse index (subject → attestations); that's Phase 7's concern. Logged in `attested_subject_matches`.
+- **Positive attribution is live-DNSSEC-only.** Both the L2 authorization *and* the attributed-email creator (2.5) can only be exercised against the hardcoded IANA root, so positive paths are covered by `#[ignore]` live tests + unit tests; offline tests cover negatives/fallbacks. Any new attribution-dependent behavior inherits this.
+- **Tip vs confirmed not surfaced yet** (single apply path) — Phase 6.
+- **Pre-existing email objects under key-hex creators orphan** after 2.5 — moot (no SBO repos exist yet).
+
 ---
 
 ## Phase 1 — detail (research locked 2026-06-23)
