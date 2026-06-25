@@ -2,6 +2,10 @@
 
 **Blockchain objects that are actually objects.**
 
+> This repo holds the **specs** (the SBO protocol, zettels, design docs). The
+> reference implementation — `sbo-daemon`, the `mingo-idp` IdP, the Mingo SPA, and
+> deploy tooling — moved to **[vthunder/mingo](https://github.com/vthunder/mingo)**.
+
 ---
 
 ## The Problem
