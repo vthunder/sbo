@@ -2,9 +2,15 @@
 
 **Blockchain objects that are actually objects.**
 
-> This repo holds the **specs** (the SBO protocol, zettels, design docs). The
-> reference implementation — `sbo-daemon`, the `mingo-idp` IdP, the Mingo SPA, and
-> deploy tooling — moved to **[vthunder/mingo](https://github.com/vthunder/mingo)**.
+> This repo holds both the **SBO protocol specs** (zettels and design docs in
+> `specs/` and `docs/`) and the **reference implementation** — the `sbo` CLI,
+> `sbo-daemon`, and supporting crates under [`crates/`](crates/) (see
+> [crates/README.md](crates/README.md) to build and run it).
+>
+> **[vthunder/mingo](https://github.com/vthunder/mingo)** is an example
+> application built on top of these crates — a federated forum + identity demo
+> (BrowserID IdP, community/membership layer, and a browser SPA) — depending on
+> them as a pinned git dependency.
 
 ---
 
