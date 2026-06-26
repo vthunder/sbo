@@ -775,6 +775,49 @@ pub fn signed_object(
     wire::serialize(&msg)
 }
 
+/// General-purpose `post` builder for arbitrary objects: like [`signed_object`]
+/// but with an **optional** `content_schema` (omitted from the wire when `None`,
+/// rather than serialized as an empty string) and no HLC/`Prev`. This is the
+/// builder the `sbo uri post` command uses. `content_type` is carried verbatim
+/// (unlike [`post`], which hardcodes `application/json`).
+pub fn post_object(
+    signing_key: &SigningKey,
+    path: &str,
+    id: &str,
+    content_type: &str,
+    schema: Option<&str>,
+    owner: Option<&str>,
+    payload: Vec<u8>,
+) -> Vec<u8> {
+    let public_key = signing_key.public_key();
+    let content_hash = ContentHash::sha256(&payload);
+
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse(path).expect("path should be well-formed"),
+        id: Id::new(id).expect("id should be well-formed"),
+        object_type: ObjectType::Object,
+        signing_key: public_key,
+        signature: crate::crypto::Signature([0u8; 64]),
+        content_type: Some(content_type.to_string()),
+        content_hash: Some(content_hash),
+        payload: Some(payload),
+        owner: owner.map(|o| Id::new(o).expect("owner should be a valid Id")),
+        creator: None,
+        content_encoding: None,
+        content_schema: schema.map(|s| s.to_string()),
+        policy_ref: None,
+        related: None,
+        hlc: None,
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+    };
+    msg.sign(signing_key);
+
+    wire::serialize(&msg)
+}
+
 /// Build a `collection.v1` descriptor at `collection_path` with `ID: _config`
 /// (Content Spec §Durability Tiers). `batched` is the demo default for spaces;
 /// `max_authoring_lag_s` widens the collection's back-dating bound `W`.
@@ -959,6 +1002,36 @@ mod tests {
         // Signature must verify, and the schema arm must accept the payload.
         crate::message::verify_message(&msg).expect("signature should verify");
         crate::schema::validate_schema(&msg).expect("identity.email.v1 payload should validate");
+    }
+
+    #[test]
+    fn post_object_roundtrips() {
+        let key = SigningKey::generate();
+        // No schema, JSON payload — the common `uri post` case.
+        let wire = post_object(
+            &key, "/scratch/", "obj-1", "application/json", None, None,
+            br#"{"hello":"world"}"#.to_vec(),
+        );
+        let msg = wire::parse(&wire).expect("serialized post should parse");
+        crate::message::verify_message(&msg).expect("signature should verify");
+        assert!(matches!(msg.action, Action::Post));
+        assert_eq!(msg.path.to_string(), "/scratch/");
+        assert_eq!(msg.id.as_str(), "obj-1");
+        assert_eq!(msg.content_type.as_deref(), Some("application/json"));
+        assert_eq!(msg.content_schema, None, "no --schema => no Content-Schema header");
+        assert_eq!(msg.owner, None);
+
+        // With an explicit content-type, schema, and owner.
+        let wire = post_object(
+            &key, "/scratch/", "blob", "application/octet-stream",
+            Some("raw.v1"), Some("alice@example.com"), vec![1, 2, 3, 4],
+        );
+        let msg = wire::parse(&wire).expect("serialized post should parse");
+        crate::message::verify_message(&msg).expect("signature should verify");
+        assert_eq!(msg.content_type.as_deref(), Some("application/octet-stream"));
+        assert_eq!(msg.content_schema.as_deref(), Some("raw.v1"));
+        assert_eq!(msg.owner.as_ref().map(|o| o.as_str()), Some("alice@example.com"));
+        assert_eq!(msg.payload.as_deref(), Some(&[1, 2, 3, 4][..]));
     }
 
     /// Parse a builder's wire bytes, then verify signature + schema acceptance.
