@@ -243,6 +243,7 @@ In the rules below, "the current owner" means a signer authorized per [Object Ow
 
 #### transfer
 - Transfer may modify `owner`, `path`, and/or `id` (at least one required).
+- A transfer preserves the object's `creator`; only `owner`, `path`, and/or `id` change. The object's content (and therefore its `object_hash`) is carried unchanged from source to destination.
 - Only the current owner may transfer the object, unless allowed by the object's policy.
 - Transfers are governed by the policy of the object itself.
 - If `New-Path` or `New-ID` is specified:
