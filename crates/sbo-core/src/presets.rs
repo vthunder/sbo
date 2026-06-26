@@ -818,6 +818,53 @@ pub fn post_object(
     wire::serialize(&msg)
 }
 
+/// Build a signed `transfer` envelope for the object at `(path, id)`. At least
+/// one of `new_path`/`new_id`/`new_owner` must be `Some` (enforced on parse).
+/// `new_owner` may be `"null:"` to delete (transfer to the null owner). Transfer
+/// carries no payload, so no `Content-*` headers are emitted. Targets direct
+/// (key-rooted) signers — admin/sys keys and self-sovereign owners; attributed
+/// (email-rooted) transfer reuses the attribution-capture path and is layered on
+/// by the caller if needed.
+pub fn transfer(
+    signing_key: &SigningKey,
+    path: &str,
+    id: &str,
+    new_path: Option<&str>,
+    new_id: Option<&str>,
+    new_owner: Option<&str>,
+) -> Vec<u8> {
+    let public_key = signing_key.public_key();
+
+    let mut msg = Message {
+        action: Action::Transfer {
+            new_owner: new_owner.map(|o| Id::new(o).expect("new_owner should be a valid Id")),
+            new_path: new_path.map(|p| Path::parse(p).expect("new_path should be well-formed")),
+            new_id: new_id.map(|i| Id::new(i).expect("new_id should be a valid Id")),
+        },
+        path: Path::parse(path).expect("path should be well-formed"),
+        id: Id::new(id).expect("id should be a valid Id"),
+        object_type: ObjectType::Object,
+        signing_key: public_key,
+        signature: crate::crypto::Signature([0u8; 64]),
+        content_type: None,
+        content_hash: None,
+        payload: None,
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: None,
+        policy_ref: None,
+        related: None,
+        hlc: None,
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+    };
+    msg.sign(signing_key);
+
+    wire::serialize(&msg)
+}
+
 /// Build a `collection.v1` descriptor at `collection_path` with `ID: _config`
 /// (Content Spec §Durability Tiers). `batched` is the demo default for spaces;
 /// `max_authoring_lag_s` widens the collection's back-dating bound `W`.
@@ -1034,6 +1081,70 @@ mod tests {
         assert_eq!(msg.payload.as_deref(), Some(&[1, 2, 3, 4][..]));
     }
 
+    #[test]
+    fn transfer_roundtrips_all_field_combos() {
+        let key = SigningKey::generate();
+
+        // move (new_path + new_id)
+        let wire = transfer(&key, "/a/", "x", Some("/b/"), Some("y"), None);
+        let msg = wire::parse(&wire).expect("transfer should parse");
+        crate::message::verify_message(&msg).expect("signature should verify");
+        match &msg.action {
+            Action::Transfer { new_owner, new_path, new_id } => {
+                assert_eq!(new_path.as_ref().map(|p| p.to_string()).as_deref(), Some("/b/"));
+                assert_eq!(new_id.as_ref().map(|i| i.as_str()), Some("y"));
+                assert!(new_owner.is_none());
+            }
+            _ => panic!("expected Transfer"),
+        }
+        assert!(msg.payload.is_none(), "transfer carries no payload");
+
+        // chown (new_owner only)
+        let wire = transfer(&key, "/a/", "x", None, None, Some("bob@example.com"));
+        let msg = wire::parse(&wire).expect("transfer should parse");
+        crate::message::verify_message(&msg).expect("signature should verify");
+        match &msg.action {
+            Action::Transfer { new_owner, new_path, new_id } => {
+                assert_eq!(new_owner.as_ref().map(|o| o.as_str()), Some("bob@example.com"));
+                assert!(new_path.is_none() && new_id.is_none());
+            }
+            _ => panic!("expected Transfer"),
+        }
+
+        // delete spelling (new_owner = null:)
+        let wire = transfer(&key, "/a/", "x", None, None, Some("null:"));
+        let msg = wire::parse(&wire).expect("delete-transfer should parse");
+        crate::message::verify_message(&msg).expect("signature should verify");
+        match &msg.action {
+            Action::Transfer { new_owner, .. } => {
+                assert_eq!(new_owner.as_ref().map(|o| o.as_str()), Some("null:"));
+            }
+            _ => panic!("expected Transfer"),
+        }
+    }
+
+    #[test]
+    fn transfer_requires_at_least_one_new_field() {
+        // A transfer envelope with no New-* headers must be rejected on parse.
+        let key = SigningKey::generate();
+        let mut msg = Message {
+            action: Action::Transfer { new_owner: None, new_path: None, new_id: None },
+            path: Path::parse("/a/").unwrap(),
+            id: Id::new("x").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: crate::crypto::Signature([0u8; 64]),
+            content_type: None, content_hash: None, payload: None,
+            owner: None, creator: None, content_encoding: None, content_schema: None,
+            policy_ref: None, related: None, hlc: None, prev: None,
+            auth_cert: None, auth_evidence: None,
+        };
+        msg.sign(&key);
+        let wire = wire::serialize(&msg);
+        assert!(wire::parse(&wire).is_err(),
+            "transfer with no New-* must be rejected on parse");
+    }
+
     /// Parse a builder's wire bytes, then verify signature + schema acceptance.
     fn parse_verified(wire_bytes: &[u8]) -> Message {
         let msg = wire::parse(wire_bytes).expect("serialized message should parse");
@@ -1127,3 +1238,4 @@ mod tests {
     }
 
 }
+

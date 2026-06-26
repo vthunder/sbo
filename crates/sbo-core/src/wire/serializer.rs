@@ -41,6 +41,11 @@ pub fn serialize(msg: &Message) -> Vec<u8> {
 
     headers.push(("SBO-Version".to_string(), "0.5".to_string()));
     headers.push(("Action".to_string(), msg.action.name().to_string()));
+    if let crate::message::Action::Transfer { new_owner, new_path, new_id } = &msg.action {
+        if let Some(v) = new_id { headers.push(("New-ID".to_string(), v.as_str().to_string())); }
+        if let Some(v) = new_owner { headers.push(("New-Owner".to_string(), v.as_str().to_string())); }
+        if let Some(v) = new_path { headers.push(("New-Path".to_string(), v.to_string())); }
+    }
     headers.push(("Path".to_string(), msg.path.to_string()));
     headers.push(("ID".to_string(), msg.id.as_str().to_string()));
     headers.push(("Type".to_string(), match msg.object_type {
