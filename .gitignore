@@ -5,4 +5,4 @@ sbo_index.db
 my-repo/
 
 # wasm-pack generated package (build with sbo-wasm/build-web.sh)
-sbo-wasm/pkg/
+crates/sbo-wasm/pkg/
