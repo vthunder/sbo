@@ -1,6 +1,6 @@
 # Object Transfer/Move + Sys-Level Admin Authority — Implementation Spec
 
-**Status:** Locked (design). Implementation in progress on branch `feat/uri-commands-and-transfer`.
+**Status:** Implemented. sbo branch `feat/uri-commands-and-transfer`; mingo branch `feat/sys-admin-authority`. All three tiers landed with tests; see the per-tier commits and beans mingo-46oy / mingo-e13s / mingo-j1q6. Remaining follow-up: a block-processing integration test for the move state-root witness (delete+create), and live e2e against a disposable chain.
 **Author:** generated overnight session, 2026-06-27.
 **Tracking:** mingo epic `mingo-0jkl` (children `mingo-46oy`, `mingo-e13s`, `mingo-j1q6`).
 
