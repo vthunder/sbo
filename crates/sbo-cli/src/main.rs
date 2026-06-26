@@ -110,23 +110,63 @@ enum UriCommands {
         uri: String,
     },
 
-    /// Transfer an object to a new location or owner
+    /// Transfer an object: move (--new-path/--new-id), re-own (--new-owner), or
+    /// both. At least one is required. Authorized by the object's owner, or by a
+    /// policy grant (sys/admin) for objects you don't own.
     ///
     /// Examples:
     ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-path /bob/nfts/
-    ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-owner <pubkey>
+    ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-owner bob@mingo.place
     Transfer {
         /// SBO URI of the object to transfer
         uri: String,
-        /// New owner public key
+        /// New owner identity reference (use `null:` to delete)
         #[arg(long)]
         new_owner: Option<String>,
-        /// New path (within same chain/app)
+        /// New collection path (must end with `/`)
         #[arg(long)]
         new_path: Option<String>,
         /// New object ID
         #[arg(long)]
         new_id: Option<String>,
+        /// Keyring alias to sign with (defaults to the default key)
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Move/rename an object: sugar for `transfer` that derives the destination
+    /// path and ID from a target URI.
+    ///
+    ///   sbo uri mv <src-uri> <dst-uri>
+    Mv {
+        /// Source object URI
+        src: String,
+        /// Destination object URI (same repo)
+        dst: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Delete an object (transfer to the null owner).
+    Rm {
+        /// SBO URI of the object to delete
+        uri: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Change an object's owner: sugar for `transfer --new-owner`.
+    Chown {
+        /// SBO URI of the object
+        uri: String,
+        /// New owner identity reference
+        #[arg(long)]
+        to: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
     },
 }
 
@@ -687,10 +727,26 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("Failed to connect to daemon: {}", e),
                     }
                 }
-                UriCommands::Transfer { uri, new_owner, new_path, new_id } => {
-                    // Implemented in Tier 2 (real Action::transfer end-to-end).
-                    let _ = (uri, new_owner, new_path, new_id, &client);
-                    eprintln!("`uri transfer` is not yet implemented (tracked in mingo-e13s).");
+                UriCommands::Transfer { uri, new_owner, new_path, new_id, key } => {
+                    if new_owner.is_none() && new_path.is_none() && new_id.is_none() {
+                        eprintln!("Error: specify at least one of --new-path, --new-id, --new-owner");
+                        return Ok(());
+                    }
+                    run_transfer(&client, key, &uri, new_path, new_id, new_owner).await;
+                }
+                UriCommands::Mv { src, dst, key } => {
+                    // Derive the destination path+id from the dst URI.
+                    let (_dst_repo, dst_path, dst_id) = match parse_sbo_uri_path(&dst, &client).await {
+                        Ok(p) => p,
+                        Err(e) => { eprintln!("Error (dst): {}", e); return Ok(()); }
+                    };
+                    run_transfer(&client, key, &src, Some(dst_path), Some(dst_id), None).await;
+                }
+                UriCommands::Rm { uri, key } => {
+                    run_transfer(&client, key, &uri, None, None, Some("null:".to_string())).await;
+                }
+                UriCommands::Chown { uri, to, key } => {
+                    run_transfer(&client, key, &uri, None, None, Some(to)).await;
                 }
             }
         }
@@ -1641,6 +1697,50 @@ async fn parse_object_path(
 
 /// Parse an SBO URI like sbo://sandmill.org/sys/names/alice
 /// Returns (repo_path, sbo_path, object_id)
+/// Resolve the source object URI, build a signed `transfer` envelope, and submit
+/// it. Shared by `uri transfer`/`mv`/`rm`/`chown`.
+async fn run_transfer(
+    client: &IpcClient,
+    key: Option<String>,
+    uri: &str,
+    new_path: Option<String>,
+    new_id: Option<String>,
+    new_owner: Option<String>,
+) {
+    use sbo_core::keyring::Keyring;
+    let (repo_path, path, id) = match parse_sbo_uri_path(uri, client).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let keyring = match Keyring::open() {
+        Ok(k) => k,
+        Err(e) => { eprintln!("Error: cannot open keyring: {}", e); return; }
+    };
+    let alias = match keyring.resolve_alias(key.as_deref()) {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let signing_key = match keyring.get_signing_key(&alias) {
+        Ok(k) => k,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let data = sbo_core::presets::transfer(
+        &signing_key, &path, &id,
+        new_path.as_deref(), new_id.as_deref(), new_owner.as_deref(),
+    );
+    match client.request(Request::Submit { repo_path, sbo_path: path, id, data }).await {
+        Ok(Response::Ok { data }) => {
+            println!("Submitted transfer to DA layer.");
+            if let Some(sid) = data["submission_id"].as_str() {
+                println!("  submission_id: {}", sid);
+            }
+            println!("(Applied once the block is finalized and synced.)");
+        }
+        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
+        Err(e) => eprintln!("Failed to connect to daemon: {}", e),
+    }
+}
+
 /// Guess a Content-Type from a file extension, defaulting to JSON (the common
 /// case for SBO objects). Used by `uri post` when `--content-type` is absent.
 fn guess_content_type(file: &std::path::Path) -> &'static str {
