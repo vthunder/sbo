@@ -850,6 +850,9 @@ pub fn transfer(
         content_hash: None,
         payload: None,
         owner: None,
+        // Actor is the signer; the target object is located by (path, id). No
+        // Creator header — setting it would make the signer appear to *act as*
+        // that identity in policy evaluation.
         creator: None,
         content_encoding: None,
         content_schema: None,
