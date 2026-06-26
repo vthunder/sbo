@@ -1,6 +1,8 @@
+target/
 node_modules
 sbo_index.db
 .DS_Store
+my-repo/
 
 # wasm-pack generated package (build with sbo-wasm/build-web.sh)
-reference_impl/sbo-wasm/pkg/
+sbo-wasm/pkg/
