@@ -2,6 +2,7 @@
 
 use crate::message::{Message, Id};
 use super::types::{Policy, ActionType, AttestedSource, Identity};
+use super::path::PolicyVars;
 
 /// Resolves an [`AttestedSource`] against on-chain attestations for the acting
 /// user: returns `true` when an in-force `attestation.v1` of `type` (by `by`,
@@ -17,41 +18,32 @@ pub enum PolicyResult {
     Denied(String),
 }
 
-/// Evaluate a policy for an action
+/// Evaluate a policy for an action.
 ///
-/// For CREATE actions, `owner` is None (no existing object). In this case,
-/// we derive the "effective owner" from the target path's first component
-/// (the namespace owner) for `$owner` variable resolution and identity matching.
+/// `vars` carries the literal-reference policy variables (`$owner`/`$user`/
+/// `$email`/`$name`) the caller resolved from the message + identity graph.
+/// Undefined variables fail closed (see [`PolicyVars`]). `signer_is_owner` is the
+/// caller's L2 determination that the signer controls `vars.owner` (what a
+/// `to: owner` grant requires).
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     policy: &Policy,
     actor: &Id,
     action: ActionType,
     target_path: &str,
-    owner: Option<&str>,
+    vars: &PolicyVars,
     signer_is_owner: bool,
     is_attested: &AttestedCheck,
     message: &Message,
 ) -> PolicyResult {
-    // For CREATE actions without an owner, derive effective owner from path
-    // e.g., /alice/nfts/ -> alice is the namespace owner
-    let effective_owner: Option<String> = owner.map(|s| s.to_string()).or_else(|| {
-        if action == ActionType::Create {
-            extract_namespace_owner(target_path)
-        } else {
-            None
-        }
-    });
-    let effective_owner_ref = effective_owner.as_deref();
-
     tracing::debug!(
-        "Policy eval: actor={}, action={:?}, path={}, owner={:?}, effective_owner={:?}",
-        actor, action, target_path, owner, effective_owner_ref
+        "Policy eval: actor={}, action={:?}, path={}, vars={:?}",
+        actor, action, target_path, vars
     );
 
     // 1. Check deny list first
     for pattern in &policy.deny {
-        if pattern.matches(&crate::message::Path::parse(target_path).unwrap(), effective_owner_ref) {
+        if pattern.matches(&crate::message::Path::parse(target_path).unwrap(), vars) {
             return PolicyResult::Denied(format!("Path denied by pattern: {:?}", pattern));
         }
     }
@@ -63,9 +55,9 @@ pub fn evaluate(
     let mut grant_debug = Vec::new();
     let granted = policy.grants.iter().any(|grant| {
         let path_parsed = crate::message::Path::parse(target_path).unwrap();
-        let path_matches = grant.on.matches(&path_parsed, effective_owner_ref);
+        let path_matches = grant.on.matches(&path_parsed, vars);
         let action_matches = grant.can.iter().any(|granted| action_covered_by(*granted, action));
-        let identity_match = identity_matches(&grant.to, actor, &actor_key, effective_owner_ref, signer_is_owner, is_attested, &policy.roles);
+        let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles);
 
         grant_debug.push(format!(
             "  grant to={:?} can={:?} on={:?} -> path:{} action:{} identity:{}",
@@ -83,7 +75,7 @@ pub fn evaluate(
 
     // 3. Check restrictions
     for restriction in &policy.restrictions {
-        if restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), effective_owner_ref) {
+        if restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars) {
             if let Some(reason) = check_requirements(&restriction.require, message, is_attested) {
                 return PolicyResult::Denied(reason);
             }
@@ -243,7 +235,7 @@ fn check_payload_signed_by(
         Err(_) => return Some(format!("Invalid issuer path: {}", issuer_path)),
     };
 
-    if !pattern.matches(&issuer_path_parsed, None) {
+    if !pattern.matches(&issuer_path_parsed, &PolicyVars::default()) {
         return Some(format!(
             "Issuer path '{}' does not match required pattern '{}'",
             issuer_path, signed_by.path
@@ -363,12 +355,12 @@ mod tests {
 
         // signer_is_owner = true → the `owner` grant applies → allowed.
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", Some("alice"), true, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, true, &no_attest, &msg),
             PolicyResult::Allowed
         ));
         // signer_is_owner = false → no matching grant → denied.
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", Some("alice"), false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, false, &no_attest, &msg),
             PolicyResult::Denied(_)
         ));
     }
@@ -386,11 +378,11 @@ mod tests {
         let actor = Id::new("e_ephemeral").unwrap();
         let no_attest = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", Some("alice@example.com"), true, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, true, &no_attest, &msg),
             PolicyResult::Allowed
         ));
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", Some("alice@example.com"), false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, false, &no_attest, &msg),
             PolicyResult::Denied(_)
         ));
     }
@@ -411,14 +403,14 @@ mod tests {
         for action in [ActionType::Create, ActionType::Update, ActionType::Post] {
             assert!(
                 matches!(
-                    evaluate(&policy, &actor, action, "/public/p1/", None, false, &no_attest, &msg),
+                    evaluate(&policy, &actor, action, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg),
                     PolicyResult::Allowed
                 ),
                 "post grant should cover {action:?}"
             );
         }
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Delete, "/public/p1/", None, false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Delete, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg),
             PolicyResult::Denied(_)
         ));
     }
@@ -435,11 +427,11 @@ mod tests {
         let actor = Id::new("e_x").unwrap();
         let no_attest = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/sys/names/alice/", None, false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg),
             PolicyResult::Allowed
         ));
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Update, "/sys/names/alice/", None, false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Update, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg),
             PolicyResult::Denied(_)
         ));
     }
@@ -459,21 +451,100 @@ mod tests {
         // Attested as a moderator and not banned → allowed.
         let mod_not_banned = |s: &AttestedSource| s.type_ == "role:moderator";
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", None, false, &mod_not_banned, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_not_banned, &msg),
             PolicyResult::Allowed
         ));
 
         // Not attested as a moderator → no grant matches → denied.
         let none = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", None, false, &none, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &none, &msg),
             PolicyResult::Denied(_)
         ));
 
         // Moderator but banned → grant matches but the not_attested restriction blocks.
         let mod_and_banned = |_: &AttestedSource| true;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", None, false, &mod_and_banned, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_and_banned, &msg),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    // --- Phase 1: four-variable literal-reference model ---------------------
+
+    #[test]
+    fn u_container_owner_grant_uses_declared_owner_not_path() {
+        // The /u/<id>/ layout: `/u/$owner/**` must match when $owner is the
+        // declared owner (de-circularized — segment 0 is the container "u").
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "owner", "can": ["*"], "on": "/u/$owner/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("e_x").unwrap();
+        let no = |_: &AttestedSource| false;
+
+        // declared owner + signer controls it → allowed under /u/<owner>/.
+        let vars = PolicyVars { owner: Some("alice@mingo.place"), ..Default::default() };
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars, true, &no, &msg),
+            PolicyResult::Allowed
+        ));
+        // no declared owner → $owner undefined → fails closed (NOT derived as "u").
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &PolicyVars::default(), true, &no, &msg),
+            PolicyResult::Denied(_)
+        ));
+        // owner declared but path is someone else's namespace → no path match.
+        let vars_bob = PolicyVars { owner: Some("bob@mingo.place"), ..Default::default() };
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars_bob, true, &no, &msg),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn email_variable_fails_closed_when_absent() {
+        // `/u/$email/**` restricts the namespace to email-rooted identities; a
+        // key-only signer (no email) must be denied (the literal `$email` token
+        // matches no real segment).
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/u/$email/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("e_x").unwrap();
+        let no = |_: &AttestedSource| false;
+
+        let with_email = PolicyVars { email: Some("alice@mingo.place"), ..Default::default() };
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &with_email, false, &no, &msg),
+            PolicyResult::Allowed
+        ));
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &PolicyVars::default(), false, &no, &msg),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn user_variable_substitutes_signer_canonical_id() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/u/$user/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("e_x").unwrap();
+        let no = |_: &AttestedSource| false;
+        let vars = PolicyVars { user: Some("alice@mingo.place"), ..Default::default() };
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars, false, &no, &msg),
+            PolicyResult::Allowed
+        ));
+        // Different user than the path namespace → denied.
+        let vars_other = PolicyVars { user: Some("bob@mingo.place"), ..Default::default() };
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars_other, false, &no, &msg),
             PolicyResult::Denied(_)
         ));
     }

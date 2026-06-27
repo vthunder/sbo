@@ -831,12 +831,12 @@ fn check_policy_at(
     let actor = resolve_creator(msg, Some(state), l2);
     let target_path = target.to_string();
 
-    // The owner reference the `owner` policy identity authorizes against: an
-    // explicit owner (the existing object's resolved controller, for updates),
-    // else the namespace owner derived from the target path (for creates).
+    // The `$owner` reference (literal, never path-derived): the existing object's
+    // resolved controller for updates (passed in), else the declared `Owner`
+    // header for creates. De-circularized — no longer extracted from the path.
     let owner_ref: Option<String> = owner.map(|s| s.to_string()).or_else(|| {
         if action == ActionType::Create {
-            sbo_core::policy::extract_namespace_owner(&target_path)
+            msg.owner.as_ref().map(|o| o.as_str().to_string())
         } else {
             None
         }
@@ -849,17 +849,29 @@ fn check_policy_at(
         .map(|o| l2_authorize(msg, state, l2, o).is_ok())
         .unwrap_or(false);
 
+    // The acting user's attributed email (if any) and local name (if any), for
+    // the `$email` / `$name` policy variables; `$user` is the actor's canonical
+    // id. All literal references; undefined forms fail closed in matching.
+    let user_email = attributed_email(msg, Some(state), l2);
+    let user_name = state.get_name_for_pubkey(&msg.signing_key.to_string()).ok().flatten();
+    let policy_vars = sbo_core::policy::PolicyVars {
+        owner: owner_ref.as_deref(),
+        user: Some(actor.as_str()),
+        email: user_email.as_deref(),
+        name: user_name.as_deref(),
+    };
+
     // The acting user's controller, for attestation-defined roles/conditions:
     // the attributed email if the signer carries valid attribution, else the
     // signing key. Matches an `attested` source whose subject resolves to it.
-    let requester = match attributed_email(msg, Some(state), l2) {
+    let requester = match user_email.clone() {
         Some(email) => Controller::Email(email),
         None => Controller::Key(msg.signing_key.to_string()),
     };
     let is_attested = |source: &AttestedSource| attested_subject_matches(state, l2, &requester, source);
 
     // Evaluate the policy
-    match evaluate(&policy, &actor, action, &target_path, owner, signer_is_owner, &is_attested, msg) {
+    match evaluate(&policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg) {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",
