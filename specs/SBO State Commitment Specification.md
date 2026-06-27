@@ -123,6 +123,8 @@ In SBO, objects are uniquely identified by `(path, creator, id)` rather than jus
 
 **The creator segment is the author's resolved controller, not the signing key.** It is derived deterministically from the message and chain state at inclusion time: the explicit `Creator` header if present, else — when the signer carries a valid attribution — the **attributed email** (the address the signer is proven to speak for; see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)), else the signer's claimed name, else a stable encoding of the signing key. Using the attributed email means an email-rooted author's objects share one creator segment **across browserid key rotation**, rather than fragmenting under each ephemeral cert key — and because attribution is pinned to the inclusion-time clock, the segment is a deterministic function of message + on-chain state, so a from-genesis replayer reconstructs the identical trie.
 
+**Transfer is creator-invariant.** A `transfer` re-homes the existing `(path, creator, id)` leaf to `(new_path, creator, new_id)` — deleting the source leaf and inserting the destination leaf with the **same object hash**. The creator segment does not change (only `path`, `id`, and/or the object's `owner` may). The destination-collision rule ("does not exist by the same creator at the destination") is evaluated against this preserved creator.
+
 **Example:**
 
 An object at `/sys/names/` with ID `alice` created by `user123` has trie segments:

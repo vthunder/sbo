@@ -907,6 +907,142 @@ impl SyncEngine {
         })
     }
 
+    /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`.
+    fn object_file_path(repo: &Repo, path: &sbo_core::message::Path, id: &str) -> std::path::PathBuf {
+        let mut p = repo.path.clone();
+        for component in path.to_string().trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
+            p.push(component);
+        }
+        p.push(id);
+        p
+    }
+
+    /// Apply a `transfer` (move / rename / re-own) or `delete` to state + mirror.
+    /// These relocate or remove an existing object rather than writing the action
+    /// envelope as content. Per the spec the object's `creator` is invariant; a
+    /// move re-homes the existing `(path, creator, id)` leaf with the same object
+    /// hash, updating `owner_ref` iff a `New-Owner` is given. Delete (Action or
+    /// `New-Owner: null:`) removes the leaf.
+    fn apply_transfer_or_delete(
+        &mut self,
+        repo: &Repo,
+        msg: &sbo_core::message::Message,
+        l2: &crate::validate::L2Context,
+        touched: &mut TouchedObjects,
+    ) -> crate::Result<()> {
+        use sbo_core::message::Action;
+        let uri = repo.uri.to_string();
+        let state_db = match self.state_dbs.get(&uri) {
+            Some(db) => db.clone(),
+            None => return Ok(()),
+        };
+        // Locate the target object the same way validation did: by (path, id),
+        // preferring the signer's own, else the sole object there. The object's
+        // own creator (invariant across the move) keys the trie leaves.
+        let existing = match crate::validate::resolve_transfer_target(msg, state_db.as_ref(), l2) {
+            Ok(Some(o)) => o,
+            Ok(None) => {
+                tracing::debug!("transfer/delete of missing object {}{}; skipping", msg.path, msg.id);
+                return Ok(());
+            }
+            Err(e) => return Err(crate::DaemonError::Repo(format!("state read failed: {}", e))),
+        };
+        let creator = existing.creator.clone();
+
+        let src_segs = StateDb::object_to_segments(&msg.path, &creator, &msg.id);
+        let src_file = Self::object_file_path(repo, &msg.path, msg.id.as_str());
+        let src_is_name = msg.path.to_string().starts_with("/sys/names/");
+
+        let (new_owner, new_path, new_id) = match &msg.action {
+            Action::Transfer { new_owner, new_path, new_id } => (
+                new_owner.as_ref().map(|o| o.as_str().to_string()),
+                new_path.clone(),
+                new_id.as_ref().map(|i| i.as_str().to_string()),
+            ),
+            _ => (None, None, None),
+        };
+        let is_delete = matches!(msg.action, Action::Delete) || new_owner.as_deref() == Some("null:");
+
+        if is_delete {
+            touched.deletes.push(TouchedDelete {
+                path_segments: src_segs,
+                old_object_hash: existing.object_hash,
+            });
+            state_db
+                .delete_object(&msg.path, &creator, &msg.id)
+                .map_err(|e| crate::DaemonError::Repo(format!("delete_object failed: {}", e)))?;
+            let _ = std::fs::remove_file(&src_file);
+            if src_is_name {
+                let _ = state_db.delete_name_claim(&msg.signing_key.to_string());
+            }
+            if let Ok(mut pool) = self.pending.write() {
+                pool.reconcile_applied(&existing);
+            }
+            tracing::info!("Deleted object {}{}", msg.path, msg.id);
+            return Ok(());
+        }
+
+        // Move / rename / re-own. Creator and object bytes (hence object_hash) are
+        // preserved; only path/id/owner_ref may change.
+        let dest_path = new_path.clone().unwrap_or_else(|| msg.path.clone());
+        let dest_id = match &new_id {
+            Some(s) => sbo_core::message::Id::new(s)
+                .map_err(|e| crate::DaemonError::Repo(format!("invalid New-ID: {}", e)))?,
+            None => msg.id.clone(),
+        };
+
+        let mut moved = existing.clone();
+        moved.path = dest_path.clone();
+        moved.id = dest_id.clone();
+        if let Some(no) = &new_owner {
+            moved.owner_ref = Some(no.clone());
+        }
+
+        let dest_segs = StateDb::object_to_segments(&dest_path, &creator, &dest_id);
+        touched.deletes.push(TouchedDelete {
+            path_segments: src_segs,
+            old_object_hash: existing.object_hash,
+        });
+        touched.creates.push(TouchedCreate {
+            path_segments: dest_segs,
+            new_object_hash: moved.object_hash,
+        });
+
+        state_db
+            .delete_object(&msg.path, &creator, &msg.id)
+            .map_err(|e| crate::DaemonError::Repo(format!("delete_object failed: {}", e)))?;
+        state_db
+            .put_object(&moved)
+            .map_err(|e| crate::DaemonError::Repo(format!("put_object failed: {}", e)))?;
+
+        // Move the mirror file (carry the original object's wire bytes).
+        let dest_file = Self::object_file_path(repo, &dest_path, dest_id.as_str());
+        if let Some(parent) = dest_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Err(e) = std::fs::rename(&src_file, &dest_file) {
+            tracing::warn!("Could not move mirror file {} -> {}: {}", src_file.display(), dest_file.display(), e);
+        }
+
+        // Keep the name-claim index consistent if a name record moved.
+        if src_is_name {
+            let _ = state_db.delete_name_claim(&msg.signing_key.to_string());
+        }
+        if dest_path.to_string().starts_with("/sys/names/") {
+            let _ = state_db.put_name_claim(&msg.signing_key.to_string(), dest_id.as_str());
+        }
+
+        if let Ok(mut pool) = self.pending.write() {
+            pool.reconcile_applied(&moved);
+        }
+        tracing::info!(
+            "Transferred {}{} -> {}{}{}",
+            msg.path, msg.id, dest_path, dest_id,
+            new_owner.as_deref().map(|o| format!(" (owner={})", o)).unwrap_or_default()
+        );
+        Ok(())
+    }
+
     /// Write an SBO object to the filesystem and update state
     fn write_object(
         &mut self,
@@ -916,6 +1052,15 @@ impl SyncEngine {
         l2: &crate::validate::L2Context,
         touched: &mut TouchedObjects,
     ) -> crate::Result<()> {
+        // Transfer and delete relocate/remove an existing object rather than
+        // writing the action envelope as content; handle them separately.
+        if matches!(
+            msg.action,
+            sbo_core::message::Action::Transfer { .. } | sbo_core::message::Action::Delete
+        ) {
+            return self.apply_transfer_or_delete(repo, msg, l2, touched);
+        }
+
         // Build path: repo_root / sbo_path / sbo_id
         let mut file_path = repo.path.clone();
 

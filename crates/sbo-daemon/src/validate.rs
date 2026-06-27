@@ -222,6 +222,24 @@ fn attributed_email(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context
 /// **attributed email** (so an email author's writes share a stable creator
 /// across browserid key rotation, instead of fragmenting under each ephemeral
 /// key) → the signer's claimed name → truncated key hex.
+/// Locate the object a transfer/delete targets. Named by `(msg.path, msg.id)`;
+/// the creator is whatever is in state, not the signer. Prefers the signer's own
+/// object at that path+id (so a user transfers their own object unambiguously),
+/// else falls back to the sole object there (the admin-on-user's-object case).
+/// Both `validate_transfer` and the sync apply path use this so they agree on
+/// the exact `(path, creator, id)` leaf.
+pub fn resolve_transfer_target(
+    msg: &Message,
+    state: &dyn StateView,
+    l2: &L2Context,
+) -> Result<Option<StoredObject>, sbo_core::error::DbError> {
+    let actor_creator = resolve_creator(msg, Some(state), l2);
+    if let Some(obj) = state.get_object(&msg.path, &actor_creator, &msg.id)? {
+        return Ok(Some(obj));
+    }
+    state.get_first_object_at_path_id(&msg.path, &msg.id)
+}
+
 pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Id {
     // If message has explicit creator, use it
     if let Some(creator) = &msg.creator {
@@ -440,12 +458,22 @@ pub fn validate_message(
     // email-rooted owners it requires valid browserid+DNSSEC attribution.
     // L1-valid but L2-unauthorized writes are carried by the DA layer but
     // disregarded here — they never reach state mutation.
-    let effective_owner = effective_owner_ref(msg);
-    if let Err(reason) = l2_authorize(msg, state, l2, &effective_owner) {
-        return ValidationResult::Invalid {
-            stage: ValidationStage::Attribution,
-            reason,
-        };
+    //
+    // Transfer/delete are exempt: they do not assert authorship of a new write,
+    // they act on an *existing* object whose target creator they merely name
+    // (via `Creator`). Their authorization — current owner OR a policy grant
+    // (the admin-override) — is handled in full by `validate_transfer`, so the
+    // owner-speaks-for-self gate would wrongly reject a legitimate admin move.
+    let is_transfer_or_delete =
+        matches!(msg.action, Action::Transfer { .. } | Action::Delete);
+    if !is_transfer_or_delete {
+        let effective_owner = effective_owner_ref(msg);
+        if let Err(reason) = l2_authorize(msg, state, l2, &effective_owner) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason,
+            };
+        }
     }
 
     // 3. Check if root policy exists (genesis check)
@@ -635,12 +663,19 @@ fn validate_transfer(
         };
     }
 
-    // Get the creator (use name resolution if available)
-    let creator = resolve_creator(msg, Some(state), l2);
-
-    // Object must exist for transfer
-    let existing = match state.get_object(&msg.path, &creator, &msg.id) {
-        Ok(obj) => obj,
+    // Locate the TARGET object. The actor is the signer; the object is named by
+    // (path, id). Prefer the signer's own object at that path+id (the common
+    // owner case); otherwise fall back to the sole object there regardless of
+    // creator (the admin-acting-on-a-user's-object case). `creator` is the
+    // TARGET object's creator — invariant across the transfer — not the actor.
+    let obj = match resolve_transfer_target(msg, state, l2) {
+        Ok(Some(o)) => o,
+        Ok(None) => {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::State,
+                reason: "Cannot transfer non-existent object".to_string(),
+            };
+        }
         Err(e) => {
             return ValidationResult::Invalid {
                 stage: ValidationStage::State,
@@ -648,26 +683,92 @@ fn validate_transfer(
             };
         }
     };
+    let creator = obj.creator.clone();
+    let owner_ref = stored_owner_ref(&obj).to_string();
 
-    match existing {
-        Some(obj) => {
-            // Only the object's resolved controller may transfer/delete it.
-            let owner_ref = stored_owner_ref(&obj);
-            if let Err(reason) = l2_authorize(msg, state, l2, owner_ref) {
-                return ValidationResult::Invalid {
-                    stage: ValidationStage::Attribution,
-                    reason: format!("Signer does not control owner {}: {}", owner_ref, reason),
-                };
-            }
-            ValidationResult::Valid { creator: creator.to_string() }
-        }
-        None => {
-            ValidationResult::Invalid {
-                stage: ValidationStage::State,
-                reason: "Cannot transfer non-existent object".to_string(),
-            }
+    // Destructure the transfer destination fields. `validate_delete` routes here
+    // with `Action::Delete` (no New-* fields); `New-Owner: null:` is the other
+    // delete spelling.
+    let (new_owner, new_path, new_id) = match &msg.action {
+        sbo_core::message::Action::Transfer { new_owner, new_path, new_id } => (
+            new_owner.as_ref().map(|o| o.as_str().to_string()),
+            new_path.clone(),
+            new_id.as_ref().map(|i| i.as_str().to_string()),
+        ),
+        _ => (None, None, None),
+    };
+    let is_delete = matches!(msg.action, sbo_core::message::Action::Delete)
+        || new_owner.as_deref() == Some("null:");
+
+    // (A) SOURCE AUTHORIZATION — the current owner may always act on the object;
+    // otherwise the object's (source-path) policy must grant the action to the
+    // signer. This is the "unless allowed by the object's policy" clause in
+    // SBO Specification.md §transfer, and is how a sys/admin role (granted
+    // `transfer`/`delete` on `/**`) acts on objects it does not own.
+    if l2_authorize(msg, state, l2, &owner_ref).is_err() {
+        let action = if is_delete { ActionType::Delete } else { ActionType::Transfer };
+        if let Err(reason) = check_policy(state, msg, action, Some(&owner_ref), l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!(
+                    "Signer does not control owner {} and policy denies {:?}: {}",
+                    owner_ref, action, reason
+                ),
+            };
         }
     }
+
+    // (B) DESTINATION — only when relocating (New-Path and/or New-ID). Both the
+    // collision rule and the destination-path policy apply (SBO Specification.md
+    // §transfer). Creator is preserved by the move, so the collision check is
+    // "does an object already exist at the destination for THIS creator".
+    if new_path.is_some() || new_id.is_some() {
+        let dest_path = new_path.clone().unwrap_or_else(|| msg.path.clone());
+        let dest_id_str = new_id.clone().unwrap_or_else(|| msg.id.as_str().to_string());
+        let dest_id = match sbo_core::message::Id::new(&dest_id_str) {
+            Ok(i) => i,
+            Err(e) => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::State,
+                    reason: format!("Invalid New-ID: {}", e),
+                };
+            }
+        };
+        match state.get_object(&dest_path, &creator, &dest_id) {
+            Ok(Some(_)) => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::State,
+                    reason: format!(
+                        "Destination {}{} already exists for creator {}",
+                        dest_path, dest_id, creator
+                    ),
+                };
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::State,
+                    reason: format!("State DB error checking destination: {}", e),
+                };
+            }
+        }
+        // The destination collection must admit the object. The post-transfer
+        // owner (New-Owner if changing ownership, else the current owner) is the
+        // namespace owner the destination's `create` grant authorizes against —
+        // so a move into `/u/$owner/**` succeeds when the object lands in its
+        // owner's namespace, for both self-moves and admin filing.
+        let owner_after = new_owner.clone().unwrap_or_else(|| owner_ref.clone());
+        if let Err(reason) =
+            check_policy_at(state, msg, &dest_path, ActionType::Create, Some(&owner_after), l2)
+        {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!("Destination {} does not admit object: {}", dest_path, reason),
+            };
+        }
+    }
+
+    ValidationResult::Valid { creator: creator.to_string() }
 }
 
 /// Validate a delete action
@@ -698,8 +799,22 @@ fn check_policy(
     owner: Option<&str>,
     l2: &L2Context,
 ) -> Result<(), String> {
+    check_policy_at(state, msg, &msg.path, action, owner, l2)
+}
+
+/// Like [`check_policy`] but evaluates against an explicit `target` path rather
+/// than `msg.path`. Used by transfer validation to evaluate the **destination**
+/// path's policy (the source path is checked via the `msg.path` default).
+fn check_policy_at(
+    state: &dyn StateView,
+    msg: &Message,
+    target: &sbo_core::message::Path,
+    action: ActionType,
+    owner: Option<&str>,
+    l2: &L2Context,
+) -> Result<(), String> {
     // Resolve the applicable policy by walking up the path hierarchy
-    let policy = match state.resolve_policy(&msg.path) {
+    let policy = match state.resolve_policy(target) {
         Ok(Some(p)) => p,
         Ok(None) => {
             // No policy found - deny by default
@@ -714,7 +829,7 @@ fn check_policy(
 
     // Resolve the actor's identity (name if available, otherwise key-based)
     let actor = resolve_creator(msg, Some(state), l2);
-    let target_path = msg.path.to_string();
+    let target_path = target.to_string();
 
     // The owner reference the `owner` policy identity authorizes against: an
     // explicit owner (the existing object's resolved controller, for updates),

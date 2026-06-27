@@ -2,6 +2,24 @@
 resolver = "2"
 members = ["crates/*", "crates/sbo-zkvm/methods"]
 
+# `default-members` is what a bare `cargo build`/`cargo test` (no `-p`) operates
+# on. It excludes the RISC Zero crates (`sbo-zkvm` and its `methods` guest),
+# whose build script requires the risc0 Rust toolchain (`rzup install rust`) and
+# the macOS `metal` SDK — neither of which is needed for the daemon, CLI, or
+# core. Build the zkvm crates explicitly when you have the toolchain, e.g.
+# `cargo build -p sbo-zkvm`.
+default-members = [
+    "crates/sbo-avail",
+    "crates/sbo-capture",
+    "crates/sbo-cli",
+    "crates/sbo-core",
+    "crates/sbo-crypto",
+    "crates/sbo-daemon",
+    "crates/sbo-rpc",
+    "crates/sbo-types",
+    "crates/sbo-wasm",
+]
+
 # Incremental release builds. Cargo only ever compiles *workspace* crates
 # incrementally (never registry deps), so this is cache-safe: it does NOT change
 # the fingerprint of rocksdb et al., and combined with a deploy's persisted

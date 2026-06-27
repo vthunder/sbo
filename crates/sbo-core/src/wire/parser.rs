@@ -189,6 +189,25 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
     let auth_cert = headers.get("Auth-Cert").map(|s| s.to_string());
     let auth_evidence = headers.get("Auth-Evidence").map(|s| s.to_string());
 
+    // Transfer destination headers. `Action::parse` cannot see headers, so it
+    // yields `Transfer { None, None, None }`; populate the fields here and
+    // enforce the wire rule that at least one New-* is present (Wire Format
+    // Spec §Conditionally Required Headers). `New-Owner: null:` is the delete
+    // spelling and is carried through verbatim.
+    let action = if matches!(action, Action::Transfer { .. }) {
+        let new_owner = headers.get("New-Owner").map(|s| Id::new(*s)).transpose()?;
+        let new_path = headers.get("New-Path").map(|s| Path::parse(s)).transpose()?;
+        let new_id = headers.get("New-ID").map(|s| Id::new(*s)).transpose()?;
+        if new_owner.is_none() && new_path.is_none() && new_id.is_none() {
+            return Err(ParseError::InvalidHeader(
+                "transfer requires at least one of New-Owner, New-Path, New-ID".to_string(),
+            ));
+        }
+        Action::Transfer { new_owner, new_path, new_id }
+    } else {
+        action
+    };
+
     Ok((Message {
         action,
         path,
@@ -198,7 +217,16 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
         signature,
         content_type,
         content_hash,
-        payload: Some(payload.to_vec()),
+        // A message carries a payload iff it declared one (Content-Length present).
+        // Payload-less actions (e.g. transfer/delete) have no Content-Length and
+        // must round-trip to `payload: None`, not `Some(empty)` — otherwise the
+        // reconstructed canonical content would gain a spurious `Content-Length: 0`
+        // and the signature would fail to verify.
+        payload: if headers.contains_key("Content-Length") {
+            Some(payload.to_vec())
+        } else {
+            None
+        },
         owner,
         creator,
         content_encoding,

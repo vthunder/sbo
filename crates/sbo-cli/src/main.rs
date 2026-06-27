@@ -71,6 +71,9 @@ enum UriCommands {
     Get {
         /// SBO URI (e.g., sbo+raw://avail:turing:506/path/to/object)
         uri: String,
+        /// Emit a verifiable SBOQ trie proof instead of the plain object
+        #[arg(long)]
+        proof: bool,
     },
 
     /// Post an object to an SBO URI
@@ -83,9 +86,18 @@ enum UriCommands {
         uri: String,
         /// File containing payload
         file: PathBuf,
-        /// Content type (auto-detected if not specified)
+        /// Content type (auto-detected from extension if not specified)
         #[arg(long)]
         content_type: Option<String>,
+        /// Content schema identifier (e.g. policy.v2, nft.v1)
+        #[arg(long)]
+        schema: Option<String>,
+        /// Owner identity reference (defaults to the signer)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Keyring alias to sign with (defaults to the default key)
+        #[arg(long)]
+        key: Option<String>,
     },
 
     /// List objects at an SBO URI path
@@ -98,23 +110,63 @@ enum UriCommands {
         uri: String,
     },
 
-    /// Transfer an object to a new location or owner
+    /// Transfer an object: move (--new-path/--new-id), re-own (--new-owner), or
+    /// both. At least one is required. Authorized by the object's owner, or by a
+    /// policy grant (sys/admin) for objects you don't own.
     ///
     /// Examples:
     ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-path /bob/nfts/
-    ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-owner <pubkey>
+    ///   sbo uri transfer sbo+raw://avail:turing:506/alice/nfts/token1 --new-owner bob@mingo.place
     Transfer {
         /// SBO URI of the object to transfer
         uri: String,
-        /// New owner public key
+        /// New owner identity reference (use `null:` to delete)
         #[arg(long)]
         new_owner: Option<String>,
-        /// New path (within same chain/app)
+        /// New collection path (must end with `/`)
         #[arg(long)]
         new_path: Option<String>,
         /// New object ID
         #[arg(long)]
         new_id: Option<String>,
+        /// Keyring alias to sign with (defaults to the default key)
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Move/rename an object: sugar for `transfer` that derives the destination
+    /// path and ID from a target URI.
+    ///
+    ///   sbo uri mv <src-uri> <dst-uri>
+    Mv {
+        /// Source object URI
+        src: String,
+        /// Destination object URI (same repo)
+        dst: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Delete an object (transfer to the null owner).
+    Rm {
+        /// SBO URI of the object to delete
+        uri: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Change an object's owner: sugar for `transfer --new-owner`.
+    Chown {
+        /// SBO URI of the object
+        uri: String,
+        /// New owner identity reference
+        #[arg(long)]
+        to: String,
+        /// Keyring alias to sign with
+        #[arg(long)]
+        key: Option<String>,
     },
 }
 
@@ -594,24 +646,107 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Uri(uri_cmd) => {
+            let config = Config::load(&Config::config_path()).unwrap_or_default();
+            let client = IpcClient::new(config.daemon.socket_path);
             match uri_cmd {
-                UriCommands::Get { uri } => {
-                    println!("Getting object: {}", uri);
-                    todo!("Implement uri get")
-                }
-                UriCommands::Post { uri, file, content_type } => {
-                    println!("Posting to {}: {:?}", uri, file);
-                    let _ = content_type; // TODO: use content_type
-                    todo!("Implement uri post")
+                UriCommands::Get { uri, proof } => {
+                    let (repo_path, sbo_path, id) = match parse_sbo_uri_path(&uri, &client).await {
+                        Ok(p) => p,
+                        Err(e) => { eprintln!("Error: {}", e); return Ok(()); }
+                    };
+                    match client.request(Request::GetObject {
+                        repo_path, path: sbo_path, id, with_proof: proof,
+                    }).await {
+                        Ok(Response::Ok { data }) => {
+                            if proof {
+                                if let Some(sboq) = data["sboq"].as_str() {
+                                    println!("{}", sboq);
+                                    return Ok(());
+                                }
+                            }
+                            println!("{}", serde_json::to_string_pretty(&data)?);
+                        }
+                        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
+                        Err(e) => eprintln!("Failed to connect to daemon: {}", e),
+                    }
                 }
                 UriCommands::List { uri } => {
-                    println!("Listing: {}", uri);
-                    todo!("Implement uri list")
+                    let (repo_path, prefix) = match parse_sbo_uri_prefix(&uri, &client).await {
+                        Ok(p) => p,
+                        Err(e) => { eprintln!("Error: {}", e); return Ok(()); }
+                    };
+                    match client.request(Request::ListObjects {
+                        repo_path, prefix: Some(prefix), schema: None,
+                    }).await {
+                        Ok(Response::Ok { data }) => {
+                            println!("{}", serde_json::to_string_pretty(&data)?);
+                        }
+                        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
+                        Err(e) => eprintln!("Failed to connect to daemon: {}", e),
+                    }
                 }
-                UriCommands::Transfer { uri, new_owner, new_path, new_id } => {
-                    println!("Transferring: {}", uri);
-                    let _ = (new_owner, new_path, new_id); // TODO: use these
-                    todo!("Implement uri transfer")
+                UriCommands::Post { uri, file, content_type, schema, owner, key } => {
+                    use sbo_core::keyring::Keyring;
+                    let (repo_path, sbo_path, id) = match parse_sbo_uri_path(&uri, &client).await {
+                        Ok(p) => p,
+                        Err(e) => { eprintln!("Error: {}", e); return Ok(()); }
+                    };
+                    let payload = match std::fs::read(&file) {
+                        Ok(b) => b,
+                        Err(e) => { eprintln!("Error: cannot read {}: {}", file.display(), e); return Ok(()); }
+                    };
+                    let keyring = match Keyring::open() {
+                        Ok(k) => k,
+                        Err(e) => { eprintln!("Error: cannot open keyring: {}", e); return Ok(()); }
+                    };
+                    let alias = match keyring.resolve_alias(key.as_deref()) {
+                        Ok(a) => a,
+                        Err(e) => { eprintln!("Error: {}", e); return Ok(()); }
+                    };
+                    let signing_key = match keyring.get_signing_key(&alias) {
+                        Ok(k) => k,
+                        Err(e) => { eprintln!("Error: {}", e); return Ok(()); }
+                    };
+                    let content_type = content_type
+                        .unwrap_or_else(|| guess_content_type(&file).to_string());
+                    let data = sbo_core::presets::post_object(
+                        &signing_key, &sbo_path, &id, &content_type,
+                        schema.as_deref(), owner.as_deref(), payload,
+                    );
+                    match client.request(Request::Submit {
+                        repo_path, sbo_path, id, data,
+                    }).await {
+                        Ok(Response::Ok { data }) => {
+                            println!("Submitted to DA layer.");
+                            if let Some(sid) = data["submission_id"].as_str() {
+                                println!("  submission_id: {}", sid);
+                            }
+                            println!("(Visible once the block is finalized and synced.)");
+                        }
+                        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
+                        Err(e) => eprintln!("Failed to connect to daemon: {}", e),
+                    }
+                }
+                UriCommands::Transfer { uri, new_owner, new_path, new_id, key } => {
+                    if new_owner.is_none() && new_path.is_none() && new_id.is_none() {
+                        eprintln!("Error: specify at least one of --new-path, --new-id, --new-owner");
+                        return Ok(());
+                    }
+                    run_transfer(&client, key, &uri, new_path, new_id, new_owner).await;
+                }
+                UriCommands::Mv { src, dst, key } => {
+                    // Derive the destination path+id from the dst URI.
+                    let (_dst_repo, dst_path, dst_id) = match parse_sbo_uri_path(&dst, &client).await {
+                        Ok(p) => p,
+                        Err(e) => { eprintln!("Error (dst): {}", e); return Ok(()); }
+                    };
+                    run_transfer(&client, key, &src, Some(dst_path), Some(dst_id), None).await;
+                }
+                UriCommands::Rm { uri, key } => {
+                    run_transfer(&client, key, &uri, None, None, Some("null:".to_string())).await;
+                }
+                UriCommands::Chown { uri, to, key } => {
+                    run_transfer(&client, key, &uri, None, None, Some(to)).await;
                 }
             }
         }
@@ -1562,6 +1697,128 @@ async fn parse_object_path(
 
 /// Parse an SBO URI like sbo://sandmill.org/sys/names/alice
 /// Returns (repo_path, sbo_path, object_id)
+/// Resolve the source object URI, build a signed `transfer` envelope, and submit
+/// it. Shared by `uri transfer`/`mv`/`rm`/`chown`.
+async fn run_transfer(
+    client: &IpcClient,
+    key: Option<String>,
+    uri: &str,
+    new_path: Option<String>,
+    new_id: Option<String>,
+    new_owner: Option<String>,
+) {
+    use sbo_core::keyring::Keyring;
+    let (repo_path, path, id) = match parse_sbo_uri_path(uri, client).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let keyring = match Keyring::open() {
+        Ok(k) => k,
+        Err(e) => { eprintln!("Error: cannot open keyring: {}", e); return; }
+    };
+    let alias = match keyring.resolve_alias(key.as_deref()) {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let signing_key = match keyring.get_signing_key(&alias) {
+        Ok(k) => k,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let data = sbo_core::presets::transfer(
+        &signing_key, &path, &id,
+        new_path.as_deref(), new_id.as_deref(), new_owner.as_deref(),
+    );
+    match client.request(Request::Submit { repo_path, sbo_path: path, id, data }).await {
+        Ok(Response::Ok { data }) => {
+            println!("Submitted transfer to DA layer.");
+            if let Some(sid) = data["submission_id"].as_str() {
+                println!("  submission_id: {}", sid);
+            }
+            println!("(Applied once the block is finalized and synced.)");
+        }
+        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
+        Err(e) => eprintln!("Failed to connect to daemon: {}", e),
+    }
+}
+
+/// Guess a Content-Type from a file extension, defaulting to JSON (the common
+/// case for SBO objects). Used by `uri post` when `--content-type` is absent.
+fn guess_content_type(file: &std::path::Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()) {
+        Some("json") | None => "application/json",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("txt") | Some("md") => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Resolve an SBO URI to `(repo_path, remainder)` where `remainder` is the part
+/// of the URI after the matched repo's base (with a leading `/`). Shared by the
+/// object-path and prefix parsers.
+async fn resolve_repo_remainder(
+    uri: &str,
+    client: &IpcClient,
+) -> anyhow::Result<(PathBuf, String)> {
+    let repos = match client.request(Request::RepoList).await {
+        Ok(Response::Ok { data }) => {
+            data["repos"].as_array()
+                .map(|arr| arr.iter()
+                    .filter_map(|r| {
+                        let path = r["path"].as_str()?.to_string();
+                        let display_uri = r["display_uri"].as_str()?.to_string();
+                        let resolved_uri = r["resolved_uri"].as_str()?.to_string();
+                        Some((PathBuf::from(path), display_uri, resolved_uri))
+                    })
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        }
+        Ok(Response::Error { message }) => {
+            return Err(anyhow::anyhow!("Failed to list repos: {}", message));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to connect to daemon: {}", e));
+        }
+    };
+
+    if repos.is_empty() {
+        return Err(anyhow::anyhow!("No repos found. Add a repo first with: sbo repo add <uri> <path>"));
+    }
+
+    for (path, display_uri, resolved_uri) in &repos {
+        let display_base = display_uri.trim_end_matches('/');
+        let resolved_base = resolved_uri.trim_end_matches('/');
+        if uri.starts_with(display_base) {
+            return Ok((path.clone(), uri[display_base.len()..].to_string()));
+        } else if uri.starts_with(resolved_base) {
+            return Ok((path.clone(), uri[resolved_base.len()..].to_string()));
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No repo found for URI: {}\nKnown repos:\n{}",
+        uri,
+        repos.iter().map(|(_, d, _)| format!("  {}", d)).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+/// Parse an SBO URI into `(repo_path, prefix)` for listing. The prefix is the
+/// full path portion (with leading and trailing `/`); an empty remainder lists
+/// the repo root (`/`).
+async fn parse_sbo_uri_prefix(
+    uri: &str,
+    client: &IpcClient,
+) -> anyhow::Result<(PathBuf, String)> {
+    let (repo_path, remainder) = resolve_repo_remainder(uri, client).await?;
+    let parts: Vec<&str> = remainder.split('/').filter(|s| !s.is_empty()).collect();
+    let prefix = if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}/", parts.join("/"))
+    };
+    Ok((repo_path, prefix))
+}
+
 async fn parse_sbo_uri_path(
     uri: &str,
     client: &IpcClient,
