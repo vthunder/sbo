@@ -1,6 +1,6 @@
 # SBO Identity Sovereignty, Canonical Identity, & Policy Variables — Design
 
-**Status:** Design / plan. Not yet implemented. Branch `feat/identity-sovereignty-and-policy-vars` (sbo).
+**Status:** Phases 1–6 IMPLEMENTED (sbo `feat/identity-sovereignty-and-policy-vars`, mingo `feat/u-layout`), tested + specced + pushed. Phase 7 (production migration) is a runbook (mingo docs/plans/2026-06-28-u-layout-migration-runbook.md), not yet executed (needs sys key + live verification).
 **Author:** design session, 2026-06-27.
 **Why:** mingo is the proving ground for real SBO use cases. This locks the identity
 model end-to-end (email onramp → self-sovereign over time), fixes the policy-variable
