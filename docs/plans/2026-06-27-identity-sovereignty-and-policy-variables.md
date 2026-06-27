@@ -209,8 +209,10 @@ Move user namespaces out of the root into a reserved container, keyed on the **c
 - **Live data migration:** for each existing root user object, `uri mv /<id>/... → /u/<id>/...`
   signed by sys (admin authority) or the owner. The policy update to `/sys/policies/root` is
   posted in place (sys owns it) — no re-genesis.
-- **Transition safety:** app reads both old and new paths during the cutover window so
-  mingo.place never shows missing data mid-migration.
+- **Transition safety:** N/A — **zero users (just the dev team)**. Hard switch, no dual-read:
+  update genesis/app to `/u/…`, post the new root policy in place, and simply
+  `uri rm` (or re-create) the few existing root test objects (`dan@mingo.place`,
+  `danmills@mingo.place`). No transition window needed.
 
 ---
 
@@ -253,5 +255,5 @@ migration.
    sovereignty guarantee to mean anything.)
 4. **Control-record richness** (§6) — ship v1 single-pinned-key now, design `identity.v2`
    (multi-key/recovery) as a documented later increment? (Recommended: yes.)
-5. **Layout cutover** — dual-read transition window vs hard switch? (Recommended: dual-read so
-   mingo.place never breaks.)
+5. **Layout cutover** — RESOLVED: **hard switch**. Zero users (just the dev team), so no
+   dual-read/transition window; delete or re-create the handful of existing root test objects.
