@@ -205,6 +205,21 @@ function authorize(message, chain_state):
 
 Every input is on-chain (`chain_state`, the message, the pinned root KSK) or derived deterministically from them, so all correct clients reach the same decision and no sequencer, checkpoint, or trusted recorder is involved.
 
+### Creator integrity
+
+`effective_owner` is `Owner → else Creator → else signer`, so the algorithm above
+authorizes the `Creator` reference *only when no `Owner` is present*. But `Creator`
+independently determines the object's **identity in state** — its
+`(path, creator, id)` trie segment (see the [State Commitment
+Specification](./SBO%20State%20Commitment%20Specification.md#creator-as-path-segment)) —
+while `Owner` gates the *path*. A writer must therefore not be able to file an
+object under another identity's creator segment.
+
+**Rule:** when a message declares a `Creator`, the signer MUST also be authorized
+for it — `authorize` is additionally run with `owner = Creator`. This holds for
+all actions. (When `Creator` is absent the creator is derived from the signer's
+own attribution/name/key, so it is controlled by construction.)
+
 ## Self-Sovereign Authorization
 
 A key-rooted owner (a genesis root, or a self-sovereign user with an `identity.v1`) is authorized by **direct signature**: the message's `Public-Key` must equal the owner's key, and the envelope signature must verify. No `Auth-Cert`, no `Auth-Evidence`, and no DNSSEC are involved. This is the `KeyController` branch above. The future self-sovereign tier with multi-provider recovery is noted in the Identity Specification and is out of scope here.

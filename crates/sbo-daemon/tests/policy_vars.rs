@@ -91,6 +91,50 @@ fn signed_post(key: &SigningKey, path: &str, id: &str, owner: Option<&str>) -> M
     msg
 }
 
+fn signed_post_creator(
+    key: &SigningKey,
+    path: &str,
+    id: &str,
+    owner: Option<&str>,
+    creator: Option<&str>,
+) -> Message {
+    let mut msg = signed_post(key, path, id, owner);
+    msg.creator = creator.map(|c| Id::new(c).unwrap());
+    msg.sign(key);
+    msg
+}
+
+#[test]
+fn declared_creator_must_be_controlled_by_signer() {
+    // Phase 2: the Creator reference sets the object's trie identity, so the
+    // signer must control it even when Owner is something the signer DOES control.
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    let alice = SigningKey::generate();
+    let bob = SigningKey::generate();
+    put_key_name(&db, "alice", &alice);
+    put_key_name(&db, "bob", &bob);
+    put_root_policy(&db);
+
+    // Alice writes in her own namespace (Owner: alice, which she controls) but
+    // declares Creator: bob, which she does NOT control → rejected at attribution.
+    let forged = signed_post_creator(&alice, "/u/alice/notes/", "n1", Some("alice"), Some("bob"));
+    assert!(
+        matches!(
+            validate_message(&forged, &db, dir.path(), &ctx(&db)),
+            ValidationResult::Invalid { stage: ValidationStage::Attribution, .. }
+        ),
+        "a Creator the signer does not control must be rejected"
+    );
+
+    // Declaring Creator: alice (self, controlled) is fine.
+    let ok = signed_post_creator(&alice, "/u/alice/notes/", "n2", Some("alice"), Some("alice"));
+    assert!(
+        matches!(validate_message(&ok, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
+        "a self-controlled Creator should be allowed"
+    );
+}
+
 #[test]
 fn u_namespace_create_authorized_by_declared_owner() {
     let dir = tempdir().unwrap();

@@ -476,6 +476,26 @@ pub fn validate_message(
         }
     }
 
+    // 2.6. Creator integrity. The `Creator` reference determines the object's
+    // identity in state — its `(path, creator, id)` trie segment — independently
+    // of `Owner` (which gates the path). If a `Creator` is declared, the signer
+    // must control it, else a writer could file objects under another identity's
+    // creator segment. The owner gate above only covers `Creator` when no `Owner`
+    // is present (it is `Owner → else Creator → else signer`), so validate it
+    // explicitly here whenever it is set. Applies to all actions.
+    if let Some(creator) = &msg.creator {
+        if let Err(reason) = l2_authorize(msg, state, l2, creator.as_str()) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason: format!(
+                    "Signer does not control declared Creator {}: {}",
+                    creator.as_str(),
+                    reason
+                ),
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
