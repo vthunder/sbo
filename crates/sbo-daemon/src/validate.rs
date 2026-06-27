@@ -654,7 +654,7 @@ fn is_name_claim_path(path: &SboPath) -> bool {
 fn validate_name_claim(
     msg: &Message,
     state: &dyn StateView,
-    _root_policy_exists: bool,
+    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
     // Check if ANY object exists at this path/id (regardless of creator)
@@ -688,7 +688,28 @@ fn validate_name_claim(
         }
         tracing::debug!("Controller updating name claim: {}", msg.id.as_str());
     } else {
-        // New name claim - allowed
+        // New name claim. On a primary-domain repo a local name `<local>` governs
+        // the identity `<local>@<domain>` (the sovereignty record), so claiming it
+        // requires controlling that identity — otherwise a stranger (or a
+        // front-runner) could hijack it. The signer proves control via browserid
+        // attribution to the email (first claim) or the already-pinned key (key
+        // rotation), since `l2_authorize` resolves the email through any existing
+        // record. Off a primary-domain repo, or during genesis (no root policy
+        // yet), name claims remain first-come.
+        if root_policy_exists {
+            if let Some(domain) = primary_domain(state) {
+                let email = format!("{}@{}", claimed_name, domain);
+                if let Err(reason) = l2_authorize(msg, state, l2, &email) {
+                    return ValidationResult::Invalid {
+                        stage: ValidationStage::Attribution,
+                        reason: format!(
+                            "Name '{}' maps to {} on this repo; claiming it requires controlling that identity: {}",
+                            claimed_name, email, reason
+                        ),
+                    };
+                }
+            }
+        }
         tracing::debug!("New name claim: {}", msg.id.as_str());
     }
 

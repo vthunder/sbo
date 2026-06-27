@@ -125,6 +125,71 @@ fn signed_post_creator(
     msg
 }
 
+fn signed_name_claim(key: &SigningKey, name: &str) -> Message {
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, name, None).unwrap();
+    let payload = jwt.into_bytes();
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(name).unwrap(),
+        object_type: ObjectType::Object,
+        signing_key: key.public_key(),
+        signature: Signature::parse(&"0".repeat(128)).unwrap(),
+        content_type: Some("application/jwt".to_string()),
+        content_hash: Some(ContentHash::sha256(&payload)),
+        payload: Some(payload),
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: Some("identity.v1".to_string()),
+        policy_ref: None,
+        related: None,
+        hlc: None,
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+    };
+    msg.sign(key);
+    msg
+}
+
+#[test]
+fn name_claim_on_primary_domain_requires_controlling_the_email() {
+    // Phase 4 anti-hijack: on a repo whose primary domain is mingo.place, a
+    // stranger with no attribution to alice@mingo.place cannot claim
+    // /sys/names/alice (which would govern that identity).
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    put_domain(&db, "mingo.place");
+    put_root_policy(&db);
+
+    let stranger = SigningKey::generate();
+    let claim = signed_name_claim(&stranger, "alice");
+    assert!(
+        matches!(
+            validate_message(&claim, &db, dir.path(), &ctx(&db)),
+            ValidationResult::Invalid { stage: ValidationStage::Attribution, .. }
+        ),
+        "claiming a primary-domain name without controlling the email must be denied"
+    );
+}
+
+#[test]
+fn name_claim_without_primary_domain_is_first_come() {
+    // No /sys/domains/* → no primary domain → name claims are first-come (a
+    // no-DNS sbo+raw:// repo, where names are key-rooted from the start).
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    put_root_policy(&db);
+
+    let anyone = SigningKey::generate();
+    let claim = signed_name_claim(&anyone, "alice");
+    assert!(
+        matches!(validate_message(&claim, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
+        "without a primary domain, a name claim should be first-come"
+    );
+}
+
 #[test]
 fn sovereign_key_write_under_u_namespace_with_canonical_email() {
     // Phase 3 sovereignty: alice published a key-rooted /sys/names/alice on a

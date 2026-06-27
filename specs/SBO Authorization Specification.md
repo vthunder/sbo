@@ -220,6 +220,17 @@ for it — `authorize` is additionally run with `owner = Creator`. This holds fo
 all actions. (When `Creator` is absent the creator is derived from the signer's
 own attribution/name/key, so it is controlled by construction.)
 
+### Name-claim anti-hijack (primary-domain repos)
+
+On a repository authoritative for a primary domain `D`, a local name `<local>`
+governs the identity `<local>@D` (the [Sovereignty
+Upgrade](./SBO%20Identity%20Specification.md#sovereignty-upgrade-email--key-over-time)).
+**Creating** `/sys/names/<local>` therefore MUST be authorized as `<local>@D`:
+`authorize` is run with `owner = "<local>@D"`. The first claim is satisfied by
+browserid attribution to that email; a later key rotation by the already-pinned
+key (the email resolves through the existing record). Off a primary-domain repo,
+or before the root policy exists (genesis), name claims are first-come.
+
 ## Self-Sovereign Authorization
 
 A key-rooted owner (a genesis root, or a self-sovereign user with an `identity.v1`) is authorized by **direct signature**: the message's `Public-Key` must equal the owner's key, and the envelope signature must verify. No `Auth-Cert`, no `Auth-Evidence`, and no DNSSEC are involved. This is the `KeyController` branch above. The future self-sovereign tier with multi-provider recovery is noted in the Identity Specification and is out of scope here.
