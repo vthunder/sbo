@@ -64,6 +64,27 @@ fn put_root_policy(db: &StateDb) {
     .unwrap();
 }
 
+/// Register the repo's primary domain object at `/sys/domains/<domain>`.
+fn put_domain(db: &StateDb, domain: &str) {
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/domains/").unwrap(),
+        id: Id::new(domain).unwrap(),
+        creator: Id::new("sys").unwrap(),
+        owner: Id::new("sys").unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(b"domain"),
+        payload: b"domain".to_vec(),
+        policy_ref: None,
+        content_schema: Some("domain.v1".to_string()),
+        owner_ref: None,
+        block_number: 1,
+        object_hash: [0u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+}
+
 fn signed_post(key: &SigningKey, path: &str, id: &str, owner: Option<&str>) -> Message {
     let payload = b"{}".to_vec();
     let mut msg = Message {
@@ -102,6 +123,30 @@ fn signed_post_creator(
     msg.creator = creator.map(|c| Id::new(c).unwrap());
     msg.sign(key);
     msg
+}
+
+#[test]
+fn sovereign_key_write_under_u_namespace_with_canonical_email() {
+    // Phase 3 sovereignty: alice published a key-rooted /sys/names/alice on a
+    // repo whose primary domain is mingo.place. She now signs with her key (no
+    // browserid). Her email identity alice@mingo.place resolves THROUGH the key
+    // record, so she controls her /u/alice@mingo.place/ namespace, and her
+    // creator segment canonicalizes back to the email (stable across the upgrade).
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    let alice = SigningKey::generate();
+    put_key_name(&db, "alice", &alice); // identity.v1 record + pubkey->name index
+    put_domain(&db, "mingo.place"); // makes mingo.place the primary domain
+    put_root_policy(&db); // grants owner /u/$owner/**
+
+    let w = signed_post(&alice, "/u/alice@mingo.place/notes/", "n1", Some("alice@mingo.place"));
+    match validate_message(&w, &db, dir.path(), &ctx(&db)) {
+        ValidationResult::Valid { creator } => assert_eq!(
+            creator, "alice@mingo.place",
+            "sovereign-key writer's creator should canonicalize to the email"
+        ),
+        other => panic!("expected Valid for sovereign-key write, got {other:?}"),
+    }
 }
 
 #[test]

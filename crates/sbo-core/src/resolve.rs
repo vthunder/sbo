@@ -60,7 +60,12 @@ fn is_key_reference(reference: &str) -> bool {
 ///
 /// Cycles (a name revisited during resolution) and exceeding `hop_limit`
 /// both yield [`Controller::Unresolved`].
-pub fn resolve_controller<F>(reference: &str, lookup: &F, hop_limit: u32) -> Controller
+pub fn resolve_controller<F>(
+    reference: &str,
+    lookup: &F,
+    hop_limit: u32,
+    primary_domain: Option<&str>,
+) -> Controller
 where
     F: Fn(&str) -> Option<NameRecord>,
 {
@@ -74,8 +79,21 @@ where
             return Controller::None;
         }
 
-        // Bare email: a browserid-attributable identity.
+        // Bare email: a browserid-attributable identity — UNLESS this repo is
+        // authoritative for the email's domain and a `/sys/names/<local>` record
+        // exists. That record is the identity's on-chain control policy and
+        // **wins over browserid** (the sovereignty upgrade): resolve through it.
+        // Outside the primary domain (or with no record) the email stays
+        // browserid-rooted, exactly as before.
         if current.contains('@') {
+            if let (Some(pd), Some((local, domain))) =
+                (primary_domain, current.split_once('@'))
+            {
+                if domain == pd && !local.is_empty() && lookup(local).is_some() {
+                    current = local.to_string();
+                    continue;
+                }
+            }
             return Controller::Email(current);
         }
 
@@ -153,7 +171,7 @@ mod tests {
     fn bare_email_resolves_to_email() {
         let lookup = lookup_from(HashMap::new());
         assert_eq!(
-            resolve_controller("alice@example.com", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("alice@example.com", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Email("alice@example.com".to_string())
         );
     }
@@ -162,8 +180,55 @@ mod tests {
     fn null_resolves_to_none() {
         let lookup = lookup_from(HashMap::new());
         assert_eq!(
-            resolve_controller("null:", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("null:", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::None
+        );
+    }
+
+    // --- Phase 3: primary-domain email→name sovereignty override -----------
+
+    #[test]
+    fn primary_domain_email_resolves_through_key_record() {
+        // /sys/names/alice is key-rooted and mingo.place is the primary domain →
+        // alice@mingo.place is controlled by the pinned key (record wins).
+        let mut map = HashMap::new();
+        map.insert("alice".to_string(), NameRecord::KeyRooted("pk_alice".to_string()));
+        let lookup = lookup_from(map);
+        assert_eq!(
+            resolve_controller("alice@mingo.place", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Key("pk_alice".to_string())
+        );
+    }
+
+    #[test]
+    fn primary_domain_email_without_record_stays_browserid() {
+        let lookup = lookup_from(HashMap::new());
+        assert_eq!(
+            resolve_controller("alice@mingo.place", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Email("alice@mingo.place".to_string())
+        );
+    }
+
+    #[test]
+    fn foreign_domain_email_ignores_local_records() {
+        // A record for "alice" exists, but the email is at a different domain.
+        let mut map = HashMap::new();
+        map.insert("alice".to_string(), NameRecord::KeyRooted("pk_alice".to_string()));
+        let lookup = lookup_from(map);
+        assert_eq!(
+            resolve_controller("alice@gmail.com", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Email("alice@gmail.com".to_string())
+        );
+    }
+
+    #[test]
+    fn no_primary_domain_means_no_override() {
+        let mut map = HashMap::new();
+        map.insert("alice".to_string(), NameRecord::KeyRooted("pk_alice".to_string()));
+        let lookup = lookup_from(map);
+        assert_eq!(
+            resolve_controller("alice@mingo.place", &lookup, DEFAULT_HOP_LIMIT, None),
+            Controller::Email("alice@mingo.place".to_string())
         );
     }
 
@@ -173,7 +238,7 @@ mod tests {
         map.insert("alice".to_string(), NameRecord::KeyRooted("pk_abc".to_string()));
         let lookup = lookup_from(map);
         assert_eq!(
-            resolve_controller("alice", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("alice", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Key("pk_abc".to_string())
         );
     }
@@ -187,7 +252,7 @@ mod tests {
         );
         let lookup = lookup_from(map);
         assert_eq!(
-            resolve_controller("alice", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("alice", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Email("alice@example.com".to_string())
         );
     }
@@ -205,7 +270,7 @@ mod tests {
         );
         let lookup = lookup_from(map);
         assert_eq!(
-            resolve_controller("nameA", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("nameA", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Email("alice@x".to_string())
         );
     }
@@ -214,7 +279,7 @@ mod tests {
     fn missing_name_is_unresolved() {
         let lookup = lookup_from(HashMap::new());
         assert_eq!(
-            resolve_controller("ghost", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("ghost", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Unresolved
         );
     }
@@ -232,7 +297,7 @@ mod tests {
         );
         let lookup = lookup_from(map);
         assert_eq!(
-            resolve_controller("nameA", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("nameA", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Unresolved
         );
     }
@@ -252,12 +317,12 @@ mod tests {
 
         // Small hop limit cannot reach the email.
         assert_eq!(
-            resolve_controller("n0", &lookup, 3),
+            resolve_controller("n0", &lookup, 3, None),
             Controller::Unresolved
         );
         // Generous hop limit resolves fully.
         assert_eq!(
-            resolve_controller("n0", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("n0", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Email("alice@x".to_string())
         );
     }
@@ -269,11 +334,11 @@ mod tests {
         // resolves to a key controller (despite containing a colon), authorized
         // by direct signature.
         assert_eq!(
-            resolve_controller("ed25519:deadbeef", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("ed25519:deadbeef", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Key("ed25519:deadbeef".to_string())
         );
         assert_eq!(
-            resolve_controller("bls12-381:abc", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("bls12-381:abc", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Key("bls12-381:abc".to_string())
         );
     }
@@ -282,11 +347,11 @@ mod tests {
     fn cross_repo_reference_is_unresolved() {
         let lookup = lookup_from(HashMap::new());
         assert_eq!(
-            resolve_controller("avail:mainnet:13/alice", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("avail:mainnet:13/alice", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Unresolved
         );
         assert_eq!(
-            resolve_controller("repo/alice", &lookup, DEFAULT_HOP_LIMIT),
+            resolve_controller("repo/alice", &lookup, DEFAULT_HOP_LIMIT, None),
             Controller::Unresolved
         );
     }

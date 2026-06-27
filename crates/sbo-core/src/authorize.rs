@@ -120,11 +120,12 @@ pub fn authorize_owner<F>(
     attributed_email: Option<&str>,
     lookup: &F,
     hop_limit: u32,
+    primary_domain: Option<&str>,
 ) -> AuthzOutcome
 where
     F: Fn(&str) -> Option<NameRecord>,
 {
-    let controller = resolve_controller(owner_ref, lookup, hop_limit);
+    let controller = resolve_controller(owner_ref, lookup, hop_limit, primary_domain);
     if is_authorized(&controller, signer_key, attributed_email) {
         return AuthzOutcome::Authorized;
     }
@@ -158,6 +159,7 @@ pub fn authorize_message<F>(
     anchors: &TrustAnchors,
     lookup: &F,
     hop_limit: u32,
+    primary_domain: Option<&str>,
 ) -> AuthzOutcome
 where
     F: Fn(&str) -> Option<NameRecord>,
@@ -165,7 +167,7 @@ where
     let attribution =
         message_attribution(signer_key, auth_cert, auth_evidence, inclusion_time, anchors);
     let email = attribution.as_ref().map(|a| a.email.as_str());
-    authorize_owner(owner_ref, signer_key, email, lookup, hop_limit)
+    authorize_owner(owner_ref, signer_key, email, lookup, hop_limit, primary_domain)
 }
 
 #[cfg(test)]
@@ -189,7 +191,7 @@ mod tests {
         let lookup = lookup_from(map);
         // Owner resolves to a key; signer matches → authorized, no attribution needed.
         assert_eq!(
-            authorize_owner("alice", "pk_alice", None, &lookup, DEFAULT_HOP_LIMIT),
+            authorize_owner("alice", "pk_alice", None, &lookup, DEFAULT_HOP_LIMIT, None),
             AuthzOutcome::Authorized
         );
     }
@@ -200,7 +202,7 @@ mod tests {
         map.insert("alice".to_string(), NameRecord::KeyRooted("pk_alice".to_string()));
         let lookup = lookup_from(map);
         assert!(matches!(
-            authorize_owner("alice", "pk_mallory", None, &lookup, DEFAULT_HOP_LIMIT),
+            authorize_owner("alice", "pk_mallory", None, &lookup, DEFAULT_HOP_LIMIT, None),
             AuthzOutcome::Unauthorized(_)
         ));
     }
@@ -215,7 +217,8 @@ mod tests {
                 "ephemeral_key",
                 Some("alice@example.com"),
                 &lookup,
-                DEFAULT_HOP_LIMIT
+                DEFAULT_HOP_LIMIT,
+                None
             ),
             AuthzOutcome::Authorized
         );
@@ -230,7 +233,8 @@ mod tests {
                 "ephemeral_key",
                 None,
                 &lookup,
-                DEFAULT_HOP_LIMIT
+                DEFAULT_HOP_LIMIT,
+                None
             ),
             AuthzOutcome::Unauthorized(_)
         ));
@@ -245,7 +249,8 @@ mod tests {
                 "ephemeral_key",
                 Some("bob@example.com"),
                 &lookup,
-                DEFAULT_HOP_LIMIT
+                DEFAULT_HOP_LIMIT,
+                None
             ),
             AuthzOutcome::Unauthorized(_)
         ));
@@ -266,7 +271,8 @@ mod tests {
                 "ephemeral_key",
                 Some("alice@example.com"),
                 &lookup,
-                DEFAULT_HOP_LIMIT
+                DEFAULT_HOP_LIMIT,
+                None
             ),
             AuthzOutcome::Authorized
         );
@@ -276,7 +282,7 @@ mod tests {
     fn unresolved_owner_is_unauthorized() {
         let lookup = empty_lookup();
         assert!(matches!(
-            authorize_owner("ghost", "k", Some("a@b"), &lookup, DEFAULT_HOP_LIMIT),
+            authorize_owner("ghost", "k", Some("a@b"), &lookup, DEFAULT_HOP_LIMIT, None),
             AuthzOutcome::Unauthorized(_)
         ));
     }

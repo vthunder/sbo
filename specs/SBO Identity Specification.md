@@ -210,6 +210,45 @@ All such identities use `Content-Type: application/jwt` and `Content-Schema: ide
 
 > **Note.** `iss: "domain:<domain>"` here means certification by a **repository root-of-trust domain** (an on-chain `domain.v1` object), used for repository-internal identities such as `sys`. It is *not* the mechanism for ordinary user identities, which are email-rooted and attributed via DNSSEC.
 
+## Sovereignty Upgrade (email → key, over time)
+
+An email-rooted identity at the repository's **primary domain** may become
+self-sovereign without changing its identity string or namespace. This unifies the
+email identity `<local>@<D>` with the local name record `/sys/names/<local>`: they
+are the **same party**, reached by different credentials over time.
+
+**Primary domain.** A repository is authoritative for domain `D` iff a
+`/sys/domains/D` object exists. This version assumes a **single** primary domain
+per repository (the lone `/sys/domains/*` entry); multi-domain repositories need
+domain-qualified name records and are deferred.
+
+**Resolution override (record wins).** When resolving the controller of an email
+`<local>@<D>` where `D` is the primary domain:
+
+1. if `/sys/names/<local>` exists, resolve **through that record** (a key-rooted
+   record → its key controls; an email-rooted record → recurse) — the on-chain
+   record is the identity's control policy and **overrides browserid**;
+2. otherwise the email is browserid-rooted, as usual (the onramp).
+
+So before the holder publishes a key record, control flows through the domain's
+browserid provider (the onramp); after, through the pinned key — and a
+browserid cert minted by the domain no longer authorizes, so the operator can no
+longer silently impersonate the holder. The record is public, so any tampering is
+evident.
+
+**Canonical identity (stable across the upgrade).** The author's durable identity
+(the `creator` segment, and the policy `$user` variable) resolves to the same
+string whichever credential signed: an attributed email yields `<local>@<D>`
+directly; a signature by a pinned key resolves the key to its local name `<local>`
+and, on a primary-domain repo, canonicalizes to `<local>@<D>`. The holder's
+objects therefore stay in one namespace before and after going sovereign.
+
+**Anti-hijack.** Because `/sys/names/<local>` governs `<local>@<D>`, creating it
+must require control of `<local>@<D>` (see the Policy/Authorization specs). A
+malicious domain operator can still front-run the claim; this is *evident* and
+does not worsen the pre-upgrade trust, but cannot be fully eliminated without
+giving up the email onramp.
+
 ## Domain Objects (`domain.v1`)
 
 A `domain.v1` object at `/sys/domains/<domain>` establishes a domain as a **root of trust within a repository** — for example, in Mode B genesis, where the domain certifies the `sys` identity. It is a key-rooted identity for the domain, self-signed and pinned on chain.

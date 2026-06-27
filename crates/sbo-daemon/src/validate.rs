@@ -112,9 +112,26 @@ fn name_lookup(state: &dyn StateView) -> impl Fn(&str) -> Option<NameRecord> + '
 /// Run the L2 attribution check: does the message's signer speak for
 /// `owner_ref` at the block's inclusion time? Returns `Ok(())` if authorized,
 /// `Err(reason)` if the write must be carried-but-filtered.
+/// The repo's primary domain: the single `/sys/domains/<D>` record if exactly one
+/// exists. `None` if there is none, or several (multi-domain repos need
+/// domain-qualified name records — deferred; see the sovereignty design). This is
+/// what scopes the email→name resolution override.
+pub fn primary_domain(state: &dyn StateView) -> Option<String> {
+    let domains = state.list_objects_by_path_prefix("/sys/domains/").ok()?;
+    let mut it = domains
+        .into_iter()
+        .filter(|o| o.path.to_string() == "/sys/domains/");
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None; // ambiguous — no override
+    }
+    Some(first.id.as_str().to_string())
+}
+
 fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref: &str) -> Result<(), String> {
     let signer = msg.signing_key.to_string();
     let lookup = name_lookup(state);
+    let pd = primary_domain(state);
     // Resolve referenced / conventional evidence to inline bytes the pure
     // verifier can consume (the pure path can't reach state).
     let evidence = resolve_evidence(msg, state);
@@ -130,6 +147,7 @@ fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref:
         &l2.anchors,
         &lookup,
         DEFAULT_HOP_LIMIT,
+        pd.as_deref(),
     ) {
         AuthzOutcome::Authorized => Ok(()),
         AuthzOutcome::Unauthorized(reason) => Err(reason),
@@ -255,11 +273,19 @@ pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Cont
 
     let pubkey = msg.signing_key.to_string();
 
-    // Try to look up the signer's claimed name
+    // Try to look up the signer's claimed name. On a primary-domain repo a local
+    // name `<local>` IS the identity `<local>@<domain>` (the sovereignty record),
+    // so canonicalize to that email — keeping a user's creator segment stable
+    // whether they signed via browserid (attributed email, above) or via their
+    // pinned key (this branch). Outside a primary domain the bare name stands.
     if let Some(db) = state {
         match db.get_name_for_pubkey(&pubkey) {
             Ok(Some(name)) => {
-                if let Ok(id) = Id::new(&name) {
+                let canonical = match primary_domain(db) {
+                    Some(domain) => format!("{}@{}", name, domain),
+                    None => name,
+                };
+                if let Ok(id) = Id::new(&canonical) {
                     return id;
                 }
             }
@@ -931,6 +957,7 @@ fn attested_subject_matches(
     source: &AttestedSource,
 ) -> bool {
     let lookup = name_lookup(state);
+    let pd = primary_domain(state);
     let t = l2.inclusion_time.unwrap_or(0);
     let candidates = match &source.by {
         Some(by) => state
@@ -955,16 +982,16 @@ fn attested_subject_matches(
         // resolves to the same party — the prefix is just the writer's literal
         // issuer string.
         if let Some(by) = &source.by {
-            let issuer_ctrl = resolve_controller(stored_owner_ref(&obj), &lookup, DEFAULT_HOP_LIMIT);
+            let issuer_ctrl = resolve_controller(stored_owner_ref(&obj), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref());
             // Must resolve to the same, *grounded* controller — two unresolvable
             // references must not match each other.
             if matches!(issuer_ctrl, Controller::Unresolved | Controller::None)
-                || issuer_ctrl != resolve_controller(by, &lookup, DEFAULT_HOP_LIMIT)
+                || issuer_ctrl != resolve_controller(by, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref())
             {
                 return false;
             }
         }
-        resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT) == *requester
+        resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) == *requester
     })
 }
 
