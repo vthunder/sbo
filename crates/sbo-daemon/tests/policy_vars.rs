@@ -191,6 +191,41 @@ fn name_claim_without_primary_domain_is_first_come() {
 }
 
 #[test]
+fn sovereignty_lifecycle_control_flips_browserid_to_key() {
+    // Phase 6 demo: the same key-signed write by alice flips from unauthorized to
+    // authorized the moment she publishes her key-rooted /sys/names/alice record —
+    // control moves from the domain's browserid onramp to her own key, with her
+    // namespace and creator identity unchanged.
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    put_domain(&db, "mingo.place");
+    put_root_policy(&db);
+    let alice = SigningKey::generate();
+
+    // BEFORE: no key record yet. alice@mingo.place is browserid-rooted; a key-only
+    // signer with no attribution cannot act as it.
+    let before = signed_post(&alice, "/u/alice@mingo.place/notes/", "n1", Some("alice@mingo.place"));
+    assert!(
+        matches!(
+            validate_message(&before, &db, dir.path(), &ctx(&db)),
+            ValidationResult::Invalid { stage: ValidationStage::Attribution, .. }
+        ),
+        "before the key record, a key-only signer must not control the email identity"
+    );
+
+    // Alice publishes her key-rooted name record (the sovereignty upgrade).
+    put_key_name(&db, "alice", &alice);
+
+    // AFTER: the identical write is authorized — alice@mingo.place now resolves
+    // through the record to her key, and her creator stays the canonical email.
+    let after = signed_post(&alice, "/u/alice@mingo.place/notes/", "n2", Some("alice@mingo.place"));
+    match validate_message(&after, &db, dir.path(), &ctx(&db)) {
+        ValidationResult::Valid { creator } => assert_eq!(creator, "alice@mingo.place"),
+        other => panic!("after the key record, the key should control the identity: {other:?}"),
+    }
+}
+
+#[test]
 fn sovereign_key_write_under_u_namespace_with_canonical_email() {
     // Phase 3 sovereignty: alice published a key-rooted /sys/names/alice on a
     // repo whose primary domain is mingo.place. She now signs with her key (no
