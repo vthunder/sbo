@@ -367,21 +367,23 @@ def resolve_profile(repo, ref):
 
 ## Repository Discovery (`_sbo` DNS)
 
-To find a repository (its chain, appId, and genesis) for an `sbo://` URI, clients query DNS:
+To find a repository (its chain, appId, and genesis anchor) for an `sbo://` URI, clients query DNS:
 
 ```
-_sbo.example.com. IN TXT "v=sbo1 r=sbo+raw://avail:turing:506/ h=https://sbo.example.com"
+_sbo.example.com. IN TXT "v=sbo1 repo=sbo+raw://avail:turing:506@12345/ genesis=sha256:abc123... node=https://sbo.example.com"
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `v` | Yes | Protocol version (`sbo1`) |
-| `r` | Yes | Repository URI |
-| `h` | No | Discovery host (defaults to the domain itself) |
+| `v` | Yes | Record version (`sbo1`) |
+| `repo` | Yes | Bare `sbo+raw://` database address, incl. the `@firstBlock` genesis anchor |
+| `genesis` | No | Genesis hash (identity/verification) |
+| `node` | No | Full-node URL serving the `/v1/*` data API |
+| `checkpoint` | No | Bootstrap checkpoint URL (verified, not trusted) |
 
-See the [URI Specification](./SBO%20URI%20Specification.md) and the [Genesis Specification](./SBO%20Genesis%20Specification.md) for the full resolution and bootstrap flow.
+The `_sbo` record carries **no identity or trust root** — it only locates data. See the [URI Specification](./SBO%20URI%20Specification.md#dns-txt-record-format) for the authoritative field list and the bare-`repo=` rule, and the [Genesis Specification](./SBO%20Genesis%20Specification.md) for the bootstrap flow.
 
-> Authentication-provider discovery (`_browserid` and the provider's service endpoints) is part of browserid and is described in the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md), not here.
+> Resolving a person → identity is on-chain (browserid broker pinned in genesis + `/sys/names/...`). Authentication-provider discovery (`_browserid` and the provider's service endpoints) is part of browserid and is described in the [SBO Authorization Specification](./SBO%20Authorization%20Specification.md), not here. There is no `h=` auth-host field and no `_sbo-id` record (both removed).
 
 ## Pseudonymous Identities (T2) — Roadmap
 

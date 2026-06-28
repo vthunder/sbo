@@ -132,16 +132,13 @@ Create an on-chain identity linked to your signing key:
 
 ### Demo 3: Resolve an Email Identity
 
-SBO identities can be linked to an email via DNS + a well-known endpoint, so an
-app can resolve `alice@example.com` to her on-chain identity and verify a key.
-
-**Prerequisites:**
-1. DNS TXT record: `_sbo-id.yourdomain.com` → `v=sbo-id1 host=yourdomain.com`
-2. HTTPS endpoint: `/.well-known/sbo-identity/{domain}/{user}` returning `{"version":1,"sbo_uri":"..."}`
-3. An SBO identity created on-chain
+In the email-rooted model a bare email **is** the controller reference (a
+browserid-attributable identity); the durable identity lives on-chain at
+`/sys/names/...`. There is no DNS side channel — the old `_sbo-id` record and
+`/.well-known/sbo-identity` endpoint have been removed.
 
 ```bash
-# Resolve an email to its SBO identity URI
+# Resolve an email to its controlling party (+ any local name association)
 ./target/release/sbo id resolve alice@example.com
 
 # Import the identity (links email to your local key)
@@ -189,7 +186,7 @@ sbo://domain.com/path/to/object
 
 Resolved via DNS TXT record at `_sbo.domain.com`:
 ```
-_sbo.domain.com TXT "sbo=v1 chain=avail:turing appId=506"
+_sbo.domain.com TXT "v=sbo1 repo=sbo+raw://avail:turing:506@12345/ genesis=sha256:abc123... node=https://da.example.com"
 ```
 
 Benefits:
@@ -200,7 +197,7 @@ Benefits:
 ### Raw URIs
 
 ```
-sbo+raw://chain:network:appId/path/to/object
+sbo+raw://chain:network:appId[@firstBlock]/path/to/object
 ```
 
 Direct chain reference without DNS lookup. Use when:
@@ -547,7 +544,7 @@ Light mode requires real ZK proofs (not dev mode). Ensure:
 dig TXT _sbo.yourdomain.com
 
 # Expected format:
-# _sbo.yourdomain.com. TXT "sbo=v1 chain=avail:turing appId=506"
+# _sbo.yourdomain.com. TXT "v=sbo1 repo=sbo+raw://avail:turing:506@12345/ genesis=sha256:abc123... node=https://da.yourdomain.com"
 ```
 
 ### Advanced debugging

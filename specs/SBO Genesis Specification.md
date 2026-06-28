@@ -243,23 +243,24 @@ Clients identify genesis mode as follows:
 
 ## Database Identity
 
-The canonical identity of an SBO database is:
+The canonical identity of an SBO database is the 4-tuple:
 
 ```
-{chain}:{appId}:{genesis_hash}
+{chain}:{appId}:{firstBlock}:{genesisHash}
 ```
 
 Where:
 - `chain` is a CAIP-2 chain identifier (e.g., `avail:mainnet`)
 - `appId` is the application ID on that chain
-- `genesis_hash` is `sha256(all_genesis_objects_bytes)`
+- `firstBlock` is the block the genesis lives at — the **locator** (makes the database scannable; disambiguates the same genesis replayed at two heights)
+- `genesisHash` is `sha256(all_genesis_objects_bytes)` — the content-derived **verifying** identity
 
 **Example:**
 ```
-avail:mainnet:13:sha256:abc123def456...
+avail:mainnet:13:1000:sha256:abc123def456...
 ```
 
-The genesis hash ensures that two databases with the same chain:appId but different genesis content are distinguishable.
+See the [URI Specification — Database Identity](./SBO%20URI%20Specification.md#database-identity) for the reference-vs-identity rules (a reference may carry the anchor, the hash, or both; an ambiguous anchor-only reference MUST error rather than guess).
 
 ---
 
@@ -275,29 +276,30 @@ sbo://myapp.com/dan/foo
 
 Resolution:
 1. DNS TXT lookup for `_sbo.myapp.com`
-2. Record contains: `chain=avail:mainnet appId=13 genesis=sha256:abc123 checkpoint=https://...`
+2. Record's `repo=` carries chain, appId, and the `@firstBlock` anchor; `genesis=` carries the hash
 3. Client resolves to canonical database identity
 
-**DNS TXT record format:**
+**DNS TXT record format** (see the [URI Specification](./SBO%20URI%20Specification.md#dns-txt-record-format) for the full field list):
 ```
-_sbo.myapp.com TXT "sbo=v1 chain=avail:mainnet appId=13 genesis=sha256:abc123... checkpoint=https://myapp.com/sbo/checkpoint.json"
+_sbo.myapp.com TXT "v=sbo1 repo=sbo+raw://avail:mainnet:13@1000/ genesis=sha256:abc123... node=https://sbo.myapp.com checkpoint=https://myapp.com/sbo/checkpoint.json"
 ```
 
 ### Direct Chain Reference (`sbo+raw://`)
 
 ```
-sbo+raw://avail:mainnet:13/dan/foo
+sbo+raw://avail:mainnet:13@1000/dan/foo
 ```
 
-With explicit genesis (for full disambiguation):
+With explicit genesis hash (verify / disambiguate a multi-genesis height):
 ```
-sbo+raw://avail:mainnet:13/dan/foo?genesis=sha256:abc123...
+sbo+raw://avail:mainnet:13@1000/dan/foo?genesis=sha256:abc123...
 ```
 
 **Components:**
 - `avail:mainnet` — CAIP-2 chain identifier
 - `13` — appId
-- `genesis=sha256:abc123...` — optional genesis hash
+- `@1000` — genesis anchor (`firstBlock`); database-level, inherited by all paths
+- `genesis=sha256:abc123...` — optional genesis hash (verify/disambiguate)
 
 ---
 
@@ -323,25 +325,25 @@ New chains should be registered in the CAIP-2 namespace.
 ```
 1. Client sees sbo://myapp.com/dan/foo
 2. DNS TXT lookup _sbo.myapp.com
-   → chain, appId, genesis_hash, checkpoint_url
-3. Fetch checkpoint from URL
-4. Verify checkpoint references expected genesis_hash
-5. Sync from checkpoint state
+   → repo (chain, appId, @firstBlock), genesis hash, node/checkpoint URLs
+3. Begin sync at @firstBlock (or fetch checkpoint for a mature DB)
+4. Reconstruct genesis; if a genesis hash is known, verify it matches
+5. Resolve the path against the synced state
 ```
 
 ### Via Direct URI
 
 ```
-1. Client sees sbo+raw://avail:mainnet:13/dan/foo?genesis=sha256:abc123
-2. Parse chain, appId, genesis_hash
+1. Client sees sbo+raw://avail:mainnet:13@1000/dan/foo?genesis=sha256:abc123
+2. Parse chain, appId, @firstBlock anchor, genesis hash
 3. Connect to DA layer
-4. If genesis block available:
+4. Begin sync at @firstBlock:
    → Validate genesis objects
-   → Verify hash matches expected
-   → Sync from genesis
+   → If genesis hash present, verify it matches (else: require a single genesis at the anchor)
+   → Sync forward from genesis
 5. If genesis pruned:
-   → Fetch checkpoint from known source
-   → Verify checkpoint references genesis_hash
+   → Fetch checkpoint from node/known source
+   → Verify checkpoint references the genesis hash
    → Sync from checkpoint
 ```
 
