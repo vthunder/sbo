@@ -388,12 +388,12 @@ enum IdCommands {
         name: String,
     },
 
-    /// Resolve an email address to its SBO identity URI
+    /// Resolve an email address to its controlling party
     ///
-    /// Performs identity discovery via DNS and .well-known endpoint:
-    /// 1. Queries _sbo-id.{domain} for discovery host
-    /// 2. Fetches https://{host}/.well-known/sbo-identity/{domain}/{user}
-    /// 3. Returns the SBO URI from the response
+    /// In the email-rooted model a bare email *is* the controller reference (a
+    /// browserid-attributable identity); there is no DNS/.well-known discovery.
+    /// The actual identity lives on-chain under `/sys/names`. This prints the
+    /// email→controller mapping plus any locally-known SBO name association.
     ///
     /// Examples:
     ///   sbo id resolve alice@example.com
@@ -1753,6 +1753,35 @@ fn guess_content_type(file: &std::path::Path) -> &'static str {
     }
 }
 
+/// Semantically match a user-supplied URI against a registered repo's base URI.
+///
+/// For `sbo+raw://` URIs we compare the parsed authority (`chain:appId`) and the
+/// `@firstBlock` anchor, so a trailing `?query` on the request or a differing
+/// anchor presentation does not break matching. On a match, the returned
+/// remainder is the request URI's path portion (with a leading `/`, or empty for
+/// the repo root). The query is intentionally dropped from the remainder.
+///
+/// Falls back to a plain `starts_with` prefix comparison for `sbo://` (DNS) URIs
+/// and anything else the raw parser rejects.
+fn match_repo_remainder(uri: &str, repo_base: &str) -> Option<String> {
+    use sbo_core::uri::SboRawUri;
+    if let (Ok(req), Ok(base)) = (SboRawUri::parse(uri), SboRawUri::parse(repo_base)) {
+        // Authorities must match; anchors must match when both are present.
+        if req.authority() != base.authority() {
+            return None;
+        }
+        if let (Some(a), Some(b)) = (req.first_block, base.first_block) {
+            if a != b {
+                return None;
+            }
+        }
+        return Some(req.path.clone().unwrap_or_default());
+    }
+    // Non-raw (e.g. sbo:// DNS) or malformed: fall back to string prefix.
+    let base = repo_base.trim_end_matches('/');
+    uri.strip_prefix(base).map(|r| r.to_string())
+}
+
 /// Resolve an SBO URI to `(repo_path, remainder)` where `remainder` is the part
 /// of the URI after the matched repo's base (with a leading `/`). Shared by the
 /// object-path and prefix parsers.
@@ -1786,12 +1815,10 @@ async fn resolve_repo_remainder(
     }
 
     for (path, display_uri, resolved_uri) in &repos {
-        let display_base = display_uri.trim_end_matches('/');
-        let resolved_base = resolved_uri.trim_end_matches('/');
-        if uri.starts_with(display_base) {
-            return Ok((path.clone(), uri[display_base.len()..].to_string()));
-        } else if uri.starts_with(resolved_base) {
-            return Ok((path.clone(), uri[resolved_base.len()..].to_string()));
+        if let Some(remainder) = match_repo_remainder(uri, display_uri)
+            .or_else(|| match_repo_remainder(uri, resolved_uri))
+        {
+            return Ok((path.clone(), remainder));
         }
     }
 
@@ -1853,17 +1880,12 @@ async fn parse_sbo_uri_path(
     let mut matched_repo: Option<(PathBuf, String)> = None;
 
     for (path, display_uri, resolved_uri) in &repos {
-        // Check if URI starts with either display or resolved URI
-        let display_base = display_uri.trim_end_matches('/');
-        let resolved_base = resolved_uri.trim_end_matches('/');
-
-        if uri.starts_with(display_base) {
-            let remainder = &uri[display_base.len()..];
-            matched_repo = Some((path.clone(), remainder.to_string()));
-            break;
-        } else if uri.starts_with(resolved_base) {
-            let remainder = &uri[resolved_base.len()..];
-            matched_repo = Some((path.clone(), remainder.to_string()));
+        // Match by parsed authority/anchor (tolerant of @firstBlock and ?query),
+        // falling back to a string prefix for sbo:// (DNS) URIs.
+        if let Some(remainder) = match_repo_remainder(uri, display_uri)
+            .or_else(|| match_repo_remainder(uri, resolved_uri))
+        {
+            matched_repo = Some((path.clone(), remainder));
             break;
         }
     }
