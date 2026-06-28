@@ -914,8 +914,17 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                     }
                 }
                 Some(block) => Some(block as u64),
-                None => None,
+                // No explicit override → default to the @firstBlock genesis anchor from
+                // the URI (the spec's sync-from-genesis start). Operator-supplied
+                // from_block still wins above.
+                None => uri.first_block,
             };
+            if from_block.is_none() && resolved_from_block.is_some() {
+                tracing::info!(
+                    "Seeding repo from @firstBlock anchor = {}",
+                    resolved_from_block.unwrap()
+                );
+            }
 
             let mut state = state.write().await;
             match state.repos.add(display_uri.clone(), uri, path, resolved_from_block) {
