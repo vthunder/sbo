@@ -62,6 +62,9 @@ pub enum Request {
         resolved_uri: String,
         path: PathBuf,
         from_block: Option<i64>,
+        /// Expected genesis hash (`sha256:...`) from the `_sbo` record / `?genesis=`.
+        #[serde(default)]
+        expected_genesis: Option<String>,
     },
     /// Remove a repo by path
     RepoRemove { path: PathBuf },

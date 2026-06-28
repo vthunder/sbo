@@ -917,15 +917,21 @@ async fn main() -> anyhow::Result<()> {
                 RepoCommands::Add { uri, path, from_block } => {
                     let path = canonicalize_path(&path)?;
 
-                    // Resolve sbo:// URIs via DNS
-                    let (display_uri, resolved_uri) = if sbo_core::dns::is_dns_uri(&uri) {
+                    // Resolve sbo:// URIs via DNS, capturing the record's genesis hash.
+                    let (display_uri, resolved_uri, expected_genesis) = if sbo_core::dns::is_dns_uri(&uri) {
                         print!("Resolving {}...", uri);
                         std::io::Write::flush(&mut std::io::stdout())?;
 
+                        // Resolve the record (for genesis=) and the composed URI together.
+                        let domain = sbo_core::dns::extract_domain(&uri);
+                        let record_genesis = match &domain {
+                            Some(d) => sbo_core::dns::resolve(d).await.ok().and_then(|r| r.genesis),
+                            None => None,
+                        };
                         match sbo_core::dns::resolve_uri(&uri).await {
                             Ok(resolved) => {
                                 println!(" -> {}", resolved);
-                                (uri.clone(), resolved)
+                                (uri.clone(), resolved, record_genesis)
                             }
                             Err(e) => {
                                 println!();
@@ -934,7 +940,9 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     } else {
-                        (uri.clone(), uri.clone())
+                        // Direct sbo+raw:// — pull any ?genesis= selector off the URI.
+                        let g = sbo_core::uri::SboRawUri::parse(&uri).ok().and_then(|u| u.query.genesis);
+                        (uri.clone(), uri.clone(), g)
                     };
 
                     match client.request(Request::RepoAdd {
@@ -942,6 +950,7 @@ async fn main() -> anyhow::Result<()> {
                         resolved_uri,
                         path: path.clone(),
                         from_block,
+                        expected_genesis,
                     }).await {
                         Ok(Response::Ok { data }) => {
                             println!("Added repository:");

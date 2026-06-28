@@ -26,6 +26,11 @@ pub struct Repo {
     /// Last DNS check timestamp (None if never checked, or sbo+raw://)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_checked_at: Option<u64>,
+    /// Expected genesis hash (`sha256:...`) from the `_sbo` record's `genesis=` field
+    /// or a `?genesis=` URI selector. When set, the daemon verifies the reconstructed
+    /// genesis against it once the genesis block is processed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_genesis: Option<String>,
 }
 
 impl Repo {
@@ -58,6 +63,23 @@ impl Repo {
             head,
             created_at: now,
             dns_checked_at,
+            expected_genesis: None,
+        }
+    }
+
+    /// Verify reconstructed genesis-batch wire bytes against `expected_genesis`.
+    /// No-op (Ok) when no expected hash is set. Returns the mismatch detail otherwise.
+    pub fn verify_genesis(&self, genesis_wire: &[u8]) -> Result<(), String> {
+        let Some(expected) = self.expected_genesis.as_deref() else {
+            return Ok(());
+        };
+        let actual = sbo_core::genesis_hash_from_wire(genesis_wire)
+            .map_err(|e| format!("cannot parse genesis batch: {e}"))?
+            .to_string();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("genesis hash mismatch: expected {expected}, got {actual}"))
         }
     }
 
@@ -150,6 +172,19 @@ impl RepoManager {
         self.save()?;
 
         Ok(self.repos.get(&id).unwrap())
+    }
+
+    /// Record the expected genesis hash for a repo (from the `_sbo` record / `?genesis=`),
+    /// to be verified once the genesis block is processed.
+    pub fn set_expected_genesis(&mut self, id: &str, genesis: Option<String>) -> crate::Result<()> {
+        if genesis.is_none() {
+            return Ok(());
+        }
+        if let Some(repo) = self.repos.get_mut(id) {
+            repo.expected_genesis = genesis;
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Remove a repo by path
@@ -290,6 +325,49 @@ impl RepoManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo_with_expected(expected: Option<String>) -> Repo {
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:506@1/").unwrap();
+        let mut r = Repo::new("sbo+raw://avail:turing:506@1/".into(), uri, PathBuf::from("/tmp/x"), Some(1));
+        r.expected_genesis = expected;
+        r
+    }
+
+    #[test]
+    fn verify_genesis_noop_when_unset() {
+        assert!(repo_with_expected(None).verify_genesis(b"anything").is_ok());
+    }
+
+    #[test]
+    fn verify_genesis_matches_and_mismatches() {
+        // Build a tiny genesis batch and its true hash.
+        use sbo_core::crypto::{ContentHash, Signature, SigningKey};
+        use sbo_core::message::{Action, Id, Message, ObjectType, Path};
+        let key = SigningKey::generate();
+        let mut msg = Message {
+            action: Action::Post,
+            path: Path::parse("/sys/test/").unwrap(),
+            id: Id::new("a").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature([0u8; 64]),
+            content_type: Some("text/plain".into()),
+            content_hash: Some(ContentHash::sha256(b"hi")),
+            payload: Some(b"hi".to_vec()),
+            owner: None, creator: None, content_encoding: None, content_schema: None,
+            policy_ref: None, related: None, hlc: None, prev: None,
+            auth_cert: None, auth_evidence: None,
+        };
+        msg.sign(&key);
+        let wire = sbo_core::wire::serialize(&msg);
+        let true_hash = sbo_core::genesis_hash_from_wire(&wire).unwrap().to_string();
+
+        assert!(repo_with_expected(Some(true_hash)).verify_genesis(&wire).is_ok());
+        let err = repo_with_expected(Some("sha256:deadbeef".into()))
+            .verify_genesis(&wire)
+            .unwrap_err();
+        assert!(err.contains("mismatch"));
+    }
 
     #[test]
     fn test_parse_sbo_uri_with_alias() {

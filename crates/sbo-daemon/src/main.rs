@@ -774,6 +774,32 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                                 tracing::info!("Processed block {} ({} transactions)", block_num, result.tx_count);
                             }
 
+                            // Genesis verification: when this block is a repo's genesis
+                            // anchor and an expected hash was recorded, verify the
+                            // reconstructed genesis. Non-fatal — a mismatch is logged
+                            // loudly (operator-visible) rather than crashing sync.
+                            let to_verify: Vec<(String, Result<(), String>)> = state
+                                .repos
+                                .list()
+                                .filter(|r| {
+                                    r.expected_genesis.is_some()
+                                        && r.uri.first_block == Some(block_num)
+                                })
+                                .map(|r| (r.id.clone(), r.verify_genesis(&result.block_data)))
+                                .collect();
+                            for (id, outcome) in to_verify {
+                                match outcome {
+                                    Ok(()) => tracing::info!(
+                                        "Genesis verified for repo {} at block {}",
+                                        id, block_num
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        "GENESIS VERIFICATION FAILED for repo {} at block {}: {}",
+                                        id, block_num, e
+                                    ),
+                                }
+                            }
+
                             // Add block to prover if enabled and genesis has been processed
                             if let Some(ref mut p) = prover {
                                 // Only prove if genesis has been processed (objects exist)
@@ -870,7 +896,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
 
 async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Response {
     match req {
-        Request::RepoAdd { display_uri, resolved_uri, path, from_block } => {
+        Request::RepoAdd { display_uri, resolved_uri, path, from_block, expected_genesis } => {
             // Parse the resolved URI (always sbo+raw://)
             let uri = match SboRawUri::parse(&resolved_uri) {
                 Ok(u) => u,
@@ -926,16 +952,33 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 );
             }
 
+            // Expected genesis hash: explicit (from the _sbo record) wins; otherwise a
+            // `?genesis=` selector on the resolved URI.
+            let genesis_to_store = expected_genesis.or_else(|| uri.query.genesis.clone());
+
             let mut state = state.write().await;
-            match state.repos.add(display_uri.clone(), uri, path, resolved_from_block) {
-                Ok(repo) => Response::ok(serde_json::json!({
+            let added = match state.repos.add(display_uri.clone(), uri, path, resolved_from_block) {
+                Ok(repo) => Ok(serde_json::json!({
                     "id": repo.id,
                     "display_uri": repo.display_uri,
                     "resolved_uri": repo.uri.to_string(),
                     "path": repo.path,
                     "head": repo.head,
                 })),
-                Err(e) => Response::error(e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            match added {
+                Ok(data) => {
+                    if let Some(id) = data["id"].as_str() {
+                        if let Err(e) =
+                            state.repos.set_expected_genesis(&id.to_string(), genesis_to_store)
+                        {
+                            tracing::warn!("Failed to record expected genesis: {}", e);
+                        }
+                    }
+                    Response::ok(data)
+                }
+                Err(e) => Response::error(e),
             }
         }
 
