@@ -260,6 +260,17 @@ Where:
 avail:mainnet:13:1000:sha256:abc123def456...
 ```
 
+### `genesisHash` canonicalization
+
+`all_genesis_objects_bytes` is the **canonical wire serialization of the ordered genesis
+messages, concatenated with no separators** — i.e. `concat(serialize(m) for m in genesis_order)`,
+where each message's framing (its `Content-Length`) makes the batch self-delimiting. This is
+exactly the byte sequence a genesis builder emits (e.g. the `genesis.wire` batch) and is
+reproducible offline: a client reconstructs it by reading the genesis block, parsing the
+batch, and re-serializing each message canonically in order. `genesisHash = sha256` of those
+bytes. Because the wire serializer is deterministic, the original builder and any chain-read
+reconstruction yield the identical hash.
+
 See the [URI Specification — Database Identity](./SBO%20URI%20Specification.md#database-identity) for the reference-vs-identity rules (a reference may carry the anchor, the hash, or both; an ambiguous anchor-only reference MUST error rather than guess).
 
 ---

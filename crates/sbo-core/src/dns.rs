@@ -1,19 +1,25 @@
-//! DNS resolution for sbo:// URIs and email identity discovery
+//! DNS resolution for sbo:// URIs.
 //!
-//! - Resolves sbo://domain.com/ URIs via DNS TXT records at _sbo.domain.com
-//! - Discovers SBO identities for email addresses via _sbo-id.domain.com + .well-known
+//! Resolves `sbo://domain.com/` URIs via DNS TXT records at `_sbo.domain.com`.
+//! `_sbo` is **data-discovery only** — identity is on-chain, not in DNS.
 
 use std::fmt;
 use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
+use crate::uri::SboRawUri;
+
 /// Parsed SBO DNS record
 #[derive(Debug, Clone, PartialEq)]
 pub struct SboRecord {
-    /// Repository URI (e.g., "sbo+raw://avail:turing:506/")
-    pub repository_uri: String,
-    /// Discovery host for .well-known/sbo (optional, defaults to domain itself)
-    pub discovery_host: Option<String>,
+    /// Bare repository URI (e.g., "sbo+raw://avail:turing:506@12345/")
+    pub repo: String,
+    /// Genesis identity hash (e.g., "sha256:abc...")
+    pub genesis: Option<String>,
+    /// Node endpoint URL
+    pub node: Option<String>,
+    /// Checkpoint endpoint URL
+    pub checkpoint: Option<String>,
 }
 
 /// DNS resolution error
@@ -47,18 +53,25 @@ impl std::error::Error for DnsError {}
 
 /// Parse a DNS TXT record into an SboRecord
 ///
-/// Format: "v=sbo1 r=sbo+raw://avail:turing:506/ h=https://auth.example.com"
+/// Format: "v=sbo1 repo=sbo+raw://avail:turing:506@12345/ genesis=sha256:abc node=<url> checkpoint=<url>"
+/// Fields are space-separated key=value pairs; unknown keys are ignored.
+/// The `repo=` URI must be a **bare** repository address (no path/creator/id/query;
+/// an `@firstBlock` anchor is allowed).
 pub fn parse_record(txt: &str) -> Result<SboRecord, DnsError> {
     let mut version: Option<&str> = None;
-    let mut repository_uri: Option<String> = None;
-    let mut discovery_host: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut genesis: Option<String> = None;
+    let mut node: Option<String> = None;
+    let mut checkpoint: Option<String> = None;
 
     for part in txt.split_whitespace() {
         if let Some((key, value)) = part.split_once('=') {
             match key {
                 "v" => version = Some(value),
-                "r" => repository_uri = Some(value.to_string()),
-                "h" => discovery_host = Some(value.to_string()),
+                "repo" => repo = Some(value.to_string()),
+                "genesis" => genesis = Some(value.to_string()),
+                "node" => node = Some(value.to_string()),
+                "checkpoint" => checkpoint = Some(value.to_string()),
                 _ => {} // Ignore unknown fields for forward compatibility
             }
         }
@@ -72,12 +85,24 @@ pub fn parse_record(txt: &str) -> Result<SboRecord, DnsError> {
     }
 
     // Validate required fields
-    let repository_uri = repository_uri
-        .ok_or_else(|| DnsError::MalformedRecord("missing r= repository URI".to_string()))?;
+    let repo = repo
+        .ok_or_else(|| DnsError::MalformedRecord("missing repo= repository URI".to_string()))?;
+
+    // Enforce the bare-repo rule.
+    let parsed = SboRawUri::parse(&repo)
+        .map_err(|e| DnsError::MalformedRecord(format!("invalid repo= URI: {}", e)))?;
+    if !parsed.is_bare() {
+        return Err(DnsError::MalformedRecord(format!(
+            "repo= must be a bare repository URI (no path/query): {}",
+            repo
+        )));
+    }
 
     Ok(SboRecord {
-        repository_uri,
-        discovery_host,
+        repo,
+        genesis,
+        node,
+        checkpoint,
     })
 }
 
@@ -137,9 +162,10 @@ pub async fn resolve_uri(uri: &str) -> Result<String, DnsError> {
 
     let record = resolve(domain).await?;
 
-    // Combine repository URI with path
-    let base = record.repository_uri.trim_end_matches('/');
-    Ok(format!("{}{}", base, path))
+    // Compose the path onto the bare repo URI, preserving the @firstBlock anchor.
+    let repo = SboRawUri::parse(&record.repo)
+        .map_err(|e| DnsError::MalformedRecord(format!("invalid repo= URI: {}", e)))?;
+    Ok(repo.compose(path).to_uri_string())
 }
 
 /// Extract domain from an sbo:// URI
@@ -166,17 +192,6 @@ pub fn is_dns_uri(uri: &str) -> bool {
     uri.trim().starts_with("sbo://")
 }
 
-/// Get the discovery host for a domain
-///
-/// Returns the h= field from DNS if present, otherwise the domain itself.
-/// Returns just the hostname - callers add the scheme.
-pub fn get_discovery_host(record: &SboRecord, domain: &str) -> String {
-    record
-        .discovery_host
-        .clone()
-        .unwrap_or_else(|| domain.to_string())
-}
-
 /// Parse an email address into (user, domain)
 pub fn parse_email(email: &str) -> Option<(&str, &str)> {
     let (user, domain) = email.split_once('@')?;
@@ -192,46 +207,72 @@ mod tests {
 
     #[test]
     fn test_parse_minimal_record() {
-        let txt = "v=sbo1 r=sbo+raw://avail:turing:506/";
+        let txt = "v=sbo1 repo=sbo+raw://avail:turing:506/";
         let record = parse_record(txt).unwrap();
-        assert_eq!(record.repository_uri, "sbo+raw://avail:turing:506/");
-        assert_eq!(record.discovery_host, None);
+        assert_eq!(record.repo, "sbo+raw://avail:turing:506/");
+        assert_eq!(record.genesis, None);
+        assert_eq!(record.node, None);
+        assert_eq!(record.checkpoint, None);
     }
 
     #[test]
     fn test_parse_full_record() {
-        let txt = "v=sbo1 r=sbo+raw://avail:mainnet:13/ h=https://auth.example.com";
+        let txt = "v=sbo1 repo=sbo+raw://avail:mainnet:13@1000/ genesis=sha256:abc node=https://node.example.com checkpoint=https://cp.example.com";
         let record = parse_record(txt).unwrap();
-        assert_eq!(record.repository_uri, "sbo+raw://avail:mainnet:13/");
-        assert_eq!(record.discovery_host, Some("https://auth.example.com".to_string()));
+        assert_eq!(record.repo, "sbo+raw://avail:mainnet:13@1000/");
+        assert_eq!(record.genesis, Some("sha256:abc".to_string()));
+        assert_eq!(record.node, Some("https://node.example.com".to_string()));
+        assert_eq!(record.checkpoint, Some("https://cp.example.com".to_string()));
     }
 
     #[test]
     fn test_parse_missing_version() {
-        let txt = "r=sbo+raw://avail:turing:506/";
+        let txt = "repo=sbo+raw://avail:turing:506/";
         let err = parse_record(txt).unwrap_err();
         assert!(matches!(err, DnsError::MalformedRecord(_)));
     }
 
     #[test]
     fn test_parse_unsupported_version() {
-        let txt = "v=sbo2 r=sbo+raw://avail:turing:506/";
+        let txt = "v=sbo2 repo=sbo+raw://avail:turing:506/";
         let err = parse_record(txt).unwrap_err();
         assert!(matches!(err, DnsError::UnsupportedVersion(_)));
     }
 
     #[test]
-    fn test_parse_missing_repository_uri() {
-        let txt = "v=sbo1 h=https://auth.example.com";
+    fn test_parse_missing_repo() {
+        let txt = "v=sbo1 node=https://node.example.com";
         let err = parse_record(txt).unwrap_err();
         assert!(matches!(err, DnsError::MalformedRecord(_)));
     }
 
     #[test]
     fn test_parse_ignores_unknown_fields() {
-        let txt = "v=sbo1 r=sbo+raw://avail:turing:506/ futureField=whatever";
+        let txt = "v=sbo1 repo=sbo+raw://avail:turing:506/ futureField=whatever";
         let record = parse_record(txt).unwrap();
-        assert_eq!(record.repository_uri, "sbo+raw://avail:turing:506/");
+        assert_eq!(record.repo, "sbo+raw://avail:turing:506/");
+    }
+
+    #[test]
+    fn test_parse_rejects_non_bare_repo_path() {
+        let txt = "v=sbo1 repo=sbo+raw://avail:turing:506/alice/nft";
+        let err = parse_record(txt).unwrap_err();
+        assert!(matches!(err, DnsError::MalformedRecord(_)));
+    }
+
+    #[test]
+    fn test_parse_rejects_non_bare_repo_query() {
+        let txt = "v=sbo1 repo=sbo+raw://avail:turing:506/?genesis=sha256:abc";
+        let err = parse_record(txt).unwrap_err();
+        assert!(matches!(err, DnsError::MalformedRecord(_)));
+    }
+
+    #[test]
+    fn test_resolve_uri_preserves_anchor() {
+        // Component-aware compose: the @firstBlock anchor survives path composition.
+        let repo = SboRawUri::parse("sbo+raw://avail:turing:506@12345/").unwrap();
+        let composed = repo.compose("/alice/nft").to_uri_string();
+        assert_eq!(composed, "sbo+raw://avail:turing:506@12345/alice/nft");
     }
 
     #[test]

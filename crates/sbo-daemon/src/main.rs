@@ -15,7 +15,7 @@ use sbo_daemon::http::{self, SignRequestStore};
 use sbo_daemon::ipc::{IpcServer, Request, Response, SignRequestStatus, SignRequest as IpcSignRequest};
 use sbo_daemon::lc::LcManager;
 use sbo_daemon::prover::Prover;
-use sbo_daemon::repo::{RepoManager, SboUri};
+use sbo_daemon::repo::{RepoManager, SboRawUri};
 use sbo_daemon::rpc::RpcClient;
 use sbo_daemon::sync::SyncEngine;
 use sbo_daemon::turbo::TurboDaClient;
@@ -872,7 +872,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
     match req {
         Request::RepoAdd { display_uri, resolved_uri, path, from_block } => {
             // Parse the resolved URI (always sbo+raw://)
-            let uri = match SboUri::parse(&resolved_uri) {
+            let uri = match SboRawUri::parse(&resolved_uri) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid URI: {}", e)),
             };
@@ -989,7 +989,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             };
 
             // Parse new URI
-            let new_uri = match SboUri::parse(&new_resolved) {
+            let new_uri = match SboRawUri::parse(&new_resolved) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid resolved URI: {}", e)),
             };
@@ -1512,13 +1512,13 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
 
         Request::RepoCreate { display_uri, resolved_uri, path, genesis_data } => {
             // Parse and validate the resolved URI (always sbo+raw://)
-            let parsed_uri = match SboUri::parse(&resolved_uri) {
+            let parsed_uri = match SboRawUri::parse(&resolved_uri) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid URI: {}", e)),
             };
 
             // URI path must be "/" for genesis (no path prefix or empty)
-            if parsed_uri.path_prefix.is_some() && parsed_uri.path_prefix.as_deref() != Some("/") {
+            if parsed_uri.path.is_some() && parsed_uri.path.as_deref() != Some("/") {
                 return Response::error("URI path must be '/' for repo creation");
             }
 
