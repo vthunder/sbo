@@ -98,10 +98,17 @@ v=sbo1 repo=sbo+raw://chain:appId@firstBlock/ genesis=sha256:<hash> node=<url> c
 - **Block-only ambiguity:** when registering with an anchor but no genesis hash, detect
   >1 genesis object set at `(chain, appId, first_block)` and error (don't guess).
 
-### Phase E — `as_of` read path (`daemon/src/http.rs`)
-- Add `as_of` to the `/v1/object` (and `/v1/list`) query params; resolve against
-  `get_state_root_at_block(as_of)` (`state/db.rs:327`). Without `as_of`, latest (LWW).
-- Confirm the `@firstBlock` anchor is treated as database selection, never as `as_of`.
+### Phase E — `as_of` read path (`daemon/src/http.rs`) — **recognized, refused (backend gap)**
+- Add `as_of` to the `/v1/object` and `/v1/list` query params. **Status: recognized but
+  not served.** The state DB stores only latest LWW object values + state roots for proof
+  freshness (`get_state_root_at_block` gives a *root*, not historical *values*), so a true
+  historical read needs a versioned / retained-trie backend. Per the fail-safe principle we
+  **refuse** `as_of` with `501 Not Implemented` rather than silently return the latest value
+  (the wrong-but-plausible failure). Implemented as `reject_as_of`.
+- **Tracked follow-up (real gap):** versioned object state to actually serve `as_of`. Until
+  then the spec defines the semantics and the server honestly refuses.
+- The `@firstBlock` anchor is database selection and is never treated as `as_of` (separate
+  by construction — anchor lives in the authority, `as_of` in the query).
 
 ### Phase F — CLI surface (`sbo-cli`)
 - `repo add` / `uri get|list` / `id import`: accept `@firstBlock` + the new query

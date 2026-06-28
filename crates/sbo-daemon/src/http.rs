@@ -49,6 +49,9 @@ impl ApiError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: msg.into() }
     }
+    pub fn not_implemented(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::NOT_IMPLEMENTED, message: msg.into() }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -236,13 +239,32 @@ pub struct ObjectQuery {
     pub repo: Option<String>,
     /// `1`/`true` to include the SBOQ proof.
     pub proof: Option<String>,
+    /// Optional historical-snapshot block (`?as_of=`). Recognized but not yet served —
+    /// see [`reject_as_of`].
+    pub as_of: Option<String>,
 }
 
-/// `GET /v1/object?path=&id=&repo=&proof=` — read one confirmed object.
+/// Historical `as_of` reads need a versioned / retained-trie backend (the state DB
+/// currently stores only latest LWW values + state roots for proof freshness, not
+/// historical object values). We **recognize** `as_of` and refuse rather than silently
+/// returning the latest value (which would be a wrong-but-plausible result). Tracked
+/// follow-up: versioned object state. Returns `Ok(())` when no `as_of` is requested.
+fn reject_as_of(as_of: Option<&str>) -> Result<(), ApiError> {
+    match as_of {
+        None => Ok(()),
+        Some(_) => Err(ApiError::not_implemented(
+            "historical `as_of` reads are not yet supported (requires versioned state); \
+             omit `as_of` to read the latest value",
+        )),
+    }
+}
+
+/// `GET /v1/object?path=&id=&repo=&proof=&as_of=` — read one confirmed object.
 async fn get_object_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
     Query(q): Query<ObjectQuery>,
 ) -> Result<Json<ObjectView>, ApiError> {
+    reject_as_of(q.as_of.as_deref())?;
     let with_proof = matches!(q.proof.as_deref(), Some("1") | Some("true"));
     let state = state.read().await;
     let view = state.get_object(q.repo.as_deref(), &q.path, &q.id, with_proof)?;
@@ -255,6 +277,8 @@ pub struct ListParams {
     pub prefix: Option<String>,
     pub schema: Option<String>,
     pub repo: Option<String>,
+    /// Optional historical-snapshot block (`?as_of=`) — recognized but not yet served.
+    pub as_of: Option<String>,
 }
 
 /// `GET /v1/list?prefix=` or `?schema=` — enumerate confirmed objects.
@@ -262,6 +286,7 @@ async fn list_objects_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
     Query(q): Query<ListParams>,
 ) -> Result<Json<Vec<ObjectView>>, ApiError> {
+    reject_as_of(q.as_of.as_deref())?;
     let selector = match (q.prefix, q.schema) {
         (Some(p), None) => ListSelector::Prefix(p),
         (None, Some(s)) => ListSelector::Schema(s),
@@ -614,6 +639,13 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+
+    #[test]
+    fn reject_as_of_passes_when_absent_refuses_when_present() {
+        assert!(reject_as_of(None).is_ok());
+        let err = reject_as_of(Some("12345")).unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+    }
     use http_body_util::BodyExt;
     use std::collections::HashMap;
     use tower::ServiceExt; // for `oneshot`
