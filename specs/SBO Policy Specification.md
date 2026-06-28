@@ -199,8 +199,36 @@ A requesting message matches an identity reference when its signer **resolves** 
 | `"/users/alice"` | Exact path only |
 | `"/users/*"` | Any single segment under `/users/` |
 | `"/users/**"` | Any depth under `/users/` |
-| `"/$owner/**"` | Dynamic: current owner's namespace |
-| `"/$user/**"` | Dynamic: acting user's namespace |
+| `"/$owner/**"` | Dynamic: the object owner's namespace |
+| `"/$user/**"` | Dynamic: the acting signer's namespace |
+| `"/u/$email/**"` | Dynamic: restricted to email-rooted signers |
+| `"/u/$name/**"` | Dynamic: restricted to locally-named signers |
+
+### Policy variables
+
+Patterns may interpolate **literal identity references** — the strings as written
+in headers / claimed by the signer, *not* resolved controllers. (Authorization —
+whether the signer actually controls a reference — is a separate step; see the
+[Authorization Specification](./SBO%20Authorization%20Specification.md).)
+
+| Variable | Value |
+|----------|-------|
+| `$owner` | The object's owner reference: the declared `Owner` header on create, the stored owner reference on update. **Not** derived from the path. |
+| `$user` | The acting signer's canonical identity. |
+| `$email` | The signer's email form, if any. |
+| `$name` | The signer's local name form, if any. |
+
+**Fail-closed:** if a variable is undefined for a message (e.g. `$email` for a
+key-only signer), any pattern referencing it matches nothing — the pattern is
+left with the literal `$var` token, which equals no real path segment. So
+`$owner`/`$user` are identity-agnostic (use them by default; they work for key-
+and email-rooted signers alike), while `$email`/`$name` deliberately *restrict* a
+namespace to one credential form.
+
+Because `$owner` is the declared owner (not the path's first segment), a
+container layout like `/u/$owner/**` works: a write to `/u/alice@example.com/…`
+declaring `Owner: alice@example.com` matches, and a forged `Owner` is still
+caught by the independent `to: owner` control check.
 
 ---
 

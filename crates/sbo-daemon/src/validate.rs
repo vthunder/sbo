@@ -112,9 +112,26 @@ fn name_lookup(state: &dyn StateView) -> impl Fn(&str) -> Option<NameRecord> + '
 /// Run the L2 attribution check: does the message's signer speak for
 /// `owner_ref` at the block's inclusion time? Returns `Ok(())` if authorized,
 /// `Err(reason)` if the write must be carried-but-filtered.
+/// The repo's primary domain: the single `/sys/domains/<D>` record if exactly one
+/// exists. `None` if there is none, or several (multi-domain repos need
+/// domain-qualified name records — deferred; see the sovereignty design). This is
+/// what scopes the email→name resolution override.
+pub fn primary_domain(state: &dyn StateView) -> Option<String> {
+    let domains = state.list_objects_by_path_prefix("/sys/domains/").ok()?;
+    let mut it = domains
+        .into_iter()
+        .filter(|o| o.path.to_string() == "/sys/domains/");
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None; // ambiguous — no override
+    }
+    Some(first.id.as_str().to_string())
+}
+
 fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref: &str) -> Result<(), String> {
     let signer = msg.signing_key.to_string();
     let lookup = name_lookup(state);
+    let pd = primary_domain(state);
     // Resolve referenced / conventional evidence to inline bytes the pure
     // verifier can consume (the pure path can't reach state).
     let evidence = resolve_evidence(msg, state);
@@ -130,6 +147,7 @@ fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref:
         &l2.anchors,
         &lookup,
         DEFAULT_HOP_LIMIT,
+        pd.as_deref(),
     ) {
         AuthzOutcome::Authorized => Ok(()),
         AuthzOutcome::Unauthorized(reason) => Err(reason),
@@ -255,11 +273,19 @@ pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Cont
 
     let pubkey = msg.signing_key.to_string();
 
-    // Try to look up the signer's claimed name
+    // Try to look up the signer's claimed name. On a primary-domain repo a local
+    // name `<local>` IS the identity `<local>@<domain>` (the sovereignty record),
+    // so canonicalize to that email — keeping a user's creator segment stable
+    // whether they signed via browserid (attributed email, above) or via their
+    // pinned key (this branch). Outside a primary domain the bare name stands.
     if let Some(db) = state {
         match db.get_name_for_pubkey(&pubkey) {
             Ok(Some(name)) => {
-                if let Ok(id) = Id::new(&name) {
+                let canonical = match primary_domain(db) {
+                    Some(domain) => format!("{}@{}", name, domain),
+                    None => name,
+                };
+                if let Ok(id) = Id::new(&canonical) {
                     return id;
                 }
             }
@@ -476,6 +502,26 @@ pub fn validate_message(
         }
     }
 
+    // 2.6. Creator integrity. The `Creator` reference determines the object's
+    // identity in state — its `(path, creator, id)` trie segment — independently
+    // of `Owner` (which gates the path). If a `Creator` is declared, the signer
+    // must control it, else a writer could file objects under another identity's
+    // creator segment. The owner gate above only covers `Creator` when no `Owner`
+    // is present (it is `Owner → else Creator → else signer`), so validate it
+    // explicitly here whenever it is set. Applies to all actions.
+    if let Some(creator) = &msg.creator {
+        if let Err(reason) = l2_authorize(msg, state, l2, creator.as_str()) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason: format!(
+                    "Signer does not control declared Creator {}: {}",
+                    creator.as_str(),
+                    reason
+                ),
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
@@ -608,7 +654,7 @@ fn is_name_claim_path(path: &SboPath) -> bool {
 fn validate_name_claim(
     msg: &Message,
     state: &dyn StateView,
-    _root_policy_exists: bool,
+    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
     // Check if ANY object exists at this path/id (regardless of creator)
@@ -642,7 +688,28 @@ fn validate_name_claim(
         }
         tracing::debug!("Controller updating name claim: {}", msg.id.as_str());
     } else {
-        // New name claim - allowed
+        // New name claim. On a primary-domain repo a local name `<local>` governs
+        // the identity `<local>@<domain>` (the sovereignty record), so claiming it
+        // requires controlling that identity — otherwise a stranger (or a
+        // front-runner) could hijack it. The signer proves control via browserid
+        // attribution to the email (first claim) or the already-pinned key (key
+        // rotation), since `l2_authorize` resolves the email through any existing
+        // record. Off a primary-domain repo, or during genesis (no root policy
+        // yet), name claims remain first-come.
+        if root_policy_exists {
+            if let Some(domain) = primary_domain(state) {
+                let email = format!("{}@{}", claimed_name, domain);
+                if let Err(reason) = l2_authorize(msg, state, l2, &email) {
+                    return ValidationResult::Invalid {
+                        stage: ValidationStage::Attribution,
+                        reason: format!(
+                            "Name '{}' maps to {} on this repo; claiming it requires controlling that identity: {}",
+                            claimed_name, email, reason
+                        ),
+                    };
+                }
+            }
+        }
         tracing::debug!("New name claim: {}", msg.id.as_str());
     }
 
@@ -831,12 +898,12 @@ fn check_policy_at(
     let actor = resolve_creator(msg, Some(state), l2);
     let target_path = target.to_string();
 
-    // The owner reference the `owner` policy identity authorizes against: an
-    // explicit owner (the existing object's resolved controller, for updates),
-    // else the namespace owner derived from the target path (for creates).
+    // The `$owner` reference (literal, never path-derived): the existing object's
+    // resolved controller for updates (passed in), else the declared `Owner`
+    // header for creates. De-circularized — no longer extracted from the path.
     let owner_ref: Option<String> = owner.map(|s| s.to_string()).or_else(|| {
         if action == ActionType::Create {
-            sbo_core::policy::extract_namespace_owner(&target_path)
+            msg.owner.as_ref().map(|o| o.as_str().to_string())
         } else {
             None
         }
@@ -849,17 +916,29 @@ fn check_policy_at(
         .map(|o| l2_authorize(msg, state, l2, o).is_ok())
         .unwrap_or(false);
 
+    // The acting user's attributed email (if any) and local name (if any), for
+    // the `$email` / `$name` policy variables; `$user` is the actor's canonical
+    // id. All literal references; undefined forms fail closed in matching.
+    let user_email = attributed_email(msg, Some(state), l2);
+    let user_name = state.get_name_for_pubkey(&msg.signing_key.to_string()).ok().flatten();
+    let policy_vars = sbo_core::policy::PolicyVars {
+        owner: owner_ref.as_deref(),
+        user: Some(actor.as_str()),
+        email: user_email.as_deref(),
+        name: user_name.as_deref(),
+    };
+
     // The acting user's controller, for attestation-defined roles/conditions:
     // the attributed email if the signer carries valid attribution, else the
     // signing key. Matches an `attested` source whose subject resolves to it.
-    let requester = match attributed_email(msg, Some(state), l2) {
+    let requester = match user_email.clone() {
         Some(email) => Controller::Email(email),
         None => Controller::Key(msg.signing_key.to_string()),
     };
     let is_attested = |source: &AttestedSource| attested_subject_matches(state, l2, &requester, source);
 
     // Evaluate the policy
-    match evaluate(&policy, &actor, action, &target_path, owner, signer_is_owner, &is_attested, msg) {
+    match evaluate(&policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg) {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",
@@ -899,6 +978,7 @@ fn attested_subject_matches(
     source: &AttestedSource,
 ) -> bool {
     let lookup = name_lookup(state);
+    let pd = primary_domain(state);
     let t = l2.inclusion_time.unwrap_or(0);
     let candidates = match &source.by {
         Some(by) => state
@@ -923,16 +1003,16 @@ fn attested_subject_matches(
         // resolves to the same party — the prefix is just the writer's literal
         // issuer string.
         if let Some(by) = &source.by {
-            let issuer_ctrl = resolve_controller(stored_owner_ref(&obj), &lookup, DEFAULT_HOP_LIMIT);
+            let issuer_ctrl = resolve_controller(stored_owner_ref(&obj), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref());
             // Must resolve to the same, *grounded* controller — two unresolvable
             // references must not match each other.
             if matches!(issuer_ctrl, Controller::Unresolved | Controller::None)
-                || issuer_ctrl != resolve_controller(by, &lookup, DEFAULT_HOP_LIMIT)
+                || issuer_ctrl != resolve_controller(by, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref())
             {
                 return false;
             }
         }
-        resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT) == *requester
+        resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) == *requester
     })
 }
 
