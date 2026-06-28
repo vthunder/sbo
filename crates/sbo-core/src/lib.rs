@@ -21,6 +21,7 @@ pub mod proof;
 pub mod schema;
 pub mod keyring;
 pub mod dns;
+pub mod uri;
 pub mod jwt;
 pub mod attribution;
 pub mod resolve;
@@ -31,7 +32,7 @@ mod genesis;
 mod indexer;
 
 pub use error::SboError;
-pub use genesis::Genesis;
+pub use genesis::{Genesis, genesis_hash, genesis_hash_from_wire};
 pub use indexer::Indexer;
 pub use proof::{SbopMessage, parse_sbop, serialize_sbop, is_sbop_message, SbopError};
 

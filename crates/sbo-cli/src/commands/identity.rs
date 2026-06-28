@@ -64,7 +64,7 @@ pub async fn create(
     let client = IpcClient::new(config.daemon.socket_path);
 
     // Build identity URI
-    let identity_uri = format!("{}/sys/names/{}", uri.trim_end_matches('/'), name);
+    let identity_uri = compose_identity_uri(uri, name);
 
     println!("Creating identity '{}' at {}", name, uri);
     println!("  Key: {} ({})", alias, public_key.to_string());
@@ -502,7 +502,7 @@ pub async fn import(
     // Handle both SBO URI (sbo+raw://... or sbo://...) and local path (./my-repo)
     let (identity_uri, chain_uri) = if repo.starts_with("sbo+raw://") || repo.starts_with("sbo://") {
         let chain = repo.trim_end_matches('/');
-        (format!("{}/sys/names/{}", chain, name), format!("{}/", chain))
+        (compose_identity_uri(repo, name), format!("{}/", chain))
     } else {
         // Local path - need to find the chain URI from daemon
         let config = Config::load(&Config::config_path())?;
@@ -529,7 +529,7 @@ pub async fn import(
                 match found_uri {
                     Some(uri) => {
                         let chain = uri.trim_end_matches('/');
-                        (format!("{}/sys/names/{}", chain, name), format!("{}/", chain))
+                        (compose_identity_uri(&uri, name), format!("{}/", chain))
                     }
                     None => {
                         return Err(anyhow::anyhow!(
@@ -687,6 +687,19 @@ pub fn remove(chain: &str, name: &str) -> Result<()> {
     println!("\n  Note: On-chain identity unchanged");
 
     Ok(())
+}
+
+/// Compose `/sys/names/<name>` onto a bare repository URI.
+///
+/// For `sbo+raw://` URIs this routes through `SboRawUri::compose`, so an
+/// `@firstBlock` anchor is preserved while any `?query` on the repo address is
+/// dropped (a repository address carries no selectors). For `sbo://` (DNS) or
+/// any non-raw form, falls back to trimming a trailing slash and concatenating.
+fn compose_identity_uri(repo_uri: &str, name: &str) -> String {
+    if let Ok(parsed) = sbo_core::uri::SboRawUri::parse(repo_uri) {
+        return parsed.compose(&format!("/sys/names/{name}")).to_uri_string();
+    }
+    format!("{}/sys/names/{}", repo_uri.trim_end_matches('/'), name)
 }
 
 /// Parse identity URI to extract chain and name

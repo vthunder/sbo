@@ -6,169 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Known chain aliases that map to CAIP-2 identifiers
-/// Format: (alias_namespace, alias_reference) -> (caip2_namespace, caip2_reference)
-const CHAIN_ALIASES: &[(&str, &str, &str, &str)] = &[
-    // avail:turing -> polkadot:<genesis_hash_prefix>
-    ("avail", "turing", "polkadot", "d3d2f3a3495dc597434a99d7d449ebad"),
-    // avail:mainnet -> polkadot:<genesis_hash_prefix>
-    ("avail", "mainnet", "polkadot", "b91746b45e0346cc2f815a520b9c6cb4"),
-];
-
-/// A CAIP-2 chain identifier
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChainId {
-    /// Namespace (e.g., "polkadot", "eip155", "avail")
-    pub namespace: String,
-    /// Reference (e.g., genesis hash prefix, chain id)
-    pub reference: String,
-}
-
-impl ChainId {
-    /// Parse a CAIP-2 chain identifier like "polkadot:abc123" or "avail:turing"
-    pub fn parse(s: &str) -> crate::Result<Self> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 2 {
-            return Err(crate::DaemonError::Repo(format!(
-                "Invalid CAIP-2 chain identifier: expected 'namespace:reference', got: {}",
-                s
-            )));
-        }
-
-        let namespace = parts[0].to_lowercase();
-        let reference = parts[1].to_lowercase();
-
-        Ok(Self { namespace, reference })
-    }
-
-    /// Resolve aliases to canonical CAIP-2 identifiers
-    pub fn resolve(&self) -> Self {
-        for (alias_ns, alias_ref, caip_ns, caip_ref) in CHAIN_ALIASES {
-            if self.namespace == *alias_ns && self.reference == *alias_ref {
-                return Self {
-                    namespace: caip_ns.to_string(),
-                    reference: caip_ref.to_string(),
-                };
-            }
-        }
-        // No alias found, return as-is
-        self.clone()
-    }
-
-    /// Check if this is an Avail chain (mainnet or turing)
-    pub fn is_avail(&self) -> bool {
-        let resolved = self.resolve();
-        resolved.namespace == "polkadot" && (
-            resolved.reference == "d3d2f3a3495dc597434a99d7d449ebad" ||  // turing
-            resolved.reference == "b91746b45e0346cc2f815a520b9c6cb4"    // mainnet
-        )
-    }
-
-    /// Get the display name for this chain
-    pub fn display_name(&self) -> String {
-        // Check if we can use a friendly alias
-        for (alias_ns, alias_ref, caip_ns, caip_ref) in CHAIN_ALIASES {
-            if self.namespace == *caip_ns && self.reference == *caip_ref {
-                return format!("{}:{}", alias_ns, alias_ref);
-            }
-        }
-        format!("{}:{}", self.namespace, self.reference)
-    }
-}
-
-impl std::fmt::Display for ChainId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.namespace, self.reference)
-    }
-}
-
-/// Parsed SBO URI
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SboUri {
-    /// CAIP-2 chain identifier
-    pub chain: ChainId,
-    /// App ID on the network
-    pub app_id: u32,
-    /// Optional path prefix filter
-    pub path_prefix: Option<String>,
-}
-
-impl SboUri {
-    /// Parse a raw SBO URI like "sbo+raw://avail:turing:18/" or "sbo+raw://polkadot:abc123:42/nft/"
-    ///
-    /// Note: This only handles direct chain references (sbo+raw://).
-    /// DNS-resolved URIs (sbo://) require resolution first - see SboUri::resolve_dns().
-    pub fn parse(uri: &str) -> crate::Result<Self> {
-        let uri = uri.trim();
-
-        // Only accept sbo+raw:// for direct chain references
-        // sbo:// URIs require DNS resolution first
-        let rest = if uri.starts_with("sbo+raw://") {
-            &uri[10..] // Remove "sbo+raw://"
-        } else if uri.starts_with("sbo://") {
-            return Err(crate::DaemonError::Repo(format!(
-                "DNS-based URI requires resolution: {}. Use sbo+raw:// for direct chain references.",
-                uri
-            )));
-        } else {
-            return Err(crate::DaemonError::Repo(format!(
-                "Invalid SBO URI: must start with 'sbo+raw://' for direct chain references: {}",
-                uri
-            )));
-        };
-
-        // Split authority from path
-        let (authority, path) = if let Some(idx) = rest.find('/') {
-            (&rest[..idx], Some(&rest[idx..]))
-        } else {
-            (rest, None)
-        };
-
-        // Parse namespace:reference:app_id
-        let parts: Vec<&str> = authority.split(':').collect();
-        if parts.len() != 3 {
-            return Err(crate::DaemonError::Repo(format!(
-                "Invalid SBO URI authority: expected 'namespace:reference:app_id', got: {}",
-                authority
-            )));
-        }
-
-        let chain = ChainId {
-            namespace: parts[0].to_lowercase(),
-            reference: parts[1].to_lowercase(),
-        };
-
-        let app_id: u32 = parts[2].parse().map_err(|_| {
-            crate::DaemonError::Repo(format!("Invalid app_id: {}", parts[2]))
-        })?;
-
-        let path_prefix = path.map(|p| p.to_string()).filter(|p| p != "/");
-
-        Ok(Self {
-            chain,
-            app_id,
-            path_prefix,
-        })
-    }
-
-    /// Convert back to URI string (using friendly aliases where possible)
-    pub fn to_string(&self) -> String {
-        let chain_str = self.chain.display_name();
-        match &self.path_prefix {
-            Some(prefix) => format!("sbo+raw://{}:{}{}", chain_str, self.app_id, prefix),
-            None => format!("sbo+raw://{}:{}/", chain_str, self.app_id),
-        }
-    }
-
-    /// Convert to canonical URI string (using full CAIP-2 identifiers)
-    pub fn to_canonical_string(&self) -> String {
-        let resolved = self.chain.resolve();
-        match &self.path_prefix {
-            Some(prefix) => format!("sbo+raw://{}:{}{}", resolved, self.app_id, prefix),
-            None => format!("sbo+raw://{}:{}/", resolved, self.app_id),
-        }
-    }
-}
+pub use sbo_core::uri::{ChainId, AppId, SboRawUri};
 
 /// A followed repository
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +14,7 @@ pub struct Repo {
     /// Unique identifier (hash of URI)
     pub id: String,
     /// The SBO URI
-    pub uri: SboUri,
+    pub uri: SboRawUri,
     /// Display URI (may be sbo:// DNS-based or sbo+raw://)
     pub display_uri: String,
     /// Local filesystem path
@@ -188,11 +26,16 @@ pub struct Repo {
     /// Last DNS check timestamp (None if never checked, or sbo+raw://)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_checked_at: Option<u64>,
+    /// Expected genesis hash (`sha256:...`) from the `_sbo` record's `genesis=` field
+    /// or a `?genesis=` URI selector. When set, the daemon verifies the reconstructed
+    /// genesis against it once the genesis block is processed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_genesis: Option<String>,
 }
 
 impl Repo {
     /// Create a new repo with optional starting block
-    pub fn new(display_uri: String, uri: SboUri, path: PathBuf, from_block: Option<u64>) -> Self {
+    pub fn new(display_uri: String, uri: SboRawUri, path: PathBuf, from_block: Option<u64>) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let id = Self::compute_id(&uri);
@@ -220,10 +63,27 @@ impl Repo {
             head,
             created_at: now,
             dns_checked_at,
+            expected_genesis: None,
         }
     }
 
-    fn compute_id(uri: &SboUri) -> String {
+    /// Verify reconstructed genesis-batch wire bytes against `expected_genesis`.
+    /// No-op (Ok) when no expected hash is set. Returns the mismatch detail otherwise.
+    pub fn verify_genesis(&self, genesis_wire: &[u8]) -> Result<(), String> {
+        let Some(expected) = self.expected_genesis.as_deref() else {
+            return Ok(());
+        };
+        let actual = sbo_core::genesis_hash_from_wire(genesis_wire)
+            .map_err(|e| format!("cannot parse genesis batch: {e}"))?
+            .to_string();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("genesis hash mismatch: expected {expected}, got {actual}"))
+        }
+    }
+
+    fn compute_id(uri: &SboRawUri) -> String {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
         hasher.update(uri.to_string().as_bytes());
@@ -275,7 +135,7 @@ impl RepoManager {
     }
 
     /// Add a new repo with optional starting block
-    pub fn add(&mut self, display_uri: String, uri: SboUri, path: PathBuf, from_block: Option<u64>) -> crate::Result<&Repo> {
+    pub fn add(&mut self, display_uri: String, uri: SboRawUri, path: PathBuf, from_block: Option<u64>) -> crate::Result<&Repo> {
         // Create repo directory first (needed for canonicalization)
         std::fs::create_dir_all(&path)?;
 
@@ -314,6 +174,19 @@ impl RepoManager {
         Ok(self.repos.get(&id).unwrap())
     }
 
+    /// Record the expected genesis hash for a repo (from the `_sbo` record / `?genesis=`),
+    /// to be verified once the genesis block is processed.
+    pub fn set_expected_genesis(&mut self, id: &str, genesis: Option<String>) -> crate::Result<()> {
+        if genesis.is_none() {
+            return Ok(());
+        }
+        if let Some(repo) = self.repos.get_mut(id) {
+            repo.expected_genesis = genesis;
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// Remove a repo by path
     pub fn remove(&mut self, path: &Path) -> crate::Result<Repo> {
         // Canonicalize path for consistent lookup (stored paths are canonical)
@@ -344,7 +217,7 @@ impl RepoManager {
     /// Remove a repo by URI
     pub fn remove_by_uri(&mut self, uri: &str) -> crate::Result<Repo> {
         // Parse and normalize the URI
-        let parsed = SboUri::parse(uri)?;
+        let parsed = SboRawUri::parse(uri)?;
         let normalized = parsed.to_string();
 
         let id = self
@@ -391,7 +264,7 @@ impl RepoManager {
     pub fn get_by_app_id(&self, app_id: u32) -> Vec<&Repo> {
         self.repos
             .values()
-            .filter(|r| r.uri.app_id == app_id)
+            .filter(|r| r.uri.app_id.0 == app_id)
             .collect()
     }
 
@@ -422,14 +295,14 @@ impl RepoManager {
 
     /// Get all unique app_ids being followed
     pub fn followed_app_ids(&self) -> Vec<u32> {
-        let mut ids: Vec<u32> = self.repos.values().map(|r| r.uri.app_id).collect();
+        let mut ids: Vec<u32> = self.repos.values().map(|r| r.uri.app_id.0).collect();
         ids.sort();
         ids.dedup();
         ids
     }
 
     /// Update a repo's resolved URI (for DNS relink)
-    pub fn update_uri(&mut self, id: &str, display_uri: String, new_uri: SboUri) -> crate::Result<()> {
+    pub fn update_uri(&mut self, id: &str, display_uri: String, new_uri: SboRawUri) -> crate::Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let repo = self.repos.get_mut(id)
@@ -453,14 +326,57 @@ impl RepoManager {
 mod tests {
     use super::*;
 
+    fn repo_with_expected(expected: Option<String>) -> Repo {
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:506@1/").unwrap();
+        let mut r = Repo::new("sbo+raw://avail:turing:506@1/".into(), uri, PathBuf::from("/tmp/x"), Some(1));
+        r.expected_genesis = expected;
+        r
+    }
+
+    #[test]
+    fn verify_genesis_noop_when_unset() {
+        assert!(repo_with_expected(None).verify_genesis(b"anything").is_ok());
+    }
+
+    #[test]
+    fn verify_genesis_matches_and_mismatches() {
+        // Build a tiny genesis batch and its true hash.
+        use sbo_core::crypto::{ContentHash, Signature, SigningKey};
+        use sbo_core::message::{Action, Id, Message, ObjectType, Path};
+        let key = SigningKey::generate();
+        let mut msg = Message {
+            action: Action::Post,
+            path: Path::parse("/sys/test/").unwrap(),
+            id: Id::new("a").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature([0u8; 64]),
+            content_type: Some("text/plain".into()),
+            content_hash: Some(ContentHash::sha256(b"hi")),
+            payload: Some(b"hi".to_vec()),
+            owner: None, creator: None, content_encoding: None, content_schema: None,
+            policy_ref: None, related: None, hlc: None, prev: None,
+            auth_cert: None, auth_evidence: None,
+        };
+        msg.sign(&key);
+        let wire = sbo_core::wire::serialize(&msg);
+        let true_hash = sbo_core::genesis_hash_from_wire(&wire).unwrap().to_string();
+
+        assert!(repo_with_expected(Some(true_hash)).verify_genesis(&wire).is_ok());
+        let err = repo_with_expected(Some("sha256:deadbeef".into()))
+            .verify_genesis(&wire)
+            .unwrap_err();
+        assert!(err.contains("mismatch"));
+    }
+
     #[test]
     fn test_parse_sbo_uri_with_alias() {
         // Test with sbo+raw:// (correct format)
-        let uri = SboUri::parse("sbo+raw://avail:turing:13/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:13/").unwrap();
         assert_eq!(uri.chain.namespace, "avail");
         assert_eq!(uri.chain.reference, "turing");
-        assert_eq!(uri.app_id, 13);
-        assert!(uri.path_prefix.is_none());
+        assert_eq!(uri.app_id, AppId(13));
+        assert!(uri.path.is_none());
 
         // Verify alias resolution
         let resolved = uri.chain.resolve();
@@ -471,37 +387,37 @@ mod tests {
     #[test]
     fn test_sbo_dns_uri_requires_resolution() {
         // sbo:// URIs are DNS-based and require resolution - they should not parse directly
-        let err = SboUri::parse("sbo://myapp.com/path").unwrap_err();
-        assert!(err.to_string().contains("DNS-based URI requires resolution"));
+        let err = SboRawUri::parse("sbo://myapp.com/path").unwrap_err();
+        assert!(matches!(err, sbo_core::uri::UriError::NeedsDnsResolution(_)));
     }
 
     #[test]
     fn test_parse_sbo_uri_with_caip2() {
-        let uri = SboUri::parse("sbo+raw://polkadot:d3d2f3a3495dc597434a99d7d449ebad:42/nft/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://polkadot:d3d2f3a3495dc597434a99d7d449ebad:42/nft/").unwrap();
         assert_eq!(uri.chain.namespace, "polkadot");
         assert_eq!(uri.chain.reference, "d3d2f3a3495dc597434a99d7d449ebad");
-        assert_eq!(uri.app_id, 42);
-        assert_eq!(uri.path_prefix, Some("/nft/".to_string()));
+        assert_eq!(uri.app_id, AppId(42));
+        assert_eq!(uri.path, Some("/nft/".to_string()));
     }
 
     #[test]
     fn test_sbo_uri_roundtrip() {
         // Alias should display as alias with sbo+raw://
-        let uri = SboUri::parse("sbo+raw://avail:turing:13/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:13/").unwrap();
         assert_eq!(uri.to_string(), "sbo+raw://avail:turing:13/");
 
         // Full CAIP-2 for known chain should display as alias
-        let uri = SboUri::parse("sbo+raw://polkadot:d3d2f3a3495dc597434a99d7d449ebad:42/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://polkadot:d3d2f3a3495dc597434a99d7d449ebad:42/").unwrap();
         assert_eq!(uri.to_string(), "sbo+raw://avail:turing:42/");
 
         // Unknown chain should display as full CAIP-2
-        let uri = SboUri::parse("sbo+raw://eip155:1:99/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://eip155:1:99/").unwrap();
         assert_eq!(uri.to_string(), "sbo+raw://eip155:1:99/");
     }
 
     #[test]
     fn test_canonical_string() {
-        let uri = SboUri::parse("sbo+raw://avail:turing:13/nft/").unwrap();
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:13/nft/").unwrap();
         assert_eq!(
             uri.to_canonical_string(),
             "sbo+raw://polkadot:d3d2f3a3495dc597434a99d7d449ebad:13/nft/"

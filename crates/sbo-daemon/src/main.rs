@@ -15,7 +15,7 @@ use sbo_daemon::http::{self, SignRequestStore};
 use sbo_daemon::ipc::{IpcServer, Request, Response, SignRequestStatus, SignRequest as IpcSignRequest};
 use sbo_daemon::lc::LcManager;
 use sbo_daemon::prover::Prover;
-use sbo_daemon::repo::{RepoManager, SboUri};
+use sbo_daemon::repo::{RepoManager, SboRawUri};
 use sbo_daemon::rpc::RpcClient;
 use sbo_daemon::sync::SyncEngine;
 use sbo_daemon::turbo::TurboDaClient;
@@ -774,6 +774,32 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                                 tracing::info!("Processed block {} ({} transactions)", block_num, result.tx_count);
                             }
 
+                            // Genesis verification: when this block is a repo's genesis
+                            // anchor and an expected hash was recorded, verify the
+                            // reconstructed genesis. Non-fatal — a mismatch is logged
+                            // loudly (operator-visible) rather than crashing sync.
+                            let to_verify: Vec<(String, Result<(), String>)> = state
+                                .repos
+                                .list()
+                                .filter(|r| {
+                                    r.expected_genesis.is_some()
+                                        && r.uri.first_block == Some(block_num)
+                                })
+                                .map(|r| (r.id.clone(), r.verify_genesis(&result.block_data)))
+                                .collect();
+                            for (id, outcome) in to_verify {
+                                match outcome {
+                                    Ok(()) => tracing::info!(
+                                        "Genesis verified for repo {} at block {}",
+                                        id, block_num
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        "GENESIS VERIFICATION FAILED for repo {} at block {}: {}",
+                                        id, block_num, e
+                                    ),
+                                }
+                            }
+
                             // Add block to prover if enabled and genesis has been processed
                             if let Some(ref mut p) = prover {
                                 // Only prove if genesis has been processed (objects exist)
@@ -870,9 +896,9 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
 
 async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Response {
     match req {
-        Request::RepoAdd { display_uri, resolved_uri, path, from_block } => {
+        Request::RepoAdd { display_uri, resolved_uri, path, from_block, expected_genesis } => {
             // Parse the resolved URI (always sbo+raw://)
-            let uri = match SboUri::parse(&resolved_uri) {
+            let uri = match SboRawUri::parse(&resolved_uri) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid URI: {}", e)),
             };
@@ -914,19 +940,45 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                     }
                 }
                 Some(block) => Some(block as u64),
-                None => None,
+                // No explicit override → default to the @firstBlock genesis anchor from
+                // the URI (the spec's sync-from-genesis start). Operator-supplied
+                // from_block still wins above.
+                None => uri.first_block,
             };
+            if from_block.is_none() && resolved_from_block.is_some() {
+                tracing::info!(
+                    "Seeding repo from @firstBlock anchor = {}",
+                    resolved_from_block.unwrap()
+                );
+            }
+
+            // Expected genesis hash: explicit (from the _sbo record) wins; otherwise a
+            // `?genesis=` selector on the resolved URI.
+            let genesis_to_store = expected_genesis.or_else(|| uri.query.genesis.clone());
 
             let mut state = state.write().await;
-            match state.repos.add(display_uri.clone(), uri, path, resolved_from_block) {
-                Ok(repo) => Response::ok(serde_json::json!({
+            let added = match state.repos.add(display_uri.clone(), uri, path, resolved_from_block) {
+                Ok(repo) => Ok(serde_json::json!({
                     "id": repo.id,
                     "display_uri": repo.display_uri,
                     "resolved_uri": repo.uri.to_string(),
                     "path": repo.path,
                     "head": repo.head,
                 })),
-                Err(e) => Response::error(e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            match added {
+                Ok(data) => {
+                    if let Some(id) = data["id"].as_str() {
+                        if let Err(e) =
+                            state.repos.set_expected_genesis(&id.to_string(), genesis_to_store)
+                        {
+                            tracing::warn!("Failed to record expected genesis: {}", e);
+                        }
+                    }
+                    Response::ok(data)
+                }
+                Err(e) => Response::error(e),
             }
         }
 
@@ -989,7 +1041,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             };
 
             // Parse new URI
-            let new_uri = match SboUri::parse(&new_resolved) {
+            let new_uri = match SboRawUri::parse(&new_resolved) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid resolved URI: {}", e)),
             };
@@ -1512,13 +1564,13 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
 
         Request::RepoCreate { display_uri, resolved_uri, path, genesis_data } => {
             // Parse and validate the resolved URI (always sbo+raw://)
-            let parsed_uri = match SboUri::parse(&resolved_uri) {
+            let parsed_uri = match SboRawUri::parse(&resolved_uri) {
                 Ok(u) => u,
                 Err(e) => return Response::error(format!("Invalid URI: {}", e)),
             };
 
             // URI path must be "/" for genesis (no path prefix or empty)
-            if parsed_uri.path_prefix.is_some() && parsed_uri.path_prefix.as_deref() != Some("/") {
+            if parsed_uri.path.is_some() && parsed_uri.path.as_deref() != Some("/") {
                 return Response::error("URI path must be '/' for repo creation");
             }
 

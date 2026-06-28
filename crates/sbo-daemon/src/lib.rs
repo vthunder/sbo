@@ -48,6 +48,12 @@ pub enum DaemonError {
     Io(#[from] std::io::Error),
 }
 
+impl From<sbo_core::uri::UriError> for DaemonError {
+    fn from(e: sbo_core::uri::UriError) -> Self {
+        DaemonError::Repo(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DaemonError>;
 
 /// Sanitize a URI into a filesystem-safe directory name

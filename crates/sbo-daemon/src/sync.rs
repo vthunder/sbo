@@ -736,7 +736,7 @@ impl SyncEngine {
                 for repo in matching_repos {
                     for msg in &messages {
                         // Check path prefix filter
-                        if let Some(ref prefix) = repo.uri.path_prefix {
+                        if let Some(ref prefix) = repo.uri.path {
                             if !msg.path.to_string().starts_with(prefix) {
                                 continue;
                             }
