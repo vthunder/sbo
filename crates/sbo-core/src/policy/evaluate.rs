@@ -194,7 +194,39 @@ fn check_requirements(
         }
     }
 
+    // Check dnssec_proof: the payload must be a valid RFC 9102 DNSSEC proof for
+    // the domain this object is named after. For a `/sys/dnssec/<domain>` write
+    // the object id IS `<domain>` (the write path is the container `/sys/dnssec/`
+    // plus the id leaf). This is what makes the object self-authorizing — the
+    // payload proves its own authority, so an unprivileged grant is safe.
+    // Domain-binding is intrinsic: the proof must carry `_browserid.<domain>` for
+    // this exact id, so a valid proof for a *different* domain is rejected.
+    if require.dnssec_proof {
+        if let Some(reason) = check_dnssec_proof(message) {
+            return Some(reason);
+        }
+    }
+
     None
+}
+
+/// Verify the payload is a valid RFC 9102 DNSSEC proof bound to the object's id
+/// (the `<domain>` of a `/sys/dnssec/<domain>` object).
+fn check_dnssec_proof(message: &Message) -> Option<String> {
+    let domain = message.id.as_str();
+    if domain.is_empty() {
+        return Some("dnssec_proof: object id (domain) is empty".to_string());
+    }
+
+    let payload = match message.payload.as_ref() {
+        Some(p) => p,
+        None => return Some("dnssec_proof: missing payload (expected RFC 9102 proof)".to_string()),
+    };
+
+    match crate::attribution::verify_dnssec_proof_for_domain(payload, domain) {
+        Ok(_window) => None,
+        Err(e) => Some(format!("dnssec_proof: invalid proof for '{}': {}", domain, e)),
+    }
 }
 
 /// Check if the payload's JWT issuer maps to an object at the required path pattern
@@ -525,6 +557,90 @@ mod tests {
             evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &PolicyVars::default(), false, &no, &msg),
             PolicyResult::Denied(_)
         ));
+    }
+
+    fn dnssec_msg(domain: &str, payload: Vec<u8>) -> Message {
+        let key = SigningKey::generate();
+        let mut msg = Message {
+            action: Action::Post,
+            path: Path::parse("/sys/dnssec/").unwrap(),
+            id: Id::new(domain).unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature::parse(&"0".repeat(128)).unwrap(),
+            content_type: Some("application/octet-stream".to_string()),
+            content_hash: Some(ContentHash::sha256(&payload)),
+            payload: Some(payload),
+            owner: None,
+            creator: None,
+            content_encoding: None,
+            content_schema: Some("dnssec.v1".to_string()),
+            policy_ref: None,
+            related: None,
+            hlc: None,
+            prev: None,
+            auth_cert: None,
+            auth_evidence: None,
+        };
+        msg.sign(&key);
+        msg
+    }
+
+    fn self_authorizing_dnssec_policy() -> Policy {
+        // The default /sys/dnssec/* policy: anyone may write, but the payload
+        // must be a valid DNSSEC proof for the object's domain id.
+        serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create", "update"], "on": "/sys/dnssec/**"}],
+            "restrictions": [{
+                "on": "/sys/dnssec/**",
+                "require": {
+                    "schema": "dnssec.v1",
+                    "content_type": "application/octet-stream",
+                    "dnssec_proof": true
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dnssec_proof_grant_matches_container_path() {
+        // The write target is the container `/sys/dnssec/` (id is the leaf), so
+        // the `/sys/dnssec/**` grant+restriction must fire on it. With an invalid
+        // proof payload the restriction denies — proving both that the grant let
+        // an unprivileged signer through AND that the dnssec_proof guard ran.
+        let policy = self_authorizing_dnssec_policy();
+        let msg = dnssec_msg("mingo.place", b"not-a-valid-rfc9102-proof".to_vec());
+        let actor = Id::new("e_anon").unwrap();
+        let no = |_: &AttestedSource| false;
+        match evaluate(&policy, &actor, ActionType::Create, "/sys/dnssec/", &PolicyVars::default(), false, &no, &msg) {
+            PolicyResult::Denied(r) => assert!(r.contains("dnssec_proof"), "expected dnssec_proof denial, got: {r}"),
+            PolicyResult::Allowed => panic!("invalid proof must be denied"),
+        }
+    }
+
+    #[test]
+    fn dnssec_proof_requires_payload() {
+        // A dnssec_proof restriction with no payload is denied (can't prove authority).
+        let require: super::super::types::Requirements = serde_json::from_value(serde_json::json!({
+            "dnssec_proof": true
+        }))
+        .unwrap();
+        let mut msg = dnssec_msg("mingo.place", vec![]);
+        msg.payload = None;
+        let no = |_: &AttestedSource| false;
+        assert!(check_requirements(&require, &msg, &no).is_some());
+    }
+
+    #[test]
+    fn dnssec_proof_absent_by_default_is_noop() {
+        // Requirements without dnssec_proof set must not invoke the proof check
+        // (the field defaults to false and round-trips out of serialization).
+        let require: super::super::types::Requirements = serde_json::from_value(serde_json::json!({
+            "schema": "post.v1"
+        }))
+        .unwrap();
+        assert!(!require.dnssec_proof);
     }
 
     #[test]
