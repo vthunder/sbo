@@ -132,6 +132,16 @@ pub trait RepoApi: Send + Sync + 'static {
         with_proof: bool,
     ) -> Result<ObjectView, ApiError>;
 
+    /// Raw confirmed payload bytes for an object, or `None` if it does not exist.
+    /// Unlike [`ObjectView::payload_text`] (lossy UTF-8), this preserves binary
+    /// content — required for the DNSSEC proof (`application/octet-stream`).
+    fn get_object_raw(
+        &self,
+        repo: Option<&str>,
+        path: &str,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError>;
+
     fn list_objects(
         &self,
         repo: Option<&str>,
@@ -223,6 +233,7 @@ pub fn create_router<S: SignRequestStore + RepoApi>(state: HttpState<S>) -> Rout
         .route("/v1/list", get(list_objects_v1::<S>))
         .route("/v1/submit", post(submit_v1::<S>))
         .route("/v1/state-root", get(state_root_v1::<S>))
+        .route("/v1/dnssec", get(dnssec_v1::<S>))
         .layer(cors)
         .layer(private_network)  // Apply to all responses including CORS preflight
         .with_state(state)
@@ -330,6 +341,96 @@ async fn state_root_v1<S: RepoApi>(
     let state = state.read().await;
     let view = state.state_root(q.repo.as_deref())?;
     Ok(Json(view))
+}
+
+/// Query params for `GET /v1/dnssec`.
+#[derive(Debug, Deserialize)]
+pub struct DnssecQuery {
+    /// The domain to check/capture a `_browserid.<domain>` proof for.
+    pub domain: String,
+    /// The time (UNIX seconds) the client needs the proof valid for. Defaults to
+    /// "now" (the daemon's wall clock) when omitted.
+    pub needed_by: Option<i64>,
+    /// Extra headroom (seconds) added to `needed_by` to absorb inclusion latency.
+    pub margin: Option<i64>,
+    /// Optional repo selector; defaults to the sole repo.
+    pub repo: Option<String>,
+}
+
+/// The on-chain proof's RRSig validity window (UNIX seconds).
+#[derive(Debug, Serialize)]
+pub struct DnssecWindow {
+    pub inception: i64,
+    pub expiration: i64,
+}
+
+/// Response for `GET /v1/dnssec`. `proof_b64` is present ONLY when a refresh is
+/// needed (the on-chain proof is absent or won't cover `needed_by + margin`),
+/// carrying a freshly-captured proof for the client to submit. On the fresh path
+/// it is omitted so the client can do a bare write with no extra bytes.
+#[derive(Debug, Serialize)]
+pub struct DnssecView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_chain: Option<DnssecWindow>,
+    pub needs_refresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_b64: Option<String>,
+}
+
+/// `GET /v1/dnssec?domain=&needed_by=&margin=&repo=` — report the on-chain
+/// `/sys/dnssec/<domain>` proof window and, when it won't cover `needed_by +
+/// margin` (or is absent), capture a fresh RFC 9102 proof from live DNS and
+/// return it base64url-encoded. READ/capture only — never submits; the client
+/// bears the on-chain write cost.
+async fn dnssec_v1<S: RepoApi>(
+    State(state): State<HttpState<S>>,
+    Query(q): Query<DnssecQuery>,
+) -> Result<Json<DnssecView>, ApiError> {
+    use base64::Engine;
+
+    // Read the on-chain proof (if any) and parse its RRSig window. The object is
+    // /sys/dnssec/<domain> — container path + the domain as the id.
+    let raw = {
+        let state = state.read().await;
+        state.get_object_raw(q.repo.as_deref(), "/sys/dnssec/", &q.domain)?
+    };
+    let on_chain = raw.as_deref().and_then(|bytes| {
+        sbo_core::attribution::verify_dnssec_proof_for_domain(bytes, &q.domain)
+            .ok()
+            .map(|(inception, expiration)| DnssecWindow { inception, expiration })
+    });
+
+    // A refresh is needed if there is no valid on-chain proof, or it expires
+    // before the client needs it (plus margin for inclusion latency).
+    let needed_by = q.needed_by.unwrap_or_else(now_unix);
+    let deadline = needed_by.saturating_add(q.margin.unwrap_or(0).max(0));
+    let needs_refresh = on_chain
+        .as_ref()
+        .map(|w| w.expiration < deadline)
+        .unwrap_or(true);
+
+    // Only capture (a live DNS round-trip) when the client actually needs it.
+    let proof_b64 = if needs_refresh {
+        let resolver: std::net::SocketAddr = sbo_capture::DEFAULT_RESOLVER
+            .parse()
+            .map_err(|e| ApiError::internal(format!("bad default resolver: {e}")))?;
+        let proof = sbo_capture::capture_evidence(resolver, &q.domain)
+            .await
+            .map_err(|e| ApiError::internal(format!("DNSSEC capture failed for '{}': {e}", q.domain)))?;
+        Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof))
+    } else {
+        None
+    };
+
+    Ok(Json(DnssecView { on_chain, needs_refresh, proof_b64 }))
+}
+
+/// Current wall-clock UNIX seconds (for the default `needed_by`).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// GET /auth - Serve the auth popup page
@@ -706,6 +807,17 @@ mod tests {
                 v.sboq = Some("SBOQ/0.2".to_string());
             }
             Ok(v)
+        }
+        fn get_object_raw(
+            &self,
+            _repo: Option<&str>,
+            _path: &str,
+            id: &str,
+        ) -> Result<Option<Vec<u8>>, ApiError> {
+            if id == "missing" {
+                return Ok(None);
+            }
+            Ok(Some(b"raw-bytes".to_vec()))
         }
         fn list_objects(
             &self,

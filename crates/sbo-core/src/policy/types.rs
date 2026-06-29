@@ -105,6 +105,16 @@ pub struct Requirements {
     /// (e.g. a ban). Absent claim ⇒ condition satisfied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_attested: Option<AttestedSource>,
+
+    /// The payload MUST be a valid RFC 9102 DNSSEC proof for the domain named by
+    /// the write's target path (`/sys/dnssec/<domain>` ⇒ `<domain>`). This makes
+    /// the object *self-authorizing*: the payload itself proves write-authority
+    /// (verified offline against the pinned IANA root KSK on every replay), so an
+    /// unprivileged (`to: "*"`) grant is safe. The proof must validate AND carry
+    /// a `_browserid.<domain>` record, which binds it to the exact path — a proof
+    /// for a different domain is rejected. See the SBO Policy Specification.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dnssec_proof: bool,
 }
 
 /// Requirement that an object's payload (JWT) must be signed by another object

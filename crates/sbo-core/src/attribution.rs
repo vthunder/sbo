@@ -212,6 +212,24 @@ fn extract_provider_key(
     Ok((record.public_key, verified.valid_from as i64, verified.expires as i64))
 }
 
+/// Validate an RFC 9102 DNSSEC proof offline against the pinned IANA root and
+/// confirm it carries a `_browserid.<domain>` provider record, returning the
+/// proof's RRSig validity window `(inception, expiration)` in UNIX seconds.
+///
+/// This is the building block for the *self-authorizing* `/sys/dnssec/<domain>`
+/// write: the payload IS the proof, and a proof that does not validate, or that
+/// is for a different domain (no `_browserid.<domain>` record), is rejected.
+/// Domain-binding is therefore intrinsic — the caller passes the domain taken
+/// from the write's target path, and a proof for any other domain fails with
+/// [`AttributionError::MissingProviderRecord`].
+pub fn verify_dnssec_proof_for_domain(
+    proof: &[u8],
+    domain: &str,
+) -> Result<(i64, i64), AttributionError> {
+    let (_provider_key, inception, expiration) = extract_provider_key(proof, domain)?;
+    Ok((inception, expiration))
+}
+
 /// The cert/window/authority half of the verifier, separated so it can be
 /// unit-tested offline with a directly-supplied provider key (bypassing
 /// DNSSEC).
