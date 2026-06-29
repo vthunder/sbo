@@ -158,12 +158,15 @@ pub fn genesis_with_domain(
     sys_msg.sign(sys_signing_key);
 
     // 3. Root policy
+    let (dnssec_grant, dnssec_restriction) = dnssec_self_auth_policy_entries();
     let policy_payload = serde_json::json!({
         "grants": [
             {"to": "*", "can": ["create"], "on": "/sys/names/*"},
             {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
-            {"to": "owner", "can": ["*"], "on": "/$owner/**"}
-        ]
+            {"to": "owner", "can": ["*"], "on": "/$owner/**"},
+            dnssec_grant
+        ],
+        "restrictions": [dnssec_restriction]
     });
     let policy_bytes = serde_json::to_vec(&policy_payload).unwrap();
     let policy_hash = ContentHash::sha256(&policy_bytes);
@@ -278,11 +281,13 @@ pub fn genesis_with_domain_and_restriction(
     sys_msg.sign(sys_signing_key);
 
     // 3. Root policy with domain-signing restriction
+    let (dnssec_grant, dnssec_restriction) = dnssec_self_auth_policy_entries();
     let policy_payload = serde_json::json!({
         "grants": [
             {"to": "*", "can": ["create"], "on": "/sys/names/*"},
             {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
-            {"to": "owner", "can": ["*"], "on": "/$owner/**"}
+            {"to": "owner", "can": ["*"], "on": "/$owner/**"},
+            dnssec_grant
         ],
         "restrictions": [
             {
@@ -291,7 +296,8 @@ pub fn genesis_with_domain_and_restriction(
                     "schema": "identity.v1",
                     "require_payload_signed_by": { "path": "/sys/domains/*" }
                 }
-            }
+            },
+            dnssec_restriction
         ]
     });
     let policy_bytes = serde_json::to_vec(&policy_payload).unwrap();
@@ -559,6 +565,35 @@ pub fn set_dnssec(signing_key: &SigningKey, domain: &str, proof: &[u8]) -> Vec<u
     msg.sign(signing_key);
 
     wire::serialize(&msg)
+}
+
+/// Policy fragments that make `/sys/dnssec/<domain>` objects **self-authorizing**:
+/// a `(grant, restriction)` pair to splice into a `policy.v2` document.
+///
+/// The grant lets ANY signer create/update `/sys/dnssec/**`; the restriction
+/// forces every such write's payload to be a valid RFC 9102 DNSSEC proof for the
+/// object's domain id (the `dnssec_proof` predicate — see the Policy Spec). The
+/// proof is re-verified offline against the pinned IANA root on every replay, so
+/// the payload proves its own write-authority and the open grant is safe. This
+/// lets clients keep on-chain attribution evidence fresh on their own writes,
+/// with no privileged refresher — universally useful to any sbo repo that does
+/// email/DNSSEC attribution, so it lives here rather than in app genesis code.
+///
+/// Apps that want to *tighten* it (e.g. "valid proof AND an existing member")
+/// add an `attested` clause to the returned restriction's `require` object.
+pub fn dnssec_self_auth_policy_entries() -> (serde_json::Value, serde_json::Value) {
+    let grant = serde_json::json!(
+        {"to": "*", "can": ["create", "update"], "on": "/sys/dnssec/**"}
+    );
+    let restriction = serde_json::json!({
+        "on": "/sys/dnssec/**",
+        "require": {
+            "schema": "dnssec.v1",
+            "content_type": "application/octet-stream",
+            "dnssec_proof": true
+        }
+    });
+    (grant, restriction)
 }
 
 /// Create a domain object at /sys/domains/<domain_name>
