@@ -300,6 +300,41 @@ fn read_object_view(
     Ok(build_object_view(&obj, sboq, true))
 }
 
+/// Raw confirmed+overlay payload bytes for `(path, id)`, or `None` if absent.
+/// Preserves binary content (the DNSSEC proof) that `read_object_view` would
+/// mangle via lossy UTF-8. Mirrors the overlay-over-confirmed LWW of the
+/// no-proof read path.
+fn read_object_raw(
+    repo: &Repo,
+    path_str: &str,
+    id_str: &str,
+    pending: &SharedPending,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    let db = repo
+        .state_db()
+        .map_err(|e| ApiError::internal(format!("Failed to open state db: {e}")))?;
+    let path = sbo_core::message::Path::parse(path_str)
+        .map_err(|e| ApiError::bad_request(format!("Invalid path: {e}")))?;
+    let id = sbo_core::message::Id::new(id_str)
+        .map_err(|e| ApiError::bad_request(format!("Invalid id: {e}")))?;
+
+    let confirmed = db
+        .get_first_object_at_path_id(&path, &id)
+        .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?;
+
+    let pool = pending.read().unwrap();
+    if let Some(p) = pool.object_at(&path, &id) {
+        let wins = match &confirmed {
+            Some(c) => sbo_daemon::pending::overlay_wins(p, c),
+            None => true,
+        };
+        if wins {
+            return Ok(Some(p.payload.clone()));
+        }
+    }
+    Ok(confirmed.map(|o| o.payload))
+}
+
 /// List object views from a repo's confirmed state, merged with the mempool
 /// overlay (shared by IPC + HTTP). Pending objects shadow confirmed ones at the
 /// same `(path, id)` when they win LWW; pending-only objects are appended.
@@ -359,6 +394,16 @@ impl RepoApi for DaemonState {
     ) -> Result<ObjectView, ApiError> {
         let repo = resolve_repo(&self.repos, repo)?;
         read_object_view(repo, path, id, with_proof, &self.pending)
+    }
+
+    fn get_object_raw(
+        &self,
+        repo: Option<&str>,
+        path: &str,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let repo = resolve_repo(&self.repos, repo)?;
+        read_object_raw(repo, path, id, &self.pending)
     }
 
     fn list_objects(
