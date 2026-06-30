@@ -74,9 +74,21 @@ pub fn evaluate(
     }
 
     // 3. Check restrictions
+    // TEMP DIAGNOSTIC (policy-dbg): trace resolved restrictions vs target.
+    tracing::warn!(
+        "[policy-dbg] target={} grants={} restrictions={}",
+        target_path, policy.grants.len(), policy.restrictions.len()
+    );
     for restriction in &policy.restrictions {
-        if restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars) {
+        let matched = restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars);
+        tracing::warn!(
+            "[policy-dbg] restriction on={:?} matched={} dnssec_proof={} schema={:?} ct={:?}",
+            restriction.on, matched, restriction.require.dnssec_proof,
+            restriction.require.schema, restriction.require.content_type
+        );
+        if matched {
             if let Some(reason) = check_requirements(&restriction.require, message, is_attested) {
+                tracing::warn!("[policy-dbg] DENY reason={}", reason);
                 return PolicyResult::Denied(reason);
             }
         }
