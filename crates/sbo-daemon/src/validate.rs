@@ -566,13 +566,15 @@ fn check_root_policy_exists(state: &dyn StateView) -> RootPolicyCheck {
         Ok(id) => id,
         Err(e) => return RootPolicyCheck::Error(format!("Invalid root policy id: {}", e)),
     };
-    // Use a default creator for system objects
-    let creator = match Id::new("sys") {
-        Ok(id) => id,
-        Err(e) => return RootPolicyCheck::Error(format!("Invalid sys creator id: {}", e)),
-    };
 
-    match state.get_object(&path, &creator, &id) {
+    // Look up by (path, id) regardless of creator. The root policy's creator is
+    // whatever form the sys identity resolves to — a bare name ("sys") for a
+    // key-rooted genesis, but an email ("sys@<domain>") for a domain-certified
+    // (Mode B) genesis. Hardcoding creator "sys" here would miss the email-rooted
+    // case and silently drop the daemon into genesis mode (no policy enforcement
+    // at all). The object's existence is what gates genesis mode; its creator is
+    // irrelevant to that question.
+    match state.get_first_object_at_path_id(&path, &id) {
         Ok(Some(_)) => RootPolicyCheck::Exists,
         Ok(None) => RootPolicyCheck::DoesNotExist,
         Err(e) => RootPolicyCheck::Error(format!("DB error checking root policy: {}", e)),
@@ -855,6 +857,98 @@ fn validate_delete(
 /// was recorded. This is what ownership checks authorize the signer against.
 fn stored_owner_ref(obj: &StoredObject) -> &str {
     obj.owner_ref.as_deref().unwrap_or_else(|| obj.owner.as_str())
+}
+
+#[cfg(test)]
+mod dnssec_repro_tests {
+    use super::*;
+    use sbo_core::crypto::{ContentHash, Signature, SigningKey};
+    use sbo_core::message::ObjectType;
+    use sbo_core::policy::Policy;
+    use sbo_core::state::StateDb;
+
+    #[test]
+    fn dnssec_garbage_is_rejected_by_full_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+
+        // The self-authorizing /sys/dnssec policy (minimal), as resolve_policy
+        // would return it (indexed at /sys/policies/).
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create", "update"], "on": "/sys/dnssec/**"}],
+            "restrictions": [{
+                "on": "/sys/dnssec/**",
+                "require": {"schema": "dnssec.v1", "content_type": "application/octet-stream", "dnssec_proof": true}
+            }]
+        })).unwrap();
+        db.put_policy(&SboPath::parse("/sys/policies/").unwrap(), &policy).unwrap();
+
+        // The root policy OBJECT must also exist, else validate_post treats the
+        // write as genesis-mode and skips policy entirely (root_policy_exists).
+        let policy_payload = serde_json::to_vec(&policy).unwrap();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/sys/policies/").unwrap(),
+            id: Id::new("root").unwrap(),
+            // Email-rooted sys creator, as on the live (Mode B) chain — this is
+            // what check_root_policy_exists's hardcoded "sys" fails to match.
+            creator: Id::new("sys@mingo.place").unwrap(),
+            owner: Id::new("sys@mingo.place").unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&policy_payload),
+            payload: policy_payload,
+            policy_ref: None,
+            content_schema: Some("policy.v2".to_string()),
+            owner_ref: Some("sys".to_string()),
+            block_number: 1,
+            object_hash: [9u8; 32],
+            hlc: Some("1.0".to_string()),
+            prev: None,
+        }).unwrap();
+
+        // Sanity: resolve_policy for a /sys/dnssec/ target returns the restriction.
+        let resolved = db.resolve_policy(&SboPath::parse("/sys/dnssec/").unwrap()).unwrap().unwrap();
+        eprintln!("resolved restrictions={} grants={}", resolved.restrictions.len(), resolved.grants.len());
+        assert_eq!(resolved.restrictions.len(), 1, "restriction must survive put/resolve");
+        assert!(resolved.restrictions[0].require.dnssec_proof, "dnssec_proof must be true after round-trip");
+
+        // A garbage, key-rooted /sys/dnssec/<domain> write.
+        let key = SigningKey::generate();
+        let payload = b"garbage-not-a-proof".to_vec();
+        let mut msg = Message {
+            action: Action::Post,
+            path: SboPath::parse("/sys/dnssec/").unwrap(),
+            id: Id::new("dbg.example").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature([0u8; 64]),
+            content_type: Some("application/octet-stream".to_string()),
+            content_hash: Some(ContentHash::sha256(&payload)),
+            payload: Some(payload),
+            owner: None,
+            creator: None,
+            content_encoding: None,
+            content_schema: Some("dnssec.v1".to_string()),
+            policy_ref: None,
+            related: None,
+            hlc: Some("1700000000000.0".to_string()), // physical ms ~= inclusion time
+            prev: None,
+            auth_cert: None,
+            auth_evidence: None,
+        };
+        msg.sign(&key);
+
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+        let res = validate_message(&msg, &db, std::path::Path::new("/tmp"), &l2);
+        eprintln!("validate result: {:?}", res);
+        match res {
+            ValidationResult::Invalid { stage, reason } => {
+                eprintln!("DENIED at {stage:?}: {reason}");
+            }
+            ValidationResult::Valid { .. } => {
+                panic!("BUG REPRODUCED LOCALLY: garbage /sys/dnssec write validated as VALID");
+            }
+        }
+    }
 }
 
 /// Check if an action is allowed by policy
