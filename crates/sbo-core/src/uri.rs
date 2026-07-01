@@ -363,6 +363,25 @@ impl SboRawUri {
         self.render(&self.chain.display_name())
     }
 
+    /// Render the stable *identity* form: like `to_uri_string` but WITHOUT the
+    /// optional `@firstBlock` anchor and without any query. Two URIs that denote
+    /// the same logical chain+path but differ only in the mutable anchor — e.g. a
+    /// DNS relink whose `_sbo` record omits it — produce the same identity string.
+    ///
+    /// Used to derive filesystem paths, repo dedup keys, and repo ids so synced
+    /// state persists across restarts/relinks instead of being stranded when the
+    /// anchor comes and goes (see mingo-stho: the `@firstBlock` anchor was leaking
+    /// into the state-dir name, so `avail_turing_506@3545910` and the anchorless
+    /// form mapped to different RocksDB dirs and re-backfilled from genesis).
+    pub fn to_identity_string(&self) -> String {
+        let mut s = format!("sbo+raw://{}:{}", self.chain.display_name(), self.app_id);
+        match &self.path {
+            Some(p) => s.push_str(p),
+            None => s.push('/'),
+        }
+        s
+    }
+
     /// Render using the canonical CAIP-2 chain identifier.
     pub fn to_canonical_string(&self) -> String {
         self.render(&self.chain.resolve().to_string())
@@ -395,6 +414,23 @@ mod tests {
         assert_eq!(u.first_block, Some(12345));
         assert!(u.is_bare(), "an anchor is part of the bare repo address");
         assert_eq!(u.to_uri_string(), "sbo+raw://avail:turing:506@12345/");
+    }
+
+    #[test]
+    fn identity_string_ignores_anchor_and_query() {
+        // Anchored vs anchorless forms of the same chain must share one identity
+        // (mingo-stho: prevents the state-dir name from flipping between them).
+        let anchored = SboRawUri::parse("sbo+raw://avail:turing:506@3545910/").unwrap();
+        let anchorless = SboRawUri::parse("sbo+raw://avail:turing:506/").unwrap();
+        assert_eq!(anchored.to_identity_string(), anchorless.to_identity_string());
+        assert_eq!(anchored.to_identity_string(), "sbo+raw://avail:turing:506/");
+
+        // Path is part of identity; the query is not.
+        let with_path = SboRawUri::parse("sbo+raw://avail:turing:506@3545910/nft").unwrap();
+        assert_eq!(with_path.to_identity_string(), "sbo+raw://avail:turing:506/nft");
+        assert_ne!(with_path.to_identity_string(), anchored.to_identity_string());
+        let with_query = SboRawUri::parse("sbo+raw://avail:turing:506@3545910/?genesis=abc").unwrap();
+        assert_eq!(with_query.to_identity_string(), anchored.to_identity_string());
     }
 
     #[test]

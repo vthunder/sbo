@@ -91,9 +91,20 @@ pub fn sanitize_uri_for_path(uri: &str) -> String {
 
 /// Compute the repo metadata directory path based on its URI
 /// Results in human-readable paths like ~/.sbo/repos/avail_turing_506/
+///
+/// The directory name is derived from the URI's anchor-independent *identity*
+/// (chain+app+path, no `@firstBlock`), so the same logical chain always maps to
+/// one directory whether or not the URI currently carries the mutable anchor.
+/// Otherwise `avail_turing_506@3545910` and the anchorless form would resolve to
+/// different RocksDB dirs and the daemon would re-backfill from genesis on every
+/// relink/restart (mingo-stho). Falls back to the raw string if it isn't a
+/// parseable raw URI.
 pub fn repo_dir_for_uri(uri: &str) -> std::path::PathBuf {
     let sbo_dir = config::Config::sbo_dir();
-    sbo_dir.join("repos").join(sanitize_uri_for_path(uri))
+    let key = sbo_core::uri::SboRawUri::parse(uri)
+        .map(|u| u.to_identity_string())
+        .unwrap_or_else(|_| uri.to_string());
+    sbo_dir.join("repos").join(sanitize_uri_for_path(&key))
 }
 
 /// Compute the state DB path for a repo based on its URI

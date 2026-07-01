@@ -952,7 +952,11 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             {
                 let state = state.read().await;
                 for repo in state.repos.list() {
-                    if repo.uri.to_string() == uri.to_string() {
+                    // Compare on the anchor-independent identity so an idempotent
+                    // re-add (e.g. on each deploy) whose URI differs only by the
+                    // `@firstBlock` anchor is recognized as the same chain instead
+                    // of spawning a duplicate repo that re-backfills from genesis.
+                    if repo.uri.to_identity_string() == uri.to_identity_string() {
                         return Response::error(format!(
                             "Already tracking this chain as {}",
                             repo.display_uri

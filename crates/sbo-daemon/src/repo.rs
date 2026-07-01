@@ -308,9 +308,24 @@ impl RepoManager {
         let repo = self.repos.get_mut(id)
             .ok_or_else(|| crate::DaemonError::Repo(format!("Repo not found: {}", id)))?;
 
+        // A relink only warrants a full re-sync if it points at a *different*
+        // chain/path. If the resolved URI differs only by the mutable
+        // `@firstBlock` anchor (DNS records often omit it), it's the same synced
+        // chain — keep our head so we don't re-backfill from genesis (mingo-stho).
+        let same_identity = repo.uri.to_identity_string() == new_uri.to_identity_string();
+
+        let mut new_uri = new_uri;
+        // Preserve the genesis anchor if the relink dropped it — it's part of our
+        // synced identity and is used to seed from the correct first block.
+        if new_uri.first_block.is_none() {
+            new_uri.first_block = repo.uri.first_block;
+        }
+
         repo.display_uri = display_uri;
         repo.uri = new_uri;
-        repo.head = 0; // Reset to re-sync
+        if !same_identity {
+            repo.head = 0; // Different chain — re-sync from scratch
+        }
         repo.dns_checked_at = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
