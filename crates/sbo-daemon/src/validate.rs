@@ -548,6 +548,19 @@ pub fn validate_message(
     }
 }
 
+/// Whether the root policy (`/sys/policies/root`) is present in `state`.
+///
+/// When this is false, `validate_message` runs in "genesis mode" and accepts
+/// EVERY write with no policy enforcement. That is only correct before genesis
+/// has been applied; on any synced chain the root policy is posted at genesis
+/// and must be present. Callers use this to assert enforcement is active after
+/// genesis and catch a silent regression into genesis mode (see mingo-9vck /
+/// the Mode-B hardcoded-creator bug). Returns false on DB error (fail-closed:
+/// treat an unverifiable root policy as "assert the invariant loudly").
+pub fn root_policy_present(state: &dyn StateView) -> bool {
+    matches!(check_root_policy_exists(state), RootPolicyCheck::Exists)
+}
+
 /// Result of checking root policy existence
 enum RootPolicyCheck {
     Exists,
@@ -948,6 +961,46 @@ mod dnssec_repro_tests {
                 panic!("BUG REPRODUCED LOCALLY: garbage /sys/dnssec write validated as VALID");
             }
         }
+    }
+
+    #[test]
+    fn root_policy_present_finds_email_rooted_creator() {
+        // Locks the mingo-9vck / genesis-mode fix. The root policy object exists
+        // under an EMAIL-ROOTED sys creator (Mode-B, domain-certified genesis).
+        // root_policy_present must find it regardless of creator form. If a future
+        // change reintroduces a hardcoded "sys" creator lookup, the email-rooted
+        // object is missed, this returns false, and the daemon would silently drop
+        // into genesis mode (all enforcement off) — so this test would fail.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+
+        // Before genesis: no root policy object => genesis mode is expected.
+        assert!(!root_policy_present(&db), "no root policy object should read as genesis mode");
+
+        // Insert the root policy object with an email-rooted creator.
+        let payload = b"{}".to_vec();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/sys/policies/").unwrap(),
+            id: Id::new("root").unwrap(),
+            creator: Id::new("sys@mingo.place").unwrap(),
+            owner: Id::new("sys@mingo.place").unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&payload),
+            payload,
+            policy_ref: None,
+            content_schema: Some("policy.v2".to_string()),
+            owner_ref: Some("sys".to_string()),
+            block_number: 1,
+            object_hash: [9u8; 32],
+            hlc: Some("1.0".to_string()),
+            prev: None,
+        }).unwrap();
+
+        // After genesis: enforcement must be active regardless of creator form.
+        assert!(
+            root_policy_present(&db),
+            "email-rooted root policy must be found (creator-agnostic) — else enforcement silently disabled"
+        );
     }
 }
 

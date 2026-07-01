@@ -518,6 +518,12 @@ impl RepoApi for DaemonState {
     }
 }
 
+/// How far the light client's DAS availability window may lag the finalized
+/// head before we treat the LC as stalled and fall back to RPC-only tailing.
+/// Healthy sampling lags finality by only a few blocks; a gap this large means
+/// the LC has stopped sampling. At ~20s Avail blocks this is ~10 minutes.
+const LC_STALL_LAG_BLOCKS: u64 = 30;
+
 /// Current wall-clock time in Unix seconds.
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -670,6 +676,42 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         check_dns_on_startup(&state.repos).await;
     }
 
+    // Enforcement invariant: on any chain that has synced past genesis, the root
+    // policy (/sys/policies/root, posted at genesis) MUST be present. If it isn't,
+    // validate_message silently runs in "genesis mode" and accepts EVERY write
+    // with no policy checks. That failure is invisible in normal operation — it
+    // was how a hardcoded-creator lookup missing an email-rooted sys (Mode-B
+    // genesis) disabled all enforcement chain-wide. Assert it loudly at startup
+    // so the silent-genesis symptom is operator-visible (see mingo-9vck).
+    {
+        let state = state.read().await;
+        for repo in state.repos.list() {
+            let genesis_applied = match repo.uri.first_block {
+                Some(fb) => repo.head >= fb,
+                None => repo.head > 0,
+            };
+            if !genesis_applied {
+                continue; // nothing synced yet — genesis mode is legitimately expected
+            }
+            match repo.state_db() {
+                Ok(db) if !sbo_daemon::validate::root_policy_present(db.as_ref()) => {
+                    tracing::error!(
+                        "ENFORCEMENT INVARIANT VIOLATED: repo {} synced to head {} but /sys/policies/root is absent. \
+                         The daemon would run in genesis mode and accept ALL writes with NO policy enforcement. \
+                         This indicates a genesis-mode regression (see mingo-9vck) — investigate before trusting writes.",
+                        repo.uri, repo.head
+                    );
+                }
+                Ok(_) => {
+                    tracing::debug!("Enforcement invariant OK for repo {} (root policy present)", repo.uri);
+                }
+                Err(e) => {
+                    tracing::warn!("Could not open state for {} to check enforcement invariant: {}", repo.uri, e);
+                }
+            }
+        }
+    }
+
     // Start IPC server
     let ipc_server = IpcServer::new(config.daemon.socket_path.clone());
     let state_for_ipc = Arc::clone(&state);
@@ -733,7 +775,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
             // and run in RPC-only mode (trust the full node for block data —
             // real DA, no light-client sampling). Sleep+retry if both fail.
             let lc = LcManager::new(lc_config.clone());
-            let (status, rpc_only) = match lc.status().await {
+            let (mut status, mut rpc_only) = match lc.status().await {
                 Ok(s) => {
                     tracing::debug!(
                         "LC status: latest={}, available={}-{}",
@@ -766,6 +808,27 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                     }
                 }
             };
+
+            // If the light client is up but its DAS availability window has
+            // stalled well behind finality, it has stopped sampling. Because
+            // block processing is ceilinged at `available_last` (and the
+            // per-block DAS check is the same `<= available_last` test), a frozen
+            // window freezes sync entirely — new writes never confirm even as the
+            // chain advances (mingo-stho problem 2). Fall back to RPC-only tailing
+            // (trust the full node, exactly as when the LC is unreachable) so
+            // liveness continues, and surface the stall to the operator.
+            if !rpc_only {
+                let lag = status.latest_block.saturating_sub(status.available_last);
+                if lag > LC_STALL_LAG_BLOCKS {
+                    tracing::warn!(
+                        "LC availability window stalled: available_last={} is {} blocks behind finalized head {}; falling back to RPC-only tailing until it recovers",
+                        status.available_last, lag, status.latest_block
+                    );
+                    rpc_only = true;
+                    status.available_first = 0;
+                    status.available_last = status.latest_block;
+                }
+            }
 
             // Process blocks for each repo
             let mut sync = SyncEngine::new(
