@@ -532,6 +532,107 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Generate a checkpoint + snapshot at the current confirmed head when the
+/// configured dual trigger fires and sync is caught up to the finalized head.
+/// Called from the sync task after block processing, so it observes a consistent
+/// confirmed state with no concurrent writer (root + objects match exactly).
+async fn checkpoint_if_due(
+    state: &Arc<RwLock<DaemonState>>,
+    cfg: &sbo_daemon::config::CheckpointConfig,
+    latest_block: u64,
+    last_checkpoint_block: &mut u64,
+    writes_since_checkpoint: &mut u64,
+    now: i64,
+) {
+    if !cfg.enabled {
+        return;
+    }
+    // Single-repo model: the daemon follows one repo.
+    let (head, state_db, snap_dir) = {
+        let st = state.read().await;
+        let Some(repo) = st.repos.list().next() else {
+            return;
+        };
+        let db = match repo.state_db() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("checkpoint: cannot open state db: {e}");
+                return;
+            }
+        };
+        let dir = cfg.snapshots_dir.clone().unwrap_or_else(|| {
+            sbo_daemon::repo_dir_for_uri(&repo.uri.to_string()).join("snapshots")
+        });
+        (repo.head, db, dir)
+    };
+
+    // Only checkpoint confirmed, near-tip state — never mid-backfill.
+    if head == 0 || head + 1 < latest_block {
+        return;
+    }
+    if head <= *last_checkpoint_block {
+        return;
+    }
+    let due = head - *last_checkpoint_block >= cfg.every_blocks
+        || *writes_since_checkpoint >= cfg.every_writes;
+    if !due {
+        return;
+    }
+
+    let root = match state_db.compute_trie_state_root() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("checkpoint: state root failed: {e}");
+            return;
+        }
+    };
+    let objects = match state_db.list_objects_by_path_prefix("/") {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("checkpoint: list objects failed: {e}");
+            return;
+        }
+    };
+
+    match sbo_daemon::snapshot::write_snapshot(&snap_dir, head, &hex::encode(root), &objects, now) {
+        Ok(meta) => {
+            tracing::info!(
+                "checkpoint @ block {}: snapshot {} objects, {} -> {} bytes (gz), root {}…",
+                head,
+                meta.object_count,
+                meta.uncompressed_bytes,
+                meta.compressed_bytes,
+                &meta.state_root[..std::cmp::min(16, meta.state_root.len())]
+            );
+            prune_snapshots(&snap_dir, 3);
+            *last_checkpoint_block = head;
+            *writes_since_checkpoint = 0;
+            if cfg.publish {
+                // On-chain checkpoint publishing needs the authority signing key and
+                // is intentionally not auto-armed here (a deploy decision). The
+                // snapshot is generated + served locally regardless.
+                tracing::warn!(
+                    "checkpoint publish=true, but on-chain publishing is not wired yet; snapshot generated locally only"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!("checkpoint: snapshot generation failed at block {}: {}", head, e)
+        }
+    }
+}
+
+/// Keep only the newest `keep` snapshots on disk (delete older file+meta pairs).
+fn prune_snapshots(dir: &std::path::Path, keep: usize) {
+    for m in sbo_daemon::snapshot::list_snapshot_metas(dir)
+        .into_iter()
+        .skip(keep)
+    {
+        let _ = std::fs::remove_file(dir.join(&m.file));
+        let _ = std::fs::remove_file(dir.join(sbo_daemon::snapshot::meta_file_name(m.block)));
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
@@ -743,6 +844,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
     let prover_config = config.prover.clone();
     let turbo_config = config.turbo_da.clone();
     let light_mode = config.light.enabled;
+    let checkpoint_config = config.checkpoint.clone();
     let sync_handle = tokio::spawn(async move {
         // Give IPC server time to start
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -762,6 +864,12 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
 
         // Create TurboDA client for proof submission
         let turbo = TurboDaClient::new(turbo_config);
+
+        // Checkpoint/snapshot scheduling state (State Commitment fast-sync).
+        // Counted from process start; the manifest reads the actual snapshot files
+        // on disk, so a restart just resumes counting (may skip one early snapshot).
+        let mut last_checkpoint_block: u64 = 0;
+        let mut writes_since_checkpoint: u64 = 0;
 
         loop {
             // Get config with short lock
@@ -881,6 +989,9 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                             if result.tx_count > 0 || verbose_for_sync.blocks {
                                 tracing::info!("Processed block {} ({} transactions)", block_num, result.tx_count);
                             }
+                            // Drive the write-count checkpoint trigger (approximate;
+                            // includes the occasional checkpoint object itself).
+                            writes_since_checkpoint += result.tx_count as u64;
 
                             // Genesis verification: when this block is a repo's genesis
                             // anchor and an expected hash was recorded, verify the
@@ -979,6 +1090,19 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                     }
                 }
             }
+
+            // Checkpoint + snapshot when due (State Commitment fast-sync). Runs in
+            // this sync task after block processing, so it observes a consistent
+            // confirmed state with no concurrent writer.
+            checkpoint_if_due(
+                &state_for_sync,
+                &checkpoint_config,
+                status.latest_block,
+                &mut last_checkpoint_block,
+                &mut writes_since_checkpoint,
+                unix_now(),
+            )
+            .await;
 
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
