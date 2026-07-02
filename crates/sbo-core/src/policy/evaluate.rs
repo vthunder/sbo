@@ -35,6 +35,7 @@ pub fn evaluate(
     signer_is_owner: bool,
     is_attested: &AttestedCheck,
     message: &Message,
+    primary_domain: Option<&str>,
 ) -> PolicyResult {
     tracing::debug!(
         "Policy eval: actor={}, action={:?}, path={}, vars={:?}",
@@ -57,7 +58,7 @@ pub fn evaluate(
         let path_parsed = crate::message::Path::parse(target_path).unwrap();
         let path_matches = grant.on.matches(&path_parsed, vars);
         let action_matches = grant.can.iter().any(|granted| action_covered_by(*granted, action));
-        let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles);
+        let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles, primary_domain);
 
         grant_debug.push(format!(
             "  grant to={:?} can={:?} on={:?} -> path:{} action:{} identity:{}",
@@ -293,6 +294,32 @@ fn issuer_to_path(issuer: &str) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Canonicalize a grant's identity *name reference* to the form the actor is
+/// canonicalized to, so resolution-based matching (Policy Spec §Identity
+/// references) can be a single string compare.
+///
+/// `resolve_creator` canonicalizes a signer with a `/sys/names/<local>` claim on
+/// a primary-domain repo to the email `<local>@<primary_domain>`. So a bare
+/// grant name `"sys"` must canonicalize the *same way* to match that actor:
+/// - With a primary domain and a bare name (no `@`) → `<name>@<primary_domain>`.
+///   This makes `to: "sys"` ≡ `to: "sys@mingo.place"` for the party who claims
+///   `/sys/names/sys` (Policy Spec: a name and the email that controls it
+///   resolve to the same controller).
+/// - An already email-qualified reference (`"sys@mingo.place"`, or a user's
+///   `"dan@gmail.com"`) is left verbatim — we never re-domain it. This keeps a
+///   foreign `@domain` distinct: `to: "sys"` (→ `sys@mingo.place`) does NOT
+///   match a `dan@gmail.com` signer, and bare `to: "dan"` does NOT match a
+///   browserid-attributed `dan@gmail.com`.
+/// - With no primary domain (chain-only / multi-domain repos) a bare name stays
+///   bare — we don't invent a domain — so literal name matching is preserved.
+fn canonical_name_ref(name: &str, primary_domain: Option<&str>) -> String {
+    match primary_domain {
+        Some(domain) if !name.contains('@') => format!("{}@{}", name, domain),
+        _ => name.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn identity_matches(
     identity: &Identity,
     actor: &Id,
@@ -301,6 +328,7 @@ fn identity_matches(
     signer_is_owner: bool,
     is_attested: &AttestedCheck,
     roles: &std::collections::HashMap<String, Vec<Identity>>,
+    primary_domain: Option<&str>,
 ) -> bool {
     match identity {
         Identity::Name(name) => {
@@ -312,7 +340,11 @@ fn identity_matches(
                 // computed by the caller via L2 — not a creator-name string
                 // compare, which would never match an email-rooted owner.
                 "owner" => signer_is_owner,
-                _ => name == actor.as_str(),
+                // Resolution-based matching: canonicalize the grant name to the
+                // primary-domain email form (the same form `resolve_creator`
+                // canonicalizes the actor to) before comparing, so a bare name,
+                // its controlling email, and the actor all identify one party.
+                _ => canonical_name_ref(name, primary_domain) == actor.as_str(),
             }
         }
         Identity::Key { key } => {
@@ -323,14 +355,14 @@ fn identity_matches(
         }
         Identity::Role { role } => {
             if let Some(members) = roles.get(role) {
-                members.iter().any(|m| identity_matches(m, actor, actor_key, owner, signer_is_owner, is_attested, roles))
+                members.iter().any(|m| identity_matches(m, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain))
             } else {
                 false
             }
         }
         Identity::Attested { attested } => is_attested(attested),
         Identity::Any { any } => {
-            any.iter().any(|id| identity_matches(id, actor, actor_key, owner, signer_is_owner, is_attested, roles))
+            any.iter().any(|id| identity_matches(id, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain))
         }
     }
 }
@@ -387,12 +419,12 @@ mod tests {
 
         // signer_is_owner = true → the `owner` grant applies → allowed.
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, true, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, true, &no_attest, &msg, None),
             PolicyResult::Allowed
         ));
         // signer_is_owner = false → no matching grant → denied.
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice"), ..Default::default() }, false, &no_attest, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -410,11 +442,11 @@ mod tests {
         let actor = Id::new("e_ephemeral").unwrap();
         let no_attest = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, true, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, true, &no_attest, &msg, None),
             PolicyResult::Allowed
         ));
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/alice/posts/", &PolicyVars { owner: Some("alice@example.com"), ..Default::default() }, false, &no_attest, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -435,14 +467,14 @@ mod tests {
         for action in [ActionType::Create, ActionType::Update, ActionType::Post] {
             assert!(
                 matches!(
-                    evaluate(&policy, &actor, action, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg),
+                    evaluate(&policy, &actor, action, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg, None),
                     PolicyResult::Allowed
                 ),
                 "post grant should cover {action:?}"
             );
         }
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Delete, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Delete, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -459,11 +491,11 @@ mod tests {
         let actor = Id::new("e_x").unwrap();
         let no_attest = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg, None),
             PolicyResult::Allowed
         ));
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Update, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg),
+            evaluate(&policy, &actor, ActionType::Update, "/sys/names/alice/", &PolicyVars::default(), false, &no_attest, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -483,21 +515,21 @@ mod tests {
         // Attested as a moderator and not banned → allowed.
         let mod_not_banned = |s: &AttestedSource| s.type_ == "role:moderator";
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_not_banned, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_not_banned, &msg, None),
             PolicyResult::Allowed
         ));
 
         // Not attested as a moderator → no grant matches → denied.
         let none = |_: &AttestedSource| false;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &none, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &none, &msg, None),
             PolicyResult::Denied(_)
         ));
 
         // Moderator but banned → grant matches but the not_attested restriction blocks.
         let mod_and_banned = |_: &AttestedSource| true;
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_and_banned, &msg),
+            evaluate(&policy, &actor, ActionType::Post, "/space/", &PolicyVars::default(), false, &mod_and_banned, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -519,18 +551,18 @@ mod tests {
         // declared owner + signer controls it → allowed under /u/<owner>/.
         let vars = PolicyVars { owner: Some("alice@mingo.place"), ..Default::default() };
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars, true, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars, true, &no, &msg, None),
             PolicyResult::Allowed
         ));
         // no declared owner → $owner undefined → fails closed (NOT derived as "u").
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &PolicyVars::default(), true, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &PolicyVars::default(), true, &no, &msg, None),
             PolicyResult::Denied(_)
         ));
         // owner declared but path is someone else's namespace → no path match.
         let vars_bob = PolicyVars { owner: Some("bob@mingo.place"), ..Default::default() };
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars_bob, true, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/posts/", &vars_bob, true, &no, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -550,11 +582,11 @@ mod tests {
 
         let with_email = PolicyVars { email: Some("alice@mingo.place"), ..Default::default() };
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &with_email, false, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &with_email, false, &no, &msg, None),
             PolicyResult::Allowed
         ));
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &PolicyVars::default(), false, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &PolicyVars::default(), false, &no, &msg, None),
             PolicyResult::Denied(_)
         ));
     }
@@ -613,7 +645,7 @@ mod tests {
         let msg = dnssec_msg("mingo.place", b"not-a-valid-rfc9102-proof".to_vec());
         let actor = Id::new("e_anon").unwrap();
         let no = |_: &AttestedSource| false;
-        match evaluate(&policy, &actor, ActionType::Create, "/sys/dnssec/", &PolicyVars::default(), false, &no, &msg) {
+        match evaluate(&policy, &actor, ActionType::Create, "/sys/dnssec/", &PolicyVars::default(), false, &no, &msg, None) {
             PolicyResult::Denied(r) => assert!(r.contains("dnssec_proof"), "expected dnssec_proof denial, got: {r}"),
             PolicyResult::Allowed => panic!("invalid proof must be denied"),
         }
@@ -654,14 +686,144 @@ mod tests {
         let no = |_: &AttestedSource| false;
         let vars = PolicyVars { user: Some("alice@mingo.place"), ..Default::default() };
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars, false, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars, false, &no, &msg, None),
             PolicyResult::Allowed
         ));
         // Different user than the path namespace → denied.
         let vars_other = PolicyVars { user: Some("bob@mingo.place"), ..Default::default() };
         assert!(matches!(
-            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars_other, false, &no, &msg),
+            evaluate(&policy, &actor, ActionType::Create, "/u/alice@mingo.place/x/", &vars_other, false, &no, &msg, None),
             PolicyResult::Denied(_)
+        ));
+    }
+
+    // --- Resolution-based identity matching (Policy Spec §Identity references) --
+
+    /// A grant to a bare name matches an actor canonicalized to the
+    /// primary-domain email — the name and the email resolve to one controller.
+    #[test]
+    fn bare_name_matches_primary_domain_email_actor() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "sys", "can": ["*"], "on": "/sys/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("sys@mingo.place").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/sys/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Allowed
+        ));
+    }
+
+    /// The email form of the same reference keeps matching the email actor.
+    #[test]
+    fn email_name_matches_email_actor() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "sys@mingo.place", "can": ["*"], "on": "/sys/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("sys@mingo.place").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/sys/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Allowed
+        ));
+    }
+
+    /// Security: a bare name resolves ONLY to the primary domain. It must NOT
+    /// match a signer attributed to a foreign email-provider domain.
+    #[test]
+    fn bare_name_does_not_match_foreign_domain_actor() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "dan", "can": ["*"], "on": "/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("dan@gmail.com").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/dan/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    /// The key form still matches by public key (the live checkpointer grant).
+    #[test]
+    fn key_form_still_matches_by_pubkey() {
+        let key = SigningKey::generate();
+        let mut msg = signed_msg();
+        msg.signing_key = key.public_key();
+        msg.sign(&key);
+        let key_str = key.public_key().to_string();
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": {"key": key_str}, "can": ["*"], "on": "/**"}]
+        }))
+        .unwrap();
+        let actor = Id::new("checkpointer@mingo.place").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Allowed
+        ));
+    }
+
+    /// A role whose member is a bare name matches an email-form actor — the
+    /// `roles.admin: ["sys"]` case that regressed.
+    #[test]
+    fn role_bare_name_member_matches_email_actor() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "roles": { "admin": ["sys"] },
+            "grants": [{"to": {"role": "admin"}, "can": ["*"], "on": "/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("sys@mingo.place").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Allowed
+        ));
+    }
+
+    /// No primary domain (chain-only repo): a bare name stays literal — it
+    /// matches a bare-name actor and does not spuriously gain a domain.
+    #[test]
+    fn no_primary_domain_keeps_bare_name_literal() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "sys", "can": ["*"], "on": "/sys/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let no = |_: &AttestedSource| false;
+
+        let actor_bare = Id::new("sys").unwrap();
+        assert!(matches!(
+            evaluate(&policy, &actor_bare, ActionType::Create, "/sys/x/", &PolicyVars::default(), false, &no, &msg, None),
+            PolicyResult::Allowed
+        ));
+        // Without a primary domain, an email-form actor is a different party.
+        let actor_email = Id::new("sys@mingo.place").unwrap();
+        assert!(matches!(
+            evaluate(&policy, &actor_email, ActionType::Create, "/sys/x/", &PolicyVars::default(), false, &no, &msg, None),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    /// `*` and `any` are unaffected by the primary-domain threading.
+    #[test]
+    fn wildcard_and_any_unaffected() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": {"any": ["*"]}, "can": ["*"], "on": "/**"}]
+        }))
+        .unwrap();
+        let msg = signed_msg();
+        let actor = Id::new("anybody@elsewhere.com").unwrap();
+        let no = |_: &AttestedSource| false;
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
+            PolicyResult::Allowed
         ));
     }
 }
