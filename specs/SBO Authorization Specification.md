@@ -147,6 +147,8 @@ DNSSEC chains are large (kilobytes) and identical for all writes under one provi
 - Because the object validates against the pinned root KSK, it is **self-authenticating** — posting it is not a trusted write; any client re-validates it independently.
 - Writes during the window reference it via `Auth-Evidence: ref:...`; the certificate (small) remains per-message in `Auth-Cert`.
 
+The same `dnssec.v1` evidence object also serves **domain self-certification**: a `domain.v1` whose key is the provider key certified by this evidence is DNSSEC-verifiable at its inclusion time (see [Domain Objects](./SBO%20Identity%20Specification.md#domain-objects-domainv1), Validation Rule 4). For a genesis-pinned root the relevant read is the object *as-of the genesis block* (point-in-time, no refresh); for user attribution it is the current version (refreshed as RRSIGs age) — one object, two read semantics.
+
 ## The Inclusion-Time Clock
 
 Several windows above must be checked against a single, agreed time. SBO defines the **inclusion time** `T` of a message as the timestamp of the data-availability block in which it is included.
