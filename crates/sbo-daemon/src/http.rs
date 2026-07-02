@@ -104,6 +104,35 @@ pub struct StateRootView {
     pub state_root: String,
 }
 
+/// Sync-point manifest — what a client needs to pick a fast bootstrap path
+/// (State Commitment §Sync-Point Discovery). Every entry is verified, not trusted.
+#[derive(Debug, Serialize)]
+pub struct SyncPointsView {
+    pub format: String,
+    pub genesis: GenesisView,
+    /// Latest confirmed block the serving node has synced.
+    pub head: u64,
+    /// Latest recorded `(block, state_root)`.
+    pub latest_state_root: StateRootView,
+    /// Snapshots this node serves (newest first), each verifiable against a checkpoint.
+    pub snapshots: Vec<crate::snapshot::SnapshotMeta>,
+    /// On-chain checkpoint objects observed under `/sys/checkpoints/`.
+    pub checkpoints: Vec<CheckpointView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenesisView {
+    pub first_block: Option<u64>,
+    pub genesis_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckpointView {
+    pub id: String,
+    pub block: u64,
+    pub state_root: String,
+}
+
 /// Result of a successful DA submission. The write was validated against
 /// confirmed state, staged in the mempool overlay (so it is visible to all
 /// clients within ~1s), and forwarded to the DA layer.
@@ -149,6 +178,29 @@ pub trait RepoApi: Send + Sync + 'static {
     ) -> Result<Vec<ObjectView>, ApiError>;
 
     fn state_root(&self, repo: Option<&str>) -> Result<StateRootView, ApiError>;
+
+    /// Fast-sync manifest (§Sync-Point Discovery). Default: unsupported.
+    fn sync_points(&self, _repo: Option<&str>) -> Result<SyncPointsView, ApiError> {
+        Err(ApiError::internal("sync-points not supported"))
+    }
+
+    /// Metadata for a snapshot at `block` (or the latest if `None`).
+    fn snapshot_meta(
+        &self,
+        _repo: Option<&str>,
+        _block: Option<u64>,
+    ) -> Result<Option<crate::snapshot::SnapshotMeta>, ApiError> {
+        Ok(None)
+    }
+
+    /// Compressed snapshot bytes for `block`, or `None` if absent.
+    fn snapshot_bytes(
+        &self,
+        _repo: Option<&str>,
+        _block: u64,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        Ok(None)
+    }
 
     async fn submit(&self, data: Vec<u8>) -> Result<SubmitResultView, ApiError>;
 }
@@ -233,6 +285,8 @@ pub fn create_router<S: SignRequestStore + RepoApi>(state: HttpState<S>) -> Rout
         .route("/v1/list", get(list_objects_v1::<S>))
         .route("/v1/submit", post(submit_v1::<S>))
         .route("/v1/state-root", get(state_root_v1::<S>))
+        .route("/v1/sync-points", get(sync_points_v1::<S>))
+        .route("/v1/snapshot", get(snapshot_v1::<S>))
         .route("/v1/dnssec", get(dnssec_v1::<S>))
         .layer(cors)
         .layer(private_network)  // Apply to all responses including CORS preflight
@@ -341,6 +395,65 @@ async fn state_root_v1<S: RepoApi>(
     let state = state.read().await;
     let view = state.state_root(q.repo.as_deref())?;
     Ok(Json(view))
+}
+
+/// `GET /v1/sync-points?repo=` — the fast-sync manifest (§Sync-Point Discovery).
+async fn sync_points_v1<S: RepoApi>(
+    State(state): State<HttpState<S>>,
+    Query(q): Query<StateRootParams>,
+) -> Result<Json<SyncPointsView>, ApiError> {
+    let state = state.read().await;
+    Ok(Json(state.sync_points(q.repo.as_deref())?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotParams {
+    /// Block height, or `latest`/absent for the newest snapshot.
+    #[serde(default)]
+    pub block: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// `GET /v1/snapshot?block=<n|latest>&repo=` — stream the compressed snapshot at a
+/// checkpoint height (the newest if unspecified). Self-verifying: the client
+/// rebuilds the trie and matches the root against the checkpoint (§Snapshots).
+async fn snapshot_v1<S: RepoApi>(
+    State(state): State<HttpState<S>>,
+    Query(q): Query<SnapshotParams>,
+) -> axum::response::Response {
+    let state = state.read().await;
+    let repo = q.repo.as_deref();
+    let block_opt = match q.block.as_deref() {
+        None | Some("") | Some("latest") => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid block").into_response(),
+        },
+    };
+    let meta = match state.snapshot_meta(repo, block_opt) {
+        Ok(Some(m)) => m,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no snapshot available").into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let bytes = match state.snapshot_bytes(repo, meta.block) {
+        Ok(Some(b)) => b,
+        Ok(None) => return (StatusCode::NOT_FOUND, "snapshot file missing").into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/gzip"));
+    let set = |h: &mut axum::http::HeaderMap, name: &'static str, v: &str| {
+        if let Ok(val) = HeaderValue::from_str(v) {
+            h.insert(HeaderName::from_static(name), val);
+        }
+    };
+    set(h, "x-snapshot-block", &meta.block.to_string());
+    set(h, "x-snapshot-state-root", &meta.state_root);
+    set(h, "x-snapshot-content-sha256", &meta.content_sha256);
+    set(h, "x-snapshot-format", &meta.format);
+    resp
 }
 
 /// Query params for `GET /v1/dnssec`.

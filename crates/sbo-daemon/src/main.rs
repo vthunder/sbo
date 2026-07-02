@@ -433,6 +433,84 @@ impl RepoApi for DaemonState {
         })
     }
 
+    fn sync_points(&self, repo: Option<&str>) -> Result<sbo_daemon::http::SyncPointsView, ApiError> {
+        let repo = resolve_repo(&self.repos, repo)?;
+        let dir = self
+            .config
+            .checkpoint
+            .snapshots_dir
+            .clone()
+            .unwrap_or_else(|| sbo_daemon::repo_dir_for_uri(&repo.uri.to_string()).join("snapshots"));
+        let snapshots = sbo_daemon::snapshot::list_snapshot_metas(&dir);
+        let db = repo
+            .state_db()
+            .map_err(|e| ApiError::internal(format!("Failed to open state db: {e}")))?;
+        let (block, root) = db
+            .get_latest_state_root()
+            .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?
+            .unwrap_or((repo.head, [0u8; 32]));
+        // On-chain checkpoint objects (if any have been published).
+        let checkpoints = db
+            .list_objects_by_path_prefix("/sys/checkpoints/")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|o| {
+                let v: serde_json::Value = serde_json::from_slice(&o.payload).ok()?;
+                Some(sbo_daemon::http::CheckpointView {
+                    id: o.id.as_str().to_string(),
+                    block: v.get("block")?.as_u64()?,
+                    state_root: v.get("state_root")?.as_str()?.to_string(),
+                })
+            })
+            .collect();
+        Ok(sbo_daemon::http::SyncPointsView {
+            format: "sbo-sync-points/1".to_string(),
+            genesis: sbo_daemon::http::GenesisView {
+                first_block: repo.uri.first_block,
+                genesis_hash: repo.expected_genesis.clone(),
+            },
+            head: repo.head,
+            latest_state_root: StateRootView { block, state_root: hex::encode(root) },
+            snapshots,
+            checkpoints,
+        })
+    }
+
+    fn snapshot_meta(
+        &self,
+        repo: Option<&str>,
+        block: Option<u64>,
+    ) -> Result<Option<sbo_daemon::snapshot::SnapshotMeta>, ApiError> {
+        let repo = resolve_repo(&self.repos, repo)?;
+        let dir = self
+            .config
+            .checkpoint
+            .snapshots_dir
+            .clone()
+            .unwrap_or_else(|| sbo_daemon::repo_dir_for_uri(&repo.uri.to_string()).join("snapshots"));
+        let metas = sbo_daemon::snapshot::list_snapshot_metas(&dir);
+        Ok(match block {
+            Some(b) => metas.into_iter().find(|m| m.block == b),
+            None => metas.into_iter().next(),
+        })
+    }
+
+    fn snapshot_bytes(
+        &self,
+        repo: Option<&str>,
+        block: u64,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let repo = resolve_repo(&self.repos, repo)?;
+        let dir = self
+            .config
+            .checkpoint
+            .snapshots_dir
+            .clone()
+            .unwrap_or_else(|| sbo_daemon::repo_dir_for_uri(&repo.uri.to_string()).join("snapshots"));
+        let file = dir.join(sbo_daemon::snapshot::snapshot_file_name(block));
+        Ok(std::fs::read(&file).ok())
+    }
+
     async fn submit(&self, data: Vec<u8>) -> Result<SubmitResultView, ApiError> {
         use sbo_daemon::validate::{
             message_to_stored_object, validate_message, L2Context, ValidationResult,
