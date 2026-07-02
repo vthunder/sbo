@@ -62,6 +62,17 @@ enum Commands {
     Status,
     /// Initialize configuration
     Init,
+    /// Fast-sync bootstrap: fetch + verify a snapshot from a serving node and load
+    /// it into the repo's state DB, so `start` tails from there instead of replaying
+    /// from genesis (State Commitment fast-sync).
+    Bootstrap {
+        /// Serving node base URL, e.g. https://da.sandmill.org
+        #[arg(long)]
+        node: String,
+        /// State directory to load into (default: the configured repo's state dir).
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
 }
 
 /// Verbose logging flags
@@ -765,6 +776,47 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => {
             show_status(&config).await?;
+        }
+        Commands::Bootstrap { node, state_dir } => {
+            // repos.json is only needed to derive the default state dir and to set
+            // the head afterward; tolerate its absence when --state-dir is given.
+            let repos = RepoManager::load(config.daemon.repos_index.clone()).ok();
+            let dir = match state_dir {
+                Some(d) => d,
+                None => {
+                    let r = repos
+                        .as_ref()
+                        .and_then(|m| m.list().next())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no usable repos.json; pass --state-dir")
+                        })?;
+                    sbo_daemon::state_db_path_for_uri(&r.uri.to_string())
+                }
+            };
+            let db = sbo_daemon::shared_state_db(&dir)?;
+            println!("Bootstrapping from {node} into {} …", dir.display());
+            let result = sbo_daemon::bootstrap::bootstrap(&db, &node).await?;
+            println!(
+                "✓ loaded snapshot at block {} ({} objects); trust={:?}; state_root={}",
+                result.block,
+                result.object_count,
+                result.trust,
+                hex::encode(result.state_root)
+            );
+            match repos {
+                Some(mut m) => {
+                    let first = m.list().next().cloned();
+                    if let Some(r) = first {
+                        m.update_head(&r.path, result.block)?;
+                        println!(
+                            "✓ set repo head to {}; run `start` to tail from block {}",
+                            result.block,
+                            result.block + 1
+                        );
+                    }
+                }
+                None => println!("note: repos.json not loaded — head not updated"),
+            }
         }
     }
 
