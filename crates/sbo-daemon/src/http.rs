@@ -98,7 +98,7 @@ pub enum ListSelector {
 }
 
 /// Latest `(block, state_root)` for freshness checks.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct StateRootView {
     pub block: u64,
     pub state_root: String,
@@ -106,7 +106,7 @@ pub struct StateRootView {
 
 /// Sync-point manifest — what a client needs to pick a fast bootstrap path
 /// (State Commitment §Sync-Point Discovery). Every entry is verified, not trusted.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct SyncPointsView {
     pub format: String,
     pub genesis: GenesisView,
@@ -120,13 +120,13 @@ pub struct SyncPointsView {
     pub checkpoints: Vec<CheckpointView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct GenesisView {
     pub first_block: Option<u64>,
     pub genesis_hash: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct CheckpointView {
     pub id: String,
     pub block: u64,
