@@ -66,6 +66,18 @@ The following are typical indexer products. None is standardized; they illustrat
 
 In every case the **inputs** (individual attestations, reactions, posts) are verifiable on chain; only the **derived view** is subjective. This is the same boundary held in the [Attestation](./SBO%20Attestation%20Specification.md#indexing-and-off-chain-scoring) and [Content](./SBO%20Content%20Specification.md#reactionv1) specifications: raw facts on chain, aggregate views off chain.
 
+## Bootstrap and Fast-Sync
+
+A conforming client MUST be able to reach canonical state by replay (§Client Conformance), but it MAY reach a recent height faster by bootstrapping from a **checkpoint + snapshot** and then tail-replaying, at a trust level of its choosing. The paths, weakest-replay-effort to strongest-trust:
+
+1. **Replay from genesis** — no checkpoint; maximum assurance; slowest.
+2. **Checkpoint + snapshot** — download the [snapshot](./SBO%20State%20Commitment%20Specification.md#snapshots) at a checkpoint height, reconstruct the trie, and require the root to equal the on-chain checkpoint's `state_root`; then tail-replay from `h+1`. The client inherits the checkpoint's trust:
+   - **authority signature** (trust the publisher),
+   - **[checkpoint attestations](./SBO%20State%20Commitment%20Specification.md#checkpoint-attestations)** from a client-chosen trusted set (web of trust; no fixed committee),
+   - **ZK proof** (trustless).
+
+A client discovers what is available via a node's [sync-point manifest](./SBO%20State%20Commitment%20Specification.md#sync-point-discovery) (reached through the `_sbo` record's `node`/`checkpoint` URL) and picks the highest block whose trust it can satisfy. In every case the artifacts are **verified, not trusted**: a forged snapshot fails the root check, a forged root fails the client's chosen trust mechanism, and the tail is replayed under full SBO validity. This is the same principle as [Verifiable Queries](#verifiable-queries) — acceleration, never authority — applied to initial sync rather than a single query.
+
 ## Client Conformance
 
 A conforming client computes canonical state deterministically and never delegates that computation. It MUST:

@@ -378,7 +378,7 @@ After genesis, the path structure is:
 /sys/names/bob              → user identity
 /sys/policies/root          → root policy
 /sys/policies/...           → additional policies
-/sys/checkpoints/...        → state checkpoints
+/sys/checkpoints/...        → state checkpoints (see State Commitment spec)
 
 /alice/...                  → alice's namespace
 /bob/...                    → bob's namespace
