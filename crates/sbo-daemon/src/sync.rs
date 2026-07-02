@@ -1189,6 +1189,32 @@ impl SyncEngine {
                         }
                     }
                 }
+
+                // If this is a domain object (Content-Schema: domain.v1), verify its
+                // DNSSEC self-certification (Identity Spec §Domain Objects, Rule 4):
+                // the self-signed domain key must be proven to control the zone by a
+                // `dnssec.v1` evidence object at /sys/dnssec/<domain> (seeded BEFORE the
+                // domain object at genesis), with the RRSIG window covering this block's
+                // inclusion time. Non-fatal (warn-log) for now to de-risk first rollout;
+                // flip to a hard reject in validate.rs once verified live.
+                if msg.content_schema.as_deref() == Some("domain.v1") {
+                    let domain = msg.id.as_str();
+                    let domain_key = msg.signing_key.to_string();
+                    let evidence = sbo_core::message::Id::new(domain).ok().and_then(|id| {
+                        let p = sbo_core::message::Path::parse("/sys/dnssec/").ok()?;
+                        db.get_first_object_at_path_id(&p, &id).ok().flatten()
+                    });
+                    match (evidence, l2.inclusion_time) {
+                        (Some(obj), Some(t)) => {
+                            match sbo_core::attribution::verify_domain_self_cert(&domain_key, &obj.payload, domain, t) {
+                                Ok(()) => tracing::info!("Domain {} self-certified (DNSSEC) at block {}", domain, block_number),
+                                Err(e) => tracing::warn!("Domain {} SELF-CERT FAILED at block {}: {:?}", domain, block_number, e),
+                            }
+                        }
+                        (Some(_), None) => tracing::warn!("Domain {}: cannot verify DNSSEC self-cert — no inclusion time at block {}", domain, block_number),
+                        (None, _) => tracing::debug!("Domain {}: no DNSSEC self-cert evidence (plain self-signed)", domain),
+                    }
+                }
             }
         }
 
