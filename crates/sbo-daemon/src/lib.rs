@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod http;
 pub mod validate;
 pub mod pending;
+pub mod snapshot;
 pub mod state_view;
 pub mod prover;
 

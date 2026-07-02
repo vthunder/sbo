@@ -16,6 +16,8 @@ pub struct Config {
     pub prover: ProverConfig,
     #[serde(default)]
     pub light: LightModeConfig,
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,50 @@ impl Default for ProverConfig {
     }
 }
 
+/// Checkpoint + snapshot configuration (State Commitment fast-sync).
+///
+/// `enabled` turns on LOCAL checkpoint scheduling + snapshot generation + the
+/// sync-point manifest (no key needed). `publish` additionally submits the
+/// `checkpoint.v1` object ON-CHAIN, which requires `key_file` — a deliberate
+/// deploy decision, kept off by default so on-chain signing is never auto-armed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Also publish the checkpoint object on-chain (requires `key_file`).
+    #[serde(default)]
+    pub publish: bool,
+    /// Checkpoint-authority signing key (JSON). Required iff `publish=true`.
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+    /// Dual trigger: checkpoint when EITHER this many confirmed writes since the
+    /// last checkpoint (excluding checkpoint objects themselves) ...
+    #[serde(default = "default_every_writes")]
+    pub every_writes: u64,
+    /// ... OR this many DA blocks have elapsed, whichever comes first.
+    #[serde(default = "default_every_blocks")]
+    pub every_blocks: u64,
+    /// Directory for snapshot files; defaults to `<repo state dir>/snapshots`.
+    #[serde(default)]
+    pub snapshots_dir: Option<PathBuf>,
+}
+
+fn default_every_writes() -> u64 { 100 }
+fn default_every_blocks() -> u64 { 1000 }
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            publish: false,
+            key_file: None,
+            every_writes: default_every_writes(),
+            every_blocks: default_every_blocks(),
+            snapshots_dir: None,
+        }
+    }
+}
+
 /// Light client mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightModeConfig {
@@ -143,6 +189,7 @@ impl Default for Config {
             alerts: AlertsConfig::default(),
             prover: ProverConfig::default(),
             light: LightModeConfig::default(),
+            checkpoint: CheckpointConfig::default(),
         }
     }
 }
