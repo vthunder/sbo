@@ -625,12 +625,16 @@ fn unix_now() -> i64 {
 /// configured dual trigger fires and sync is caught up to the finalized head.
 /// Called from the sync task after block processing, so it observes a consistent
 /// confirmed state with no concurrent writer (root + objects match exactly).
+#[allow(clippy::too_many_arguments)]
 async fn checkpoint_if_due(
     state: &Arc<RwLock<DaemonState>>,
     cfg: &sbo_daemon::config::CheckpointConfig,
     latest_block: u64,
     last_checkpoint_block: &mut u64,
     writes_since_checkpoint: &mut u64,
+    turbo: &TurboDaClient,
+    checkpoint_key: Option<&sbo_core::crypto::SigningKey>,
+    prev_checkpoint: &mut Option<String>,
     now: i64,
 ) {
     if !cfg.enabled {
@@ -696,19 +700,99 @@ async fn checkpoint_if_due(
             prune_snapshots(&snap_dir, 3);
             *last_checkpoint_block = head;
             *writes_since_checkpoint = 0;
+
+            // Publish the checkpoint.v1 object on-chain (State Commitment §Checkpoints)
+            // so clients can verify snapshots against an authority-signed root, not
+            // just the serving node. The committed root is `root` (as of `head`),
+            // which excludes this checkpoint object itself (the exclude-self rule).
             if cfg.publish {
-                // On-chain checkpoint publishing needs the authority signing key and
-                // is intentionally not auto-armed here (a deploy decision). The
-                // snapshot is generated + served locally regardless.
-                tracing::warn!(
-                    "checkpoint publish=true, but on-chain publishing is not wired yet; snapshot generated locally only"
-                );
+                match checkpoint_key {
+                    Some(key) => {
+                        let wire = build_checkpoint_wire(
+                            key,
+                            head,
+                            &hex::encode(root),
+                            prev_checkpoint.as_deref(),
+                            now,
+                        );
+                        match turbo.submit_raw(&wire).await {
+                            Ok(_) => {
+                                tracing::info!("published checkpoint.v1 for block {head} on-chain");
+                                *prev_checkpoint = Some(format!("/sys/checkpoints/block-{head}"));
+                            }
+                            Err(e) => tracing::error!("checkpoint publish submit failed: {e}"),
+                        }
+                    }
+                    None => tracing::warn!(
+                        "checkpoint publish=true but no authority key loaded; on-chain publish skipped"
+                    ),
+                }
             }
         }
         Err(e) => {
             tracing::error!("checkpoint: snapshot generation failed at block {}: {}", head, e)
         }
     }
+}
+
+/// Load the checkpoint-authority signing key from a JSON file `{"secret_key":"<hex>"}`.
+fn load_checkpoint_key(path: &std::path::Path) -> anyhow::Result<sbo_core::crypto::SigningKey> {
+    let bytes = std::fs::read(path)?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let hex_key = v
+        .get("secret_key")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("key file missing string field `secret_key`"))?;
+    let raw = hex::decode(hex_key.trim())?;
+    let arr: [u8; 32] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("secret_key must be 32 bytes hex"))?;
+    Ok(sbo_core::crypto::SigningKey::from_bytes(&arr))
+}
+
+/// Build a signed `checkpoint.v1` wire message committing `state_root` (hex) at
+/// `block`. Write-once (`create`): each `block-<h>` id is written exactly once.
+fn build_checkpoint_wire(
+    key: &sbo_core::crypto::SigningKey,
+    block: u64,
+    state_root_hex: &str,
+    prev: Option<&str>,
+    now_secs: i64,
+) -> Vec<u8> {
+    use sbo_core::crypto::{ContentHash, Signature};
+    use sbo_core::message::{Action, Id, Message, ObjectType, Path};
+
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "block": block,
+        "state_root": state_root_hex,
+        "prev_checkpoint": prev,
+    }))
+    .expect("checkpoint.v1 payload serialization");
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse("/sys/checkpoints/").unwrap(),
+        id: Id::new(&format!("block-{block}")).unwrap(),
+        object_type: ObjectType::Object,
+        signing_key: key.public_key(),
+        signature: Signature([0u8; 64]),
+        content_type: Some("application/json".to_string()),
+        content_hash: Some(ContentHash::sha256(&payload)),
+        payload: Some(payload),
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: Some("checkpoint.v1".to_string()),
+        policy_ref: None,
+        related: None,
+        // Content-layer clock: physical ms ≈ inclusion time (passes HLC bounds).
+        hlc: Some(format!("{}.0", (now_secs.max(0) as u128) * 1000)),
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+    };
+    msg.sign(key);
+    sbo_core::wire::serialize(&msg)
 }
 
 /// Keep only the newest `keep` snapshots on disk (delete older file+meta pairs).
@@ -1000,6 +1084,28 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         // on disk, so a restart just resumes counting (may skip one early snapshot).
         let mut last_checkpoint_block: u64 = 0;
         let mut writes_since_checkpoint: u64 = 0;
+        let mut prev_checkpoint: Option<String> = None;
+        // Load the checkpoint-authority key up front (only when publishing on-chain).
+        let checkpoint_key = if checkpoint_config.publish {
+            match checkpoint_config.key_file.as_ref() {
+                Some(p) => match load_checkpoint_key(p) {
+                    Ok(k) => {
+                        tracing::info!("checkpoint on-chain publishing enabled (authority key loaded)");
+                        Some(k)
+                    }
+                    Err(e) => {
+                        tracing::error!("checkpoint publish=true but key load failed: {e}; publishing disabled");
+                        None
+                    }
+                },
+                None => {
+                    tracing::error!("checkpoint publish=true but no key_file set; publishing disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         loop {
             // Get config with short lock
@@ -1230,6 +1336,9 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                 status.latest_block,
                 &mut last_checkpoint_block,
                 &mut writes_since_checkpoint,
+                &turbo,
+                checkpoint_key.as_ref(),
+                &mut prev_checkpoint,
                 unix_now(),
             )
             .await;
