@@ -217,6 +217,22 @@ impl Config {
                 self.turbo_da.api_key = Some(key);
             }
         }
+        // Checkpoint/snapshot cadence — overridable at runtime so it can be tuned
+        // (e.g. a faster cadence for testing) via `dokku config:set` + restart,
+        // without rebuilding the image.
+        if let Ok(v) = std::env::var("SBO_CHECKPOINT_ENABLED") {
+            self.checkpoint.enabled = matches!(v.trim(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = std::env::var("SBO_CHECKPOINT_EVERY_WRITES") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                self.checkpoint.every_writes = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SBO_CHECKPOINT_EVERY_BLOCKS") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                self.checkpoint.every_blocks = n;
+            }
+        }
     }
 
     /// Save config to file
