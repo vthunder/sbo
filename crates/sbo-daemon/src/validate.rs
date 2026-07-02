@@ -1084,8 +1084,14 @@ fn check_policy_at(
     };
     let is_attested = |source: &AttestedSource| attested_subject_matches(state, l2, &requester, source);
 
+    // The repo's primary domain scopes resolution-based name matching in the
+    // evaluator: a bare grant name `<local>` resolves to `<local>@<primary_domain>`,
+    // the same email form `resolve_creator` canonicalizes the actor to. `None`
+    // (no/ambiguous domain) keeps bare-name matching literal.
+    let pd = primary_domain(state);
+
     // Evaluate the policy
-    match evaluate(&policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg) {
+    match evaluate(&policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",
