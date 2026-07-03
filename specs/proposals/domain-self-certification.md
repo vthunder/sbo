@@ -91,8 +91,10 @@ Add, where domain trust is discussed:
 Lands in the **batched regenesis** (with the resolution-based matching engine fix and, optionally, restoring `roles.admin:["sys"]`).
 
 ### Prerequisite (operational)
-- The domain root key becomes the mingo `_browserid` provider key (`e021fda4…`), whose **secret lives in mingo-idp**. Genesis authoring needs it: import it into the keyring as an alias (e.g. `mingo-provider`) or run genesis with IDP-key access. Decide handling; the old `mingo-domain` key (`8ef0381e…`) is retired.
-- A way to **capture the `_browserid.<domain>` DNSSEC chain** (RFC-4034 wire) at genesis-authoring time. Reuse whatever produces the user-attribution `/sys/dnssec/` proofs (dnssec self-auth work). Fetch-live or from-file.
+- The domain root key becomes the mingo `_browserid` provider key (`e021fda4…`), whose secret lives in mingo-idp; the old `mingo-domain` key (`8ef0381e…`) is retired.
+- **Key handling (decided): use the provider key directly, transiently — no delegated-signing endpoint.** A signing endpoint that will sign arbitrary bytes with the provider key is a browserid-cert **forgery oracle**; a safe shape-restricted one is disproportionate for a one-time signature. Instead retrieve the secret through the existing admin channel (`dokku config:get mingo <provider-key-var>`) and feed it **transiently** to `mingo genesis` via a `--domain-key-file` input (avoid writing it into `~/.sbo/keys` at rest). Blast radius is bounded: with key-form `roles.admin`, a leaked provider key can forge browserid certs (pre-existing risk) but **cannot reach chain admin**.
+  > **Production-launch note (do this when we launch a real chain, not for testing):** because domain self-cert is **point-in-time**, the provider key only matters at the genesis instant — the genesis-time proof for the old key stands forever. So for a production launch, **rotate `_browserid.<domain>` to a fresh provider key as the final ceremony step** (new key → update `_browserid` DNS → idp signs future certs with it). This neutralizes any residual exposure from having used the key at genesis, with zero effect on the (immutable) domain self-cert. For the current testing phase we skip rotation.
+- **DNSSEC chain capture (tool exists):** `sbo domain evidence <domain> --out dnssec.wire` (sbo-cli `domain.rs::evidence`) captures the `_browserid.<domain>` RFC-9102 proof. Its RRSIG window must bracket the genesis block time. This is the same object already used for user attribution (`/sys/dnssec/<domain>`), so no new machinery.
 
 ### sbo-core
 1. **`attribution.rs`** — add `verify_domain_self_cert(domain_public_key: &str, evidence: &[u8], domain: &str, inclusion_time: i64) -> Result<(), AttributionError>`: calls `verify_dnssec_proof_for_domain(evidence, domain)` (existing) → `(inception, expiration)`; re-extract provider key via `extract_provider_key` (existing); assert `provider_key == domain_public_key` (new `KeyMismatch`-style error) and `inclusion_time ∈ [inception, expiration]`. Pure, offline-testable.
@@ -116,7 +118,9 @@ Lands in the **batched regenesis** (with the resolution-based matching engine fi
 ### Rollout
 10. Draft → apply the 5 spec edits (this branch). Then implement core→daemon→genesis. Then the **batched regenesis**: engine fix live + `roles.admin` (optional) + self-certifying `domain.v1`. Update `_sbo.<D>` per the regenesis checklist. Verify: `Genesis verified` + `Domain self-certified` + bootstrap `trust=OnChainCheckpoint`.
 
+### Decisions settled (2026-07-03)
+- **Binding: `Auth-Evidence: ref:` to a distinct `/sys/dnssec/<domain>` object** (not inline). `domain.v1` carries an explicit `Auth-Evidence` reference to the exact seeded evidence leaf `(path, creator, id)`; verification resolves *that* leaf, **not** a bare-`get_first` current-state lookup. This is what fixes the security-review shadowing/overwrite issue: a later user-attribution refresh lands under a different creator (a different leaf), so the referenced genesis leaf is unambiguous and immutable. Implementation delta from what's currently on this branch: genesis sets `domain.v1.auth_evidence = ref:/sys/dnssec/<domain>#<creator>`, and the daemon (sync.rs) resolves the explicit ref instead of `get_first_object_at_path_id`.
+- **Key handling: use the provider key directly, transiently** (see Prerequisite) — no delegated signing.
+
 ### Open questions
-- Keep the point-in-time evidence as a distinct object, or allow `domain.v1` to *inline* the chain? (Separate object reuses `/sys/dnssec/` + de-dups with user attribution — preferred.)
-- Enforce self-cert as **REQUIRED** for Mode B, or keep it optional (self-signed fallback)? Proposal: optional in the spec, but Mingo genesis always emits it.
-- IDP-key handling at genesis (import vs. delegated signing) — security review before the ceremony.
+- Enforce self-cert as **REQUIRED** for Mode B, or keep it optional (self-signed fallback)? Standing default: optional in the spec, but Mingo genesis always emits it.
