@@ -1193,20 +1193,28 @@ impl SyncEngine {
                 // If this is a domain object (Content-Schema: domain.v1), verify its
                 // DNSSEC self-certification (Identity Spec §Domain Objects, Rule 4):
                 // the self-signed domain key must be proven to control the zone by a
-                // `dnssec.v1` evidence object at /sys/dnssec/<domain> (seeded BEFORE the
-                // domain object at genesis), with the RRSIG window covering this block's
-                // inclusion time. Non-fatal (warn-log) for now to de-risk first rollout;
-                // flip to a hard reject in validate.rs once verified live.
+                // `dnssec.v1` evidence object that domain.v1 references via its own
+                // `Auth-Evidence: ref:/sys/dnssec/<domain>` — resolved as of THIS block —
+                // with the RRSIG window covering this block's inclusion time. Reading
+                // the object's declared ref (not a bare current-state lookup) keeps the
+                // binding self-contained and unambiguous. Non-fatal (warn-log) for now to
+                // de-risk first rollout; flip to a hard reject once verified live.
                 if msg.content_schema.as_deref() == Some("domain.v1") {
                     let domain = msg.id.as_str();
                     let domain_key = msg.signing_key.to_string();
-                    let evidence = sbo_core::message::Id::new(domain).ok().and_then(|id| {
-                        let p = sbo_core::message::Path::parse("/sys/dnssec/").ok()?;
-                        db.get_first_object_at_path_id(&p, &id).ok().flatten()
-                    });
+                    // The path the domain object points at: its own `Auth-Evidence: ref:<path>`
+                    // if present, else the conventional /sys/dnssec/<domain>.
+                    let ref_path = match msg.auth_evidence.as_deref() {
+                        Some(r) if r.starts_with("ref:") => r.trim_start_matches("ref:").to_string(),
+                        _ => format!("/sys/dnssec/{domain}"),
+                    };
+                    let evidence = crate::validate::fetch_evidence_object(
+                        db as &dyn crate::state_view::StateView,
+                        &ref_path,
+                    );
                     match (evidence, l2.inclusion_time) {
-                        (Some(obj), Some(t)) => {
-                            match sbo_core::attribution::verify_domain_self_cert(&domain_key, &obj.payload, domain, t) {
+                        (Some(raw), Some(t)) => {
+                            match sbo_core::attribution::verify_domain_self_cert(&domain_key, &raw, domain, t) {
                                 Ok(()) => tracing::info!("Domain {} self-certified (DNSSEC) at block {}", domain, block_number),
                                 Err(e) => tracing::warn!("Domain {} SELF-CERT FAILED at block {}: {:?}", domain, block_number, e),
                             }
