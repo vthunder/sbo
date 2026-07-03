@@ -188,7 +188,7 @@ pub fn resolve_evidence(msg: &Message, state: &dyn StateView) -> Option<String> 
 /// an `sbo-path` ref like `/sys/dnssec/<issuer>`: the final segment is the
 /// object id, the rest the path. Creator-independent (the object is
 /// self-authenticating, so any creator's copy is equivalent).
-fn fetch_evidence_object(state: &dyn StateView, ref_path: &str) -> Option<Vec<u8>> {
+pub fn fetch_evidence_object(state: &dyn StateView, ref_path: &str) -> Option<Vec<u8>> {
     let (path_str, id_str) = ref_path.trim_end_matches('/').rsplit_once('/')?;
     let path = SboPath::parse(&format!("{path_str}/")).ok()?;
     let id = Id::new(id_str).ok()?;

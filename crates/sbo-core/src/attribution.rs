@@ -230,6 +230,60 @@ pub fn verify_dnssec_proof_for_domain(
     Ok((inception, expiration))
 }
 
+/// Verify a **self-certifying `domain.v1`** (Identity Spec §Domain Objects,
+/// Validation Rule 4): the domain object's key is proven to control the DNS zone
+/// `<domain>` by a `dnssec.v1` evidence chain, at the object's inclusion time.
+///
+/// Checks, in order:
+/// 1. the DNSSEC chain validates to the pinned root and yields the `_browserid.<domain>`
+///    provider key (via [`extract_provider_key`]);
+/// 2. `inclusion_time` lies within the proof's RRSig window (the inclusion-time
+///    clock — not wall-clock "now" — so a genesis-pinned root stays verifiable
+///    forever against the fixed genesis instant, and RRSig wall-clock expiry is
+///    irrelevant);
+/// 3. the provider key **equals** `domain_public_key` (the key in the `domain.v1`
+///    JWT), accepting either the `ed25519:<hex>` or base64url form.
+///
+/// This is point-in-time certification: it attests control at `inclusion_time`.
+/// Post-genesis lapse/transfer/rotation is out of scope (Identity Spec).
+pub fn verify_domain_self_cert(
+    domain_public_key: &str,
+    evidence: &[u8],
+    domain: &str,
+    inclusion_time: i64,
+) -> Result<(), AttributionError> {
+    let (provider_key, inception, expiration) = extract_provider_key(evidence, domain)?;
+    check_domain_binding(domain_public_key, &provider_key, inception, expiration, inclusion_time)
+}
+
+/// The window + key-equality half of [`verify_domain_self_cert`], separated so it
+/// can be unit-tested offline with a directly-supplied provider key (bypassing
+/// DNSSEC — mirrors [`verify_attribution_with_provider_key`]).
+pub fn check_domain_binding(
+    domain_public_key: &str,
+    provider_key: &PublicKey,
+    inception: i64,
+    expiration: i64,
+    inclusion_time: i64,
+) -> Result<(), AttributionError> {
+    if inclusion_time < inception || inclusion_time > expiration {
+        return Err(AttributionError::EvidenceWindowMismatch {
+            time: inclusion_time,
+            from: inception,
+            until: expiration,
+        });
+    }
+
+    // The domain object refers to keys as `ed25519:<hex>`; the DNSSEC record
+    // yields a browserid `PublicKey`. Compare by value, accepting either encoding.
+    let provider_key_sbo = format!("ed25519:{}", hex::encode(provider_key.as_bytes()));
+    if domain_public_key != provider_key_sbo && domain_public_key != provider_key.to_base64() {
+        return Err(AttributionError::KeyMismatch);
+    }
+
+    Ok(())
+}
+
 /// The cert/window/authority half of the verifier, separated so it can be
 /// unit-tested offline with a directly-supplied provider key (bypassing
 /// DNSSEC).
@@ -595,5 +649,52 @@ mod tests {
         // `dnssec_prover::query` module and a live recursive resolver. The
         // offline tests above cover all deterministic logic; the DNSSEC
         // validation itself is exercised by dnssec-prover's own test suite.
+    }
+
+    // --- Domain self-certification (check_domain_binding) --------------------
+    // The DNSSEC extraction is exercised by the attribution tests above; these
+    // cover the window + key-equality half, offline with a generated key.
+
+    #[test]
+    fn domain_self_cert_matching_key_in_window_ok() {
+        let provider = KeyPair::generate();
+        let pk = provider.public_key();
+        let (inception, expiration) = window();
+        let now = Utc::now().timestamp();
+        // Domain object key in `ed25519:<hex>` form.
+        let dom_key = format!("ed25519:{}", hex::encode(pk.as_bytes()));
+        check_domain_binding(&dom_key, &pk, inception, expiration, now).unwrap();
+        // …and the base64url form is accepted too.
+        check_domain_binding(&pk.to_base64(), &pk, inception, expiration, now).unwrap();
+    }
+
+    #[test]
+    fn domain_self_cert_key_mismatch_rejected() {
+        let provider = KeyPair::generate();
+        let other = KeyPair::generate();
+        let (inception, expiration) = window();
+        let now = Utc::now().timestamp();
+        let wrong = format!("ed25519:{}", hex::encode(other.public_key().as_bytes()));
+        assert!(matches!(
+            check_domain_binding(&wrong, &provider.public_key(), inception, expiration, now),
+            Err(AttributionError::KeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn domain_self_cert_inclusion_outside_window_rejected() {
+        let provider = KeyPair::generate();
+        let pk = provider.public_key();
+        let (inception, expiration) = window();
+        let dom_key = format!("ed25519:{}", hex::encode(pk.as_bytes()));
+        // Before inception and after expiration both fail.
+        assert!(matches!(
+            check_domain_binding(&dom_key, &pk, inception, expiration, inception - 1),
+            Err(AttributionError::EvidenceWindowMismatch { .. })
+        ));
+        assert!(matches!(
+            check_domain_binding(&dom_key, &pk, inception, expiration, expiration + 1),
+            Err(AttributionError::EvidenceWindowMismatch { .. })
+        ));
     }
 }

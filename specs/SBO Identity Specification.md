@@ -253,6 +253,8 @@ giving up the email onramp.
 
 A `domain.v1` object at `/sys/domains/<domain>` establishes a domain as a **root of trust within a repository** — for example, in Mode B genesis, where the domain certifies the `sys` identity. It is a key-rooted identity for the domain, self-signed and pinned on chain.
 
+A `domain.v1` MAY additionally be **self-certifying**: its `public_key` is proven to control the DNS zone `<domain>` by a `dnssec.v1` evidence object (the `_browserid.<domain>` DNSSEC chain; see the [Authorization Specification](./SBO%20Authorization%20Specification.md#dnssec-evidence-auth-evidence)) whose every RRSIG window contains the domain object's inclusion time. This binds domain authority into **genesis validity**: whoever verifies the genesis block — a full replayer, or (in the trustless-proof future) the base case of a recursive state proof — thereby verifies the domain's DNSSEC proof against the genesis DA-block time, so domain authenticity no longer rests on trusting the out-of-band `_sbo` discovery record. The evidence is therefore read from the **genesis block** at genesis-verification time, not from mutable state — a later user-attribution refresh of `/sys/dnssec/<domain>` does not affect it. Certification is **point-in-time**: it attests control at the object's inclusion time (genesis, for a genesis-pinned root) and, because the object is immutable, needs no refresh. Detecting a domain's post-genesis **lapse, transfer, or key rotation** (a liveness property) is out of scope for this version; a future revision may add a refreshable liveness proof (cf. the self-authorizing `/sys/dnssec/` refresh used for user attribution).
+
 ### JWT Payload
 
 ```json
@@ -269,17 +271,18 @@ A `domain.v1` object at `/sys/domains/<domain>` establishes a domain as a **root
 1. `iss` MUST be `"self"`.
 2. `sub` MUST match the `ID` in the SBO envelope.
 3. The JWT MUST be signed by `public_key`, and the `Public-Key` header MUST match it.
+4. A domain object MAY carry DNSSEC self-certification. When present — via an `Auth-Evidence` reference on the domain message, or a `dnssec.v1` object at the conventional `/sys/dnssec/<domain>` path resolved *as-of this object's block* — a verifier MUST: validate the evidence chain to the pinned root KSK with every RRSIG window containing this object's inclusion time; and check that the provider key read from the `_browserid.<domain>` record **equals** this object's `public_key`. A domain object whose self-certification is present but fails MUST be rejected. Absence of self-certification falls back to the repository-scoped, genesis-pinned trust of a plain self-signed domain object.
 
 ### Two senses of "domain" — do not conflate
 
 | | Repository root-of-trust domain | User/provider email domain |
 |---|---|---|
 | Object | `domain.v1` at `/sys/domains/<domain>` (on chain) | None on chain |
-| Key | Self-signed, pinned at genesis | The provider's `_browserid` key |
-| Trust | On-chain, repository-scoped | DNSSEC to the pinned DNS root KSK |
+| Key | Self-signed; MAY be the **same key** as the domain's `_browserid` provider key | The provider's `_browserid` key |
+| Trust | On-chain, repository-scoped — and, when self-certifying, **DNSSEC-proven at the object's inclusion time** (point-in-time) | DNSSEC to the pinned DNS root KSK |
 | Role | Certifies repository-internal identities (`sys`) | Attributes user writes (`Auth-Cert`) |
 
-A single domain (e.g. `community.org`) MAY play both roles, but they are distinct mechanisms with distinct keys. Provider/email-domain keys are **never** mirrored on chain; they are proven via DNSSEC per message (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)).
+A single domain (e.g. `community.org`) MAY play both roles. It MAY keep them on **distinct keys**, or use a **single key** for both and mirror its `_browserid` DNSSEC proof on chain once (as a `dnssec.v1` object) to self-certify the root at genesis — the same object then also serves per-message user attribution (read as-of genesis for the root, current for users). Provider/email-domain keys are otherwise proven via DNSSEC per message and need not be mirrored on chain (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)).
 
 ## Community-Issued Identities (T1)
 

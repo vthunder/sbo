@@ -41,10 +41,19 @@ A domain is established first, then sys is certified by that domain.
 
 **Genesis block contains (in order):**
 ```
-1. POST /sys/domains/<domain>  → self-signed domain identity
-2. POST /sys/names/sys         → domain-certified system identity
-3. POST /sys/policies/root     → root policy (signed by sys)
+1. POST /sys/dnssec/<domain>   → dnssec.v1 proof (self-certifying Mode B only)
+2. POST /sys/domains/<domain>  → self-signed domain identity
+3. POST /sys/names/sys         → domain-certified system identity
+4. POST /sys/policies/root     → root policy (signed by sys)
 ```
+
+**Self-certifying Mode B (recommended).** Set the `domain.v1` key to the domain's
+`_browserid` provider key, and seed a `dnssec.v1` object at `/sys/dnssec/<domain>`
+(ordered **before** the domain object) carrying the `_browserid.<domain>` DNSSEC
+chain captured at genesis-authoring time — its RRSIG windows must bracket the
+genesis block time. The domain then certifies `sys` **and** is itself
+DNSSEC-verifiable from state (see [Domain Objects](./SBO%20Identity%20Specification.md#domain-objects-domainv1), Validation Rule 4).
+Plain (non-self-certifying) Mode B omits step 1 and uses a standalone domain key.
 
 **Use cases:** Organizations, enterprises, multi-tenant platforms.
 
@@ -398,7 +407,7 @@ After genesis, sys (or authorized identities per policy) can create additional d
 POST /sys/domains/other.com
 ```
 
-`/sys/domains/*` objects are **repository root-of-trust domains** (used to certify repository-internal identities such as `sys`). They are distinct from users' email-provider domains, which are attributed via DNSSEC and never stored on chain — see the two-senses-of-domain note in the [SBO Identity Specification](./SBO%20Identity%20Specification.md#domain-objects-domainv1).
+`/sys/domains/*` objects are **repository root-of-trust domains** (used to certify repository-internal identities such as `sys`). They are distinct from users' email-provider domains, which are attributed via DNSSEC. A domain's `_browserid` proof MAY be mirrored on chain **once**, as a `dnssec.v1` object under `/sys/dnssec/<domain>`, to **self-certify the repository root-of-trust domain** at genesis (see [Domain Objects](./SBO%20Identity%20Specification.md#domain-objects-domainv1)); per-message user-attribution evidence is otherwise not required to be stored on chain. See the two-senses-of-domain note in the [SBO Identity Specification](./SBO%20Identity%20Specification.md#domain-objects-domainv1).
 
 ### User Identity Claims
 
