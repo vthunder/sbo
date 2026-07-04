@@ -16,6 +16,7 @@ Draft
 - **v0.2**: Changed leaf value from `Content-Hash` to `object_hash` (SHA-256 of complete raw SBO bytes). This ensures proofs commit to the full object including headers, not just payload. Added creator as path segment for disambiguation.
 - **v0.2.1**: Specified that the creator path segment is the author's *resolved controller* (attributed email for email-rooted authors), not the signing key — so an author's objects do not fragment across browserid key rotation. Still deterministic (inclusion-time-pinned).
 - **v0.3**: Expanded the checkpoint model into a bootstrap/fast-sync story: publisher-chosen cadence with a RECOMMENDED (not mandated) max-staleness bound; the *exclude-self* root rule; **snapshots** (a compact, self-verifying object-set at a checkpoint height); **checkpoint attestations** (client-chosen web-of-trust over a checkpoint root); and a **sync-point discovery manifest**. All remain optional performance features — canonical state is still replay.
+- **v0.4**: Unified the trust mechanisms — the authority signature and checkpoint attestations are the *same* mechanism over signed `(block, state_root)` claims under a client trust policy `{attestors, threshold}`; `T2-sys` is just `{attestors:[sys], threshold:1}` and the authority is no longer privileged in the protocol. Specified that attestations **lag** the checkpoint (an attestor attests a past block from a later height) and the resulting client behaviour: provisional anchor + accrue-while-tailing (the tail-replay *is* the discovery walk), *freshest-already-attested* selection, and a bounded liveness fallback.
 
 ## Overview
 
@@ -459,14 +460,34 @@ Signature: ...
 
 ### Trust Mechanisms
 
-A checkpoint root is a claim; *why* a client believes it is deployment- and client-specific. These are points on one spectrum — the client bootstraps with the same [snapshot](#snapshots) either way and only the verification differs:
+A checkpoint root is a claim; *why* a client believes it is deployment- and client-specific. These are points on one spectrum — the client bootstraps with the same [snapshot](#snapshots) either way and only the verification differs.
 
-- **Authority signature (T2-sys)**: trust the checkpoint authority's signature on the root. Simplest; the client trusts the publisher not to sign a wrong root.
-- **Checkpoint attestations (T2-attest)**: a client-chosen **web of trust** — accept the root once enough parties *the client independently trusts* have attested it on chain (see [Checkpoint Attestations](#checkpoint-attestations)). No fixed validator set; the client decides whose word counts.
-- **ZK proof (T1)**: verify a proof that the root is the correct result of validated history — **trustless** (see the [prover integration]; the proof is published aligned to the checkpoint height).
-- **Optimistic**: accept provisionally and replay-verify from the snapshot forward (or fall back to full replay) in the background; the strongest assurance is always independent replay.
+#### The unified model: signed `(block, state_root)` claims
 
-The mechanism is not mandated here and may be mixed (e.g. accept on the authority signature *and* opportunistically strengthen with attestations or a proof). Maximum assurance is independent replay from genesis; checkpoints only let a client choose a faster point on the trust/speed curve.
+The authority signature and checkpoint attestations are **not two separate mechanisms** — they are the *same* mechanism at different settings. A checkpoint's trust reduces to a single local decision over **signed `(block, state_root)` claims**:
+
+> A client holds a **trust policy** `{ attestors: [identity…], threshold: N }` and accepts a root `R` at height `h` once **≥ N distinct trusted attestors** have each signed the claim `(h, R)` on chain.
+
+Both object types carry exactly that claim, signed by their author:
+
+- a `checkpoint.v1` written by the checkpoint authority *is* the authority's signed `(h, R)` claim;
+- a `checkpoint-attestation.v1` written by any party *is* that party's signed `(h, R)` claim.
+
+They differ only in **who signed** and **where the client's policy places that signer** — not in how they are verified. So the tiers are just policy settings:
+
+Write `AUTH` for the deployment's **checkpoint-authority identity** — the id that signs `checkpoint.v1` (in the default mingo genesis this is `sys-checkpointer`, the `sys`-delegated checkpoint key, **not** `sys` itself).
+
+| Tier | Trust policy | Meaning |
+|------|-------------|---------|
+| **T2-sys** | `{attestors: [AUTH], threshold: 1}` | the current default: trust the checkpoint authority alone |
+| **T2-attest** | `{attestors: [AUTH, alice, bob…], threshold: N}` | client-chosen web of trust; no fixed validator set |
+| **T1-zk** | a proof discharges the claim outright | trustless; the proof *is* the evidence, no signer trusted (see [prover integration]) |
+
+The checkpoint authority is therefore **not privileged in the protocol** — it is merely the attestor every default policy happens to include. A deployment or client MAY drop `AUTH` from its set entirely and trust only independent attestors, or require `AUTH` **and** peers (`threshold ≥ 2` with `AUTH` in the set). Implementations SHOULD model the authority checkpoint and peer attestations through **one verifier** over signed `(h, R)` claims rather than two code paths.
+
+- **Optimistic strengthening.** Because trust is just "count agreeing claims," a client MAY accept a root provisionally at a low bar (e.g. `sys` alone) to start serving immediately, then *accrue* further trusted claims as it tails and upgrade its confidence — see [Checkpoint Attestations §Timing](#timing-attestations-lag-the-checkpoint).
+
+The mechanism is not mandated here and may be mixed. Maximum assurance is independent replay from genesis; checkpoints only let a client choose a faster point on the trust/speed curve.
 
 ---
 
@@ -534,13 +555,34 @@ Content-Schema: checkpoint-attestation.v1
 }
 ```
 
-Because it lives in the attestor's namespace and is signed by them, it is a first-class SBO object: deterministically validated, and its authorship (the attestor's resolved controller) is exactly the identity a client decides whether to trust.
+Because it lives in the attestor's namespace and is signed by them, it is a first-class SBO object: deterministically validated, and its authorship (the attestor's resolved controller) is exactly the identity a client decides whether to trust. The attestation re-states `state_root`, so it is an **independent claim** ("I computed root R at h"), not a co-signature of the authority's object — it stands even if the authority checkpoint is wrong or absent.
+
+### Producing an attestation
+
+An attestor is a node that has **independently computed** the root at `h` — ideally a full replayer from genesis (`method: "replay"`), so its claim is not merely an echo of the same snapshot it is attesting. On observing an on-chain checkpoint at height `h`, it compares its own recorded root at `h` to the checkpoint's `state_root`; **on match** it posts the attestation, **on mismatch** it withholds it and raises a divergence alarm (it never signs a root it did not reproduce). An attestor with a correlated source (e.g. one that only bootstrapped from the very snapshot under attestation) provides weaker assurance; the value of an attestation is exactly the independence of the computation behind it, which is why trust is client-chosen.
+
+### Timing: attestations lag the checkpoint
+
+Attestations are **not concurrent** with the checkpoint — an attestor can only attest a block it has already reached and verified, so a `checkpoint-attestation.v1` for `block-h` is itself written at some later height `h' > h`. A client's trust in a root therefore accrues over the blocks it tails, not instantaneously:
+
+```
+t0        checkpoint/snapshot height h
+t0+1      sys publishes checkpoint.v1{h, R}   (satisfies {attestors:[sys], threshold:1})
+t2        client bootstraps: downloads snapshot@h, rebuilds trie -> R,
+          adopts h PROVISIONALLY, begins tail-replay from h+1
+t3        an independent attestor, having reached h, posts its attestation for block-h
+t4        client, tail-replaying past t3, SEES that attestation; once >= threshold
+          trusted attestors agree on R, the h anchor is CONFIRMED
+```
+
+Because tail-replay already walks the client forward from `h`, **the walk is the discovery** — the client encounters attestation objects for `block-h` as they land in later blocks, with no separate scan (a [sync-point manifest](#sync-point-discovery) is only an optional index, and cannot list attestations posted after it was fetched). Note forward replay from `h` only proves `h→tip` transitions *given* `h`; the anchor at `h` (a downloaded snapshot, not replayed from genesis) is what the attestations establish.
 
 ### Client Use
 
-- **Client-chosen trust.** A client maintains its own set of trusted attestors and a threshold (e.g. "≥ 2 of my trusted set agree on `(h, root)`"). It does **not** consult a fixed committee.
-- **Direct discovery.** Knowing its trusted attestors, a client reads `/u/<attestor>/attestations/checkpoints/block-<h>` for each — no indexer required. A reverse index (checkpoint → attestations) is an optional indexer product (subject to the usual completeness caveats).
-- **Optimistic strengthening.** A client MAY bootstrap from a snapshot immediately on the authority signature and then *accrue* trusted attestations as it tails, upgrading its confidence over time — or fall back to replay-from-snapshot if the trust threshold is never met.
+- **Client-chosen trust.** A client maintains its own trust policy `{attestors, threshold}` (§[The unified model](#the-unified-model-signed-block-state_root-claims)) and accepts a root once that many trusted attestors agree on `(h, R)`. It does **not** consult a fixed committee.
+- **Selection: freshest already-attested.** A client that does not need bleeding-edge state SHOULD anchor at the **most recent checkpoint whose threshold is already satisfied** on chain, then tail forward — establishing trust immediately with no waiting. Only a client that needs state newer than any sufficiently-attested checkpoint falls back to *walk-and-wait*: anchor provisionally at the newest checkpoint and tail forward accruing attestations until the threshold is met.
+- **Liveness fallback (bounded wait).** A web-of-trust client can never trust *newer* than its attestors have reached; if they lag or go silent it MUST NOT wait forever. It SHOULD bound the walk-and-wait (max blocks / max time) and, on exhaustion, either fall back to an older sufficiently-attested checkpoint, degrade to a weaker policy (e.g. `sys`-only), or report *trust not established* — a deployment/client choice.
+- **Direct discovery.** Knowing its trusted attestors, a client can also read `/u/<attestor>/attestations/checkpoints/block-<h>` directly for each — no indexer required.
 
 Attestations attest a *root*, not availability or validity of any specific object; a client that wants object-level guarantees still uses [inclusion/subtree proofs](#inclusion-proof).
 

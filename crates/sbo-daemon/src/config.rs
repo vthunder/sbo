@@ -18,6 +18,8 @@ pub struct Config {
     pub light: LightModeConfig,
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
+    #[serde(default)]
+    pub attest: AttestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +136,35 @@ impl Default for CheckpointConfig {
     }
 }
 
+/// Checkpoint-attestation producer configuration (State Commitment §Checkpoint
+/// Attestations). When `enabled`, this node watches `/sys/checkpoints/` and, for
+/// each checkpoint at a height it has INDEPENDENTLY reached, compares its own
+/// recorded state root at that height to the checkpoint's; on match it posts a
+/// `checkpoint-attestation.v1` under `/u/<attestor>/attestations/checkpoints/`.
+///
+/// This is orthogonal to `[checkpoint]`: a node can attest without publishing
+/// checkpoints, and vice versa. Requires `key_file` (the attestor's signing key)
+/// and `attestor` (the identity whose `/u/<attestor>/` namespace it writes to;
+/// MUST be the resolved controller of that key so the owner grant matches).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Attestor signing key (JSON `{"secret_key":"<hex>"}`). Required iff `enabled`.
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+    /// The attestor identity — its `/u/<attestor>/` namespace receives the
+    /// attestations. MUST be the controller of `key_file`'s key.
+    #[serde(default)]
+    pub attestor: Option<String>,
+}
+
+impl Default for AttestConfig {
+    fn default() -> Self {
+        Self { enabled: false, key_file: None, attestor: None }
+    }
+}
+
 /// Light client mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightModeConfig {
@@ -190,6 +221,7 @@ impl Default for Config {
             prover: ProverConfig::default(),
             light: LightModeConfig::default(),
             checkpoint: CheckpointConfig::default(),
+            attest: AttestConfig::default(),
         }
     }
 }

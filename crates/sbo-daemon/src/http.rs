@@ -118,6 +118,20 @@ pub struct SyncPointsView {
     pub snapshots: Vec<crate::snapshot::SnapshotMeta>,
     /// On-chain checkpoint objects observed under `/sys/checkpoints/`.
     pub checkpoints: Vec<CheckpointView>,
+    /// Checkpoint attestations observed under `/u/<attestor>/attestations/checkpoints/`
+    /// (State Commitment §Checkpoint Attestations). Advisory discovery only — a
+    /// client re-reads/verifies these from attestors it trusts. Absent in older
+    /// nodes, so default to empty when deserializing.
+    #[serde(default)]
+    pub attestations: Vec<AttestationView>,
+}
+
+#[derive(Debug, Serialize, serde::Deserialize)]
+pub struct AttestationView {
+    pub block: u64,
+    /// Resolved controller of the attestor (the identity a client decides to trust).
+    pub attestor: String,
+    pub state_root: String,
 }
 
 #[derive(Debug, Serialize, serde::Deserialize)]

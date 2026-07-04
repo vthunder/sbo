@@ -168,6 +168,24 @@ pub fn validate_schema(msg: &Message) -> SchemaResult<()> {
             Ok(())
         }
         "attestation.v1" => attestation::validate_attestation(msg),
+        "checkpoint-attestation.v1" => {
+            // A signed `(block, state_root)` claim about a checkpoint (State
+            // Commitment §Checkpoint Attestations). `subject`/`method`/`issued_at`
+            // are advisory; the trust-bearing fields are `block` + `state_root`.
+            let v: serde_json::Value = serde_json::from_slice(payload)?;
+            if !v.get("block").map(|b| b.is_u64()).unwrap_or(false) {
+                return Err(SchemaError::MissingField("block".into()));
+            }
+            let root_ok = v
+                .get("state_root")
+                .and_then(|r| r.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !root_ok {
+                return Err(SchemaError::MissingField("state_root".into()));
+            }
+            Ok(())
+        }
         "post.v1" => content::validate_post(msg),
         "comment.v1" => content::validate_comment(msg),
         "reaction.v1" => content::validate_reaction(msg),
@@ -273,6 +291,26 @@ mod tests {
         let payload_ok = br#"{"subject":"alice","type":"vouch","value":true,"issued_at":100,"issuer":"mods@community.org"}"#;
         let msg_ok = make_email_message(Some("attestation.v1"), payload_ok, Some("mods@community.org"));
         assert!(validate_schema(&msg_ok).is_ok());
+    }
+
+    #[test]
+    fn test_checkpoint_attestation_valid_and_missing_fields() {
+        let ok = br#"{"subject":"/sys/checkpoints/block-100","block":100,"state_root":"abcd","method":"replay","issued_at":5}"#;
+        assert!(validate_schema(&make_test_message(Some("checkpoint-attestation.v1"), ok)).is_ok());
+
+        // Missing block → rejected.
+        let no_block = br#"{"state_root":"abcd"}"#;
+        assert!(matches!(
+            validate_schema(&make_test_message(Some("checkpoint-attestation.v1"), no_block)),
+            Err(SchemaError::MissingField(f)) if f == "block"
+        ));
+
+        // Missing / empty state_root → rejected.
+        let no_root = br#"{"block":100,"state_root":""}"#;
+        assert!(matches!(
+            validate_schema(&make_test_message(Some("checkpoint-attestation.v1"), no_root)),
+            Err(SchemaError::MissingField(f)) if f == "state_root"
+        ));
     }
 
     #[test]

@@ -474,6 +474,22 @@ impl RepoApi for DaemonState {
                 })
             })
             .collect();
+        // Checkpoint attestations observed on chain (advisory discovery). Each is
+        // attributed to its author's resolved controller — the identity a client
+        // decides whether to trust.
+        let attestations = db
+            .list_objects_by_schema("checkpoint-attestation.v1")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|o| {
+                let v: serde_json::Value = serde_json::from_slice(&o.payload).ok()?;
+                Some(sbo_daemon::http::AttestationView {
+                    block: v.get("block")?.as_u64()?,
+                    attestor: o.owner.as_str().to_string(),
+                    state_root: v.get("state_root")?.as_str()?.to_string(),
+                })
+            })
+            .collect();
         Ok(sbo_daemon::http::SyncPointsView {
             format: "sbo-sync-points/1".to_string(),
             genesis: sbo_daemon::http::GenesisView {
@@ -484,6 +500,7 @@ impl RepoApi for DaemonState {
             latest_state_root: StateRootView { block, state_root: hex::encode(root) },
             snapshots,
             checkpoints,
+            attestations,
         })
     }
 
@@ -733,6 +750,164 @@ async fn checkpoint_if_due(
             tracing::error!("checkpoint: snapshot generation failed at block {}: {}", head, e)
         }
     }
+}
+
+/// Post `checkpoint-attestation.v1` for any on-chain checkpoint this node has
+/// INDEPENDENTLY reached and reproduced (State Commitment §Checkpoint
+/// Attestations). Attestations lag the checkpoint: we attest a past height `h`
+/// from our own recorded state root at `h`, never a root we did not compute.
+async fn attest_if_due(
+    state: &Arc<RwLock<DaemonState>>,
+    cfg: &sbo_daemon::config::AttestConfig,
+    turbo: &TurboDaClient,
+    attest_key: Option<&sbo_core::crypto::SigningKey>,
+    attested: &mut std::collections::HashSet<u64>,
+    now: i64,
+) {
+    if !cfg.enabled {
+        return;
+    }
+    let (Some(key), Some(attestor)) = (attest_key, cfg.attestor.as_deref()) else {
+        return;
+    };
+
+    // Snapshot what we need under a short read lock: our head and the state db.
+    let (head, state_db) = {
+        let st = state.read().await;
+        let Some(repo) = st.repos.list().next() else {
+            return;
+        };
+        match repo.state_db() {
+            Ok(db) => (repo.head, db),
+            Err(e) => {
+                tracing::warn!("attest: cannot open state db: {e}");
+                return;
+            }
+        }
+    };
+    if head == 0 {
+        return;
+    }
+
+    // On-chain checkpoints we might attest.
+    let checkpoints = match state_db.list_objects_by_path_prefix("/sys/checkpoints/") {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("attest: list checkpoints failed: {e}");
+            return;
+        }
+    };
+
+    let att_path = match sbo_core::message::Path::parse(&format!(
+        "/u/{attestor}/attestations/checkpoints/"
+    )) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("attest: invalid attestor '{attestor}': {e}");
+            return;
+        }
+    };
+
+    for o in checkpoints {
+        let v: serde_json::Value = match serde_json::from_slice(&o.payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let (Some(block), Some(cp_root)) = (
+            v.get("block").and_then(|b| b.as_u64()),
+            v.get("state_root").and_then(|r| r.as_str()),
+        ) else {
+            continue;
+        };
+
+        // Only attest heights we've independently reached, once each.
+        if block > head || attested.contains(&block) {
+            continue;
+        }
+
+        // Skip if an attestation already exists on chain (survives restarts).
+        let att_id = match sbo_core::message::Id::new(&format!("block-{block}")) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        if state_db.object_exists_at_path_id(&att_path, &att_id).unwrap_or(false) {
+            attested.insert(block);
+            continue;
+        }
+
+        // Independent verification: compare OUR recorded root at `block` to the
+        // checkpoint's. If we never recorded it (e.g. bootstrapped past it), we
+        // cannot independently vouch → skip. Mismatch → divergence alarm, no post.
+        let our_root = match state_db.get_state_root_at_block(block) {
+            Ok(Some(r)) => hex::encode(r),
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("attest: root lookup for block {block} failed: {e}");
+                continue;
+            }
+        };
+        if our_root != cp_root {
+            tracing::error!(
+                "attest: DIVERGENCE at block {block}: checkpoint root {cp_root} != our root {our_root}; not attesting"
+            );
+            attested.insert(block); // don't re-alarm every tick
+            continue;
+        }
+
+        let wire = build_attestation_wire(key, attestor, block, &our_root, now);
+        match turbo.submit_raw(&wire).await {
+            Ok(_) => {
+                tracing::info!("posted checkpoint-attestation.v1 for block {block}");
+                attested.insert(block);
+            }
+            Err(e) => tracing::error!("attest: submit for block {block} failed: {e}"),
+        }
+    }
+}
+
+/// Build a signed `checkpoint-attestation.v1` wire message: the attestor's own
+/// signed `(block, state_root)` claim, written under its `/u/<attestor>/` namespace.
+fn build_attestation_wire(
+    key: &sbo_core::crypto::SigningKey,
+    attestor: &str,
+    block: u64,
+    state_root_hex: &str,
+    now_secs: i64,
+) -> Vec<u8> {
+    use sbo_core::crypto::{ContentHash, Signature};
+    use sbo_core::message::{Action, Id, Message, ObjectType, Path};
+
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "subject": format!("/sys/checkpoints/block-{block}"),
+        "block": block,
+        "state_root": state_root_hex,
+        "method": "replay",
+        "issued_at": now_secs.max(0),
+    }))
+    .expect("checkpoint-attestation.v1 payload serialization");
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse(&format!("/u/{attestor}/attestations/checkpoints/")).unwrap(),
+        id: Id::new(&format!("block-{block}")).unwrap(),
+        object_type: ObjectType::Object,
+        signing_key: key.public_key(),
+        signature: Signature([0u8; 64]),
+        content_type: Some("application/json".to_string()),
+        content_hash: Some(ContentHash::sha256(&payload)),
+        payload: Some(payload),
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: Some("checkpoint-attestation.v1".to_string()),
+        policy_ref: None,
+        related: None,
+        hlc: Some(format!("{}.0", (now_secs.max(0) as u128) * 1000)),
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+    };
+    msg.sign(key);
+    sbo_core::wire::serialize(&msg)
 }
 
 /// Load the checkpoint-authority signing key from a JSON file `{"secret_key":"<hex>"}`.
@@ -1059,6 +1234,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
     let turbo_config = config.turbo_da.clone();
     let light_mode = config.light.enabled;
     let checkpoint_config = config.checkpoint.clone();
+    let attest_config = config.attest.clone();
     let sync_handle = tokio::spawn(async move {
         // Give IPC server time to start
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1106,6 +1282,35 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         } else {
             None
         };
+
+        // Attestor state (State Commitment §Checkpoint Attestations). When enabled,
+        // this node posts checkpoint-attestation.v1 for checkpoints it has
+        // independently reached and reproduced. `attested` tracks heights we have
+        // already posted this process, so we don't resubmit every tick.
+        let attest_key = if attest_config.enabled {
+            match attest_config.key_file.as_ref() {
+                Some(p) => match load_checkpoint_key(p) {
+                    Ok(k) => {
+                        tracing::info!(
+                            "checkpoint attestation enabled (attestor={})",
+                            attest_config.attestor.as_deref().unwrap_or("<unset>")
+                        );
+                        Some(k)
+                    }
+                    Err(e) => {
+                        tracing::error!("attest enabled but key load failed: {e}; attestation disabled");
+                        None
+                    }
+                },
+                None => {
+                    tracing::error!("attest enabled but no key_file set; attestation disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut attested: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         loop {
             // Get config with short lock
@@ -1339,6 +1544,19 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                 &turbo,
                 checkpoint_key.as_ref(),
                 &mut prev_checkpoint,
+                unix_now(),
+            )
+            .await;
+
+            // Post checkpoint attestations for checkpoints we've independently
+            // reached (State Commitment §Checkpoint Attestations). Lags the
+            // checkpoint: attests past heights from our own recorded roots.
+            attest_if_due(
+                &state_for_sync,
+                &attest_config,
+                &turbo,
+                attest_key.as_ref(),
+                &mut attested,
                 unix_now(),
             )
             .await;
