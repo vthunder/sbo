@@ -153,7 +153,10 @@ pub fn prove_continuation(
         .map_err(|e| ProverError::SerializationError(format!("Invalid previous receipt: {}", e)))?;
 
     let prev_journal = prev_receipt.journal.bytes.clone();
-    let prev_output: BlockProofOutput = postcard::from_bytes(&prev_journal)
+    // Decode via risc0 (journal is word-serde encoded), not postcard — see guest.
+    let prev_output: BlockProofOutput = prev_receipt
+        .journal
+        .decode()
         .map_err(|e| ProverError::SerializationError(e.to_string()))?;
 
     let input = BlockProofInput {
@@ -194,7 +197,10 @@ pub fn prove_continuation_with_da(
         .map_err(|e| ProverError::SerializationError(format!("Invalid previous receipt: {}", e)))?;
 
     let prev_journal = prev_receipt.journal.bytes.clone();
-    let prev_output: BlockProofOutput = postcard::from_bytes(&prev_journal)
+    // Decode via risc0 (journal is word-serde encoded), not postcard — see guest.
+    let prev_output: BlockProofOutput = prev_receipt
+        .journal
+        .decode()
         .map_err(|e| ProverError::SerializationError(e.to_string()))?;
 
     let input = BlockProofInput {

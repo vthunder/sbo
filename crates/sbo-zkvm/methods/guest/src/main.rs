@@ -210,8 +210,12 @@ fn verify_header_chain(input: &BlockProofInput) {
         env::verify(guest_id, prev_journal)
             .expect("Previous proof verification failed");
 
-        // Decode previous output for chain continuity checks
-        let prev_output: BlockProofOutput = postcard::from_bytes(prev_journal)
+        // Decode previous output for chain continuity checks. The journal was
+        // written by env::commit (risc0 word serde), so it MUST be read back with
+        // risc0 serde, not postcard — postcard's varint u64 desyncs every field
+        // after block_number (this was the latent bug that made recursion unusable
+        // once the image-id fix let env::verify actually run).
+        let prev_output: BlockProofOutput = risc0_zkvm::serde::from_slice(prev_journal)
             .expect("Invalid previous journal");
 
         // Verify header chain continuity
