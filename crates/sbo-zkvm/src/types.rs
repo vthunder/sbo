@@ -267,6 +267,14 @@ pub struct BlockProofInput {
     /// Hash of raw cell data before SCALE decoding
     /// Guest computes this from row_data and verifies
     pub raw_cells_hash: [u8; 32],
+
+    /// This guest's OWN image id (`SBO_ZKVM_GUEST_ID`), supplied by the host.
+    /// Used by the guest to recursively `env::verify` the previous proof, and
+    /// committed to the journal so the external verifier can bind the whole chain
+    /// to the real guest — solving the self-recursion chicken-and-egg without a
+    /// two-stage build or a hardcoded image id (see verifier + guest main).
+    #[serde(default)]
+    pub guest_image_id: [u32; 8],
 }
 
 /// Output committed by the zkVM (the "journal")
@@ -286,6 +294,14 @@ pub struct BlockProofOutput {
 
     /// Data root that was verified (for DA anchoring)
     pub data_root: [u8; 32],
+
+    /// The guest image id this proof's chain was recursively verified against
+    /// (echoes `BlockProofInput::guest_image_id`). The external verifier asserts
+    /// this equals the real `SBO_ZKVM_GUEST_ID`, which — because the guest commits
+    /// exactly the id it used for `env::verify` — inductively binds the entire
+    /// recursive chain to the genuine guest.
+    #[serde(default)]
+    pub verified_with_image_id: [u32; 8],
 
     /// Protocol version
     pub version: u32,
@@ -317,6 +333,7 @@ impl Default for BlockProofInput {
             row_data: Vec::new(),
             actions_data: Vec::new(),
             raw_cells_hash: [0u8; 32],
+            guest_image_id: [0u32; 8],
         }
     }
 }
@@ -427,6 +444,7 @@ mod tests {
             header_data: Some(header_data),
             row_data,
             raw_cells_hash: [0u8; 32],
+            guest_image_id: [0u32; 8],
         };
 
         // Verify serialization works

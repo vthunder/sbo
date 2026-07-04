@@ -28,3 +28,7 @@ pub use verifier::{
     verify_receipt, verify_block_proof, verify_block_proof_with_da,
     verify_proof_chain, get_receipt_kind, VerifierError
 };
+
+/// This build's guest image id — the identity a verifier checks every proof (and,
+/// via the recursion binding, the whole chain) against.
+pub use sbo_zkvm_methods::SBO_ZKVM_GUEST_ID;

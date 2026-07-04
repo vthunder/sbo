@@ -38,6 +38,18 @@ pub fn verify_receipt(receipt_bytes: &[u8]) -> Result<BlockProofOutput, Verifier
         .decode()
         .map_err(|e| VerifierError::JournalError(e.to_string()))?;
 
+    // Bind the RECURSIVE chain to the genuine guest. `receipt.verify` above proves
+    // only the outermost proof ran our guest; the guest committed the image id it
+    // used to `env::verify` its predecessor. Requiring that id to be our own guest
+    // id propagates the guarantee inductively down the whole chain. (A proof with
+    // no predecessor still declares the id, so this holds uniformly.)
+    if output.verified_with_image_id != SBO_ZKVM_GUEST_ID {
+        return Err(VerifierError::InvalidProof(format!(
+            "recursive chain bound to a foreign guest image id: {:?}",
+            output.verified_with_image_id
+        )));
+    }
+
     Ok(output)
 }
 

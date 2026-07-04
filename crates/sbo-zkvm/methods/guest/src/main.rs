@@ -102,6 +102,9 @@ pub struct BlockProofInput {
     pub row_data: Vec<RowData>,
     pub actions_data: Vec<u8>,
     pub raw_cells_hash: [u8; 32],
+    // Must match host BlockProofInput field ORDER (postcard is not self-describing).
+    #[serde(default)]
+    pub guest_image_id: [u32; 8],
 }
 
 /// Output committed by the zkVM
@@ -112,6 +115,9 @@ pub struct BlockProofOutput {
     pub block_number: u64,
     pub block_hash: [u8; 32],
     pub data_root: [u8; 32],
+    // Must match host BlockProofOutput field ORDER (postcard is not self-describing).
+    #[serde(default)]
+    pub verified_with_image_id: [u32; 8],
     pub version: u32,
 }
 
@@ -135,13 +141,16 @@ fn main() {
         "prev_state_root doesn't match witness"
     );
 
-    // 4. Commit output
+    // 4. Commit output. `verified_with_image_id` echoes the id this proof used to
+    // recursively verify its predecessor (see verify_header_chain); the external
+    // verifier asserts it equals the real SBO_ZKVM_GUEST_ID, binding the chain.
     let output = BlockProofOutput {
         prev_state_root: input.prev_state_root,
         new_state_root,
         block_number: input.block_number,
         block_hash: input.block_hash,
         data_root,
+        verified_with_image_id: input.guest_image_id,
         version: 1,
     };
 
@@ -184,22 +193,19 @@ fn verify_header_chain(input: &BlockProofInput) {
 
         let prev_journal = input.prev_journal.as_ref().unwrap();
 
-        // Cryptographically verify previous proof using RISC Zero composition
-        // This adds an "assumption" that must be resolved during proving
+        // Cryptographically verify the previous proof using RISC Zero composition
+        // (adds an "assumption" resolved during proving from the prev receipt).
         //
-        // TODO: For self-recursion, we need our own image ID (sbo_zkvm_methods::SBO_ZKVM_GUEST_ID)
-        // This creates a chicken-and-egg problem: the guest needs to be built to get the ID,
-        // but the ID is needed to build the guest. Solutions:
-        // 1. Two-stage build: build once, extract ID, rebuild with ID embedded
-        // 2. Include generated file: use include! macro to inject ID at build time
-        // 3. Accept ID as input: pass the image ID as part of BlockProofInput
-        //
-        // For now, we use a placeholder guest ID. This will be updated in a future task
-        // to use the actual generated ID through a proper build mechanism.
-        //
-        // Placeholder ID (will be replaced with actual sbo_zkvm_methods::SBO_ZKVM_GUEST_ID)
-        let guest_id_words: [u32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
-        let guest_id = Digest::from(guest_id_words);
+        // Self-recursion image-id: the guest cannot hardcode its OWN image id (the
+        // id is only known after the guest is built). Instead the host passes it as
+        // `input.guest_image_id`, we verify the predecessor against it, AND commit
+        // it to the journal. The external verifier then asserts the committed id ==
+        // the real SBO_ZKVM_GUEST_ID: a chain that verified against any other id
+        // commits that other id and is rejected, and the guest cannot commit our id
+        // while verifying against a different one — so the whole chain is bound to
+        // the genuine guest with no two-stage build. A prev proof made by a
+        // different guest would fail this env::verify outright.
+        let guest_id = Digest::from(input.guest_image_id);
 
         env::verify(guest_id, prev_journal)
             .expect("Previous proof verification failed");

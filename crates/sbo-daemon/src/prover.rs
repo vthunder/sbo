@@ -354,6 +354,7 @@ impl Prover {
             header_data,  // Use DA data from block
             row_data,     // Use DA data from block
             raw_cells_hash,  // Use DA data from block
+            guest_image_id: [0u32; 8], // set authoritatively inside prove_block
         };
 
         // Generate proof

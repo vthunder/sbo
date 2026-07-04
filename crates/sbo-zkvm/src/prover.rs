@@ -1,7 +1,7 @@
 //! Proof generation for SBO blocks
 
 use crate::types::{BlockProofInput, BlockProofOutput, StateTransitionWitness};
-use sbo_zkvm_methods::SBO_ZKVM_GUEST_ELF;
+use sbo_zkvm_methods::{SBO_ZKVM_GUEST_ELF, SBO_ZKVM_GUEST_ID};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,6 +33,13 @@ pub struct ProofReceipt {
 #[cfg(feature = "prove")]
 pub fn prove_block(input: BlockProofInput, prev_receipt: Option<&[u8]>) -> Result<ProofReceipt, ProverError> {
     use risc0_zkvm::{default_prover, ExecutorEnv, Receipt};
+
+    // The proof is generated with SBO_ZKVM_GUEST_ELF, so its image id is
+    // SBO_ZKVM_GUEST_ID. Force the guest to recurse against (and commit) exactly
+    // that id, regardless of what the caller populated — the single source of
+    // truth for the self-recursion binding (see verifier + guest main).
+    let mut input = input;
+    input.guest_image_id = SBO_ZKVM_GUEST_ID;
 
     // Build executor environment
     let mut env_builder = ExecutorEnv::builder();
@@ -96,6 +103,7 @@ pub fn prove_genesis(
         header_data: None,
         row_data: Vec::new(),
         raw_cells_hash: [0u8; 32],
+        guest_image_id: SBO_ZKVM_GUEST_ID, // authoritative value set in prove_block
     };
 
     prove_block(input, None)
@@ -123,6 +131,7 @@ pub fn prove_genesis_with_da(
         header_data: Some(header_data),
         row_data,
         raw_cells_hash,
+        guest_image_id: SBO_ZKVM_GUEST_ID, // authoritative value set in prove_block
     };
 
     prove_block(input, None)
@@ -160,6 +169,7 @@ pub fn prove_continuation(
         header_data: None,
         row_data: Vec::new(),
         raw_cells_hash: [0u8; 32],
+        guest_image_id: SBO_ZKVM_GUEST_ID, // authoritative value set in prove_block
     };
 
     prove_block(input, Some(prev_receipt_bytes))
@@ -200,6 +210,7 @@ pub fn prove_continuation_with_da(
         header_data: Some(header_data),
         row_data,
         raw_cells_hash,
+        guest_image_id: SBO_ZKVM_GUEST_ID, // authoritative value set in prove_block
     };
 
     prove_block(input, Some(prev_receipt_bytes))
@@ -290,6 +301,11 @@ pub fn prove_block_groth16(
     prev_receipt: Option<&[u8]>,
 ) -> Result<ProofReceipt, ProverError> {
     use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, Receipt};
+
+    // Same self-recursion binding as prove_block: the guest recurses against and
+    // commits this guest's real image id.
+    let mut input = input;
+    input.guest_image_id = SBO_ZKVM_GUEST_ID;
 
     // Build executor environment
     let mut env_builder = ExecutorEnv::builder();
