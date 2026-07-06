@@ -155,6 +155,65 @@ pub async fn bootstrap(db: &StateDb, node_url: &str) -> Result<BootstrapResult> 
     bootstrap_with_policy(db, node_url, &TrustPolicy::default()).await
 }
 
+/// Provisional fast-sync bootstrap for a client under a **key-pinned** trust
+/// policy (see [`crate::trust`]). The serving node's manifest is treated purely
+/// as a HINT for *which* snapshot height to load — it is NOT trusted to establish
+/// the root. We pick the freshest snapshot that (a) has an advertised checkpoint
+/// and (b) already advertises at least `min_attestations` attestations at that
+/// height, so the walk-forward is guaranteed to encounter the on-chain evidence
+/// below the current tip. The loaded root is verified only against the snapshot
+/// bytes ([`verify_and_load`]); trust is deferred to the on-chain walk-forward.
+///
+/// Returns the anchor `(block, computed_root)`. `trust` is always
+/// [`RootTrust::ServingNode`] here — it reflects that nothing is trusted yet.
+pub async fn bootstrap_provisional(
+    db: &StateDb,
+    node_url: &str,
+    min_attestations: usize,
+) -> Result<BootstrapResult> {
+    let manifest = fetch_manifest(node_url).await?;
+    if manifest.snapshots.is_empty() {
+        return Err(anyhow!("node advertises no snapshots"));
+    }
+
+    // Newest-first: prefer the freshest height that has a checkpoint AND enough
+    // advertised attestations for the walk-forward to reach threshold. Fall back
+    // to the freshest height with a checkpoint, else the freshest snapshot.
+    let att_count = |block: u64| -> usize {
+        manifest.attestations.iter().filter(|a| a.block == block).count()
+    };
+    let with_checkpoint = |block: u64| manifest.checkpoints.iter().any(|c| c.block == block);
+
+    let chosen = manifest
+        .snapshots
+        .iter()
+        .find(|s| with_checkpoint(s.block) && att_count(s.block) >= min_attestations)
+        .or_else(|| manifest.snapshots.iter().find(|s| with_checkpoint(s.block)))
+        .unwrap_or(&manifest.snapshots[0]);
+
+    let block = chosen.block;
+    // Use the advertised checkpoint root if present (matches the on-chain
+    // checkpoint's convention), else the snapshot's own advertised root; either
+    // way `verify_and_load` confirms the snapshot bytes reconstruct it.
+    let root_hex = manifest
+        .checkpoints
+        .iter()
+        .find(|c| c.block == block)
+        .map(|c| c.state_root.clone())
+        .unwrap_or_else(|| chosen.state_root.clone());
+    let trusted_root = hex_to_32(&root_hex)?;
+
+    let objects = fetch_snapshot(node_url, block).await?;
+    verify_and_load(db, &objects, trusted_root)?;
+
+    Ok(BootstrapResult {
+        block,
+        state_root: trusted_root,
+        object_count: objects.len(),
+        trust: RootTrust::ServingNode,
+    })
+}
+
 /// Bootstrap under an explicit [`TrustPolicy`]. Selects the **freshest snapshot
 /// whose checkpoint root already satisfies the policy** (§Checkpoint Attestations
 /// — freshest already-attested), so trust is established immediately with no

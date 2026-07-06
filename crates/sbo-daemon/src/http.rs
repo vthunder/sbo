@@ -52,6 +52,18 @@ impl ApiError {
     pub fn not_implemented(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_IMPLEMENTED, message: msg.into() }
     }
+    /// 503 — reads refused while the fast-sync trust anchor is unverified.
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::SERVICE_UNAVAILABLE, message: msg.into() }
+    }
+}
+
+/// Refuse a state read while the fast-sync trust gate is active.
+fn check_read_gate<S: RepoApi>(state: &S) -> Result<(), ApiError> {
+    match state.read_gate_reason() {
+        Some(reason) => Err(ApiError::unavailable(reason)),
+        None => Ok(()),
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -167,6 +179,14 @@ pub struct SubmitResultView {
 /// the daemon uses its sole repo (an error if it follows several).
 #[async_trait::async_trait]
 pub trait RepoApi: Send + Sync + 'static {
+    /// Fast-sync trust gate: while a provisional anchor is unverified, state reads
+    /// must be refused (the loaded snapshot root is not yet backed by enough
+    /// on-chain attestors). Returns a human-readable reason when gated, else
+    /// `None`. Default: never gated.
+    fn read_gate_reason(&self) -> Option<String> {
+        None
+    }
+
     fn get_object(
         &self,
         repo: Option<&str>,
@@ -346,6 +366,7 @@ async fn get_object_v1<S: RepoApi>(
     reject_as_of(q.as_of.as_deref())?;
     let with_proof = matches!(q.proof.as_deref(), Some("1") | Some("true"));
     let state = state.read().await;
+    check_read_gate(&*state)?;
     let view = state.get_object(q.repo.as_deref(), &q.path, &q.id, with_proof)?;
     Ok(Json(view))
 }
@@ -377,6 +398,7 @@ async fn list_objects_v1<S: RepoApi>(
         }
     };
     let state = state.read().await;
+    check_read_gate(&*state)?;
     let views = state.list_objects(q.repo.as_deref(), &selector)?;
     Ok(Json(views))
 }
@@ -407,6 +429,7 @@ async fn state_root_v1<S: RepoApi>(
     Query(q): Query<StateRootParams>,
 ) -> Result<Json<StateRootView>, ApiError> {
     let state = state.read().await;
+    check_read_gate(&*state)?;
     let view = state.state_root(q.repo.as_deref())?;
     Ok(Json(view))
 }
@@ -519,6 +542,7 @@ async fn dnssec_v1<S: RepoApi>(
     // /sys/dnssec/<domain> — container path + the domain as the id.
     let raw = {
         let state = state.read().await;
+        check_read_gate(&*state)?;
         state.get_object_raw(q.repo.as_deref(), "/sys/dnssec/", &q.domain)?
     };
     let on_chain = raw.as_deref().and_then(|bytes| {

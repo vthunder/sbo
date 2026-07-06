@@ -20,6 +20,8 @@ pub struct Config {
     pub checkpoint: CheckpointConfig,
     #[serde(default)]
     pub attest: AttestConfig,
+    #[serde(default)]
+    pub trust: TrustConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +167,39 @@ impl Default for AttestConfig {
     }
 }
 
+/// Trust policy for fast-sync clients (State Commitment §Bootstrap and Fast-Sync).
+/// A snapshot root loaded during fast-sync is UNTRUSTED until `threshold` distinct
+/// pinned attestor keys have signed a matching `(block, state_root)` claim on
+/// chain, observed by walking forward from the snapshot height. Attestors are
+/// pinned by PUBLIC KEY (`ed25519:<hex>`), never by name — on-chain name state is
+/// itself untrusted before the anchor is verified, so trusting it is circular.
+///
+/// Empty `attestors` (the default) means no gating: fast-sync keeps the legacy
+/// trust-the-serving-node behaviour, and a full-replay node is unaffected either
+/// way. The checkpoint authority is not special — pin its key here like any other
+/// attestor. For a threshold-2 web-of-trust, pin the `sys-checkpointer` key plus
+/// an independent attestor key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustConfig {
+    /// Pinned attestor public keys, `ed25519:<hex>`.
+    #[serde(default)]
+    pub attestors: Vec<String>,
+    /// Distinct pinned keys that must agree on the anchor root to trust it.
+    #[serde(default)]
+    pub threshold: usize,
+    /// While a fast-sync anchor is unverified, stop tailing and error out after
+    /// this many blocks past the anchor without reaching threshold (0 = never
+    /// give up; keep waiting, gated). Reads stay refused throughout.
+    #[serde(default)]
+    pub timeout_blocks: u64,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self { attestors: Vec::new(), threshold: 0, timeout_blocks: 0 }
+    }
+}
+
 /// Light client mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightModeConfig {
@@ -222,6 +257,7 @@ impl Default for Config {
             light: LightModeConfig::default(),
             checkpoint: CheckpointConfig::default(),
             attest: AttestConfig::default(),
+            trust: TrustConfig::default(),
         }
     }
 }

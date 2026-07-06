@@ -120,6 +120,9 @@ pub struct BlockProcessResult {
     pub has_genesis: bool,
     /// State transition witness for zkVM (touched objects with proofs)
     pub state_witness: StateTransitionWitness,
+    /// Signed checkpoint/attestation claims observed in this block (for the
+    /// fast-sync trust gate). Empty unless such objects appeared.
+    pub trust_evidence: Vec<crate::trust::ObservedClaim>,
 }
 
 /// Compute transition state root: sha256(prev_root || actions_data)
@@ -479,6 +482,7 @@ impl SyncEngine {
                 block_data: Vec::new(),
                 has_genesis: false,
                 state_witness: StateTransitionWitness::default(),
+                trust_evidence: Vec::new(),
             });
         }
 
@@ -546,6 +550,10 @@ impl SyncEngine {
 
         // Track touched objects for witness generation
         let mut touched_objects = TouchedObjects::default();
+        // Trust evidence: signed checkpoint/attestation claims observed this block,
+        // captured from the raw wire message (which still carries the signing key —
+        // the stored object does not). The tail loop feeds these to the TrustGate.
+        let mut trust_evidence: Vec<crate::trust::ObservedClaim> = Vec::new();
 
         tracing::debug!("Processing block {} for app_ids {:?}", block_number, app_ids);
 
@@ -768,6 +776,13 @@ impl SyncEngine {
                                     msg.id,
                                     creator
                                 );
+                                // Trust evidence: this object passed signature +
+                                // authorization, so if it is a checkpoint/attestation
+                                // claim, record the (verified) signing key + root for
+                                // the fast-sync trust gate.
+                                if let Some(claim) = crate::trust::claim_from_message(msg) {
+                                    trust_evidence.push(claim);
+                                }
                             }
                             ValidationResult::Invalid { stage, reason } => {
                                 // Condensed failure log: [block/tx] Action path/id → stage:✗ (reason)
@@ -904,6 +919,7 @@ impl SyncEngine {
             block_data: raw_block_data,
             has_genesis,
             state_witness,
+            trust_evidence,
         })
     }
 

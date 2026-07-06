@@ -15,6 +15,7 @@ pub mod validate;
 pub mod pending;
 pub mod snapshot;
 pub mod bootstrap;
+pub mod trust;
 pub mod state_view;
 pub mod prover;
 

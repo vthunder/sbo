@@ -127,6 +127,10 @@ struct DaemonState {
     /// Shared mempool overlay (validated-but-unconfirmed writes). Cloned into the
     /// sync task so confirmed writes reconcile (evict) their shadows.
     pending: SharedPending,
+    /// Fast-sync trust gate: while a provisional anchor is unverified, read
+    /// handlers refuse. The sync loop promotes it on observing enough on-chain
+    /// attestations. `open` (never gating) for full-replay nodes.
+    trust_gate: sbo_daemon::trust::SharedTrustGate,
 }
 
 impl DaemonState {
@@ -141,6 +145,31 @@ impl DaemonState {
         let rpc = RpcClient::new(config.rpc.clone(), false, false, false);
         let turbo = TurboDaClient::new(config.turbo_da.clone());
 
+        // Load a persisted fast-sync anchor (if `bootstrap` left one) so reads
+        // stay gated until the walk-forward promotes it. Absent for full-replay
+        // nodes → an open gate that never gates.
+        let trust_gate = {
+            let loaded = repos
+                .list()
+                .next()
+                .map(|r| sbo_daemon::state_db_path_for_uri(&r.uri.to_string()))
+                .and_then(|dir| match sbo_daemon::trust::PendingAnchor::load(&dir) {
+                    Ok(Some(anchor)) => sbo_daemon::trust::TrustGate::with_anchor(dir, anchor).ok(),
+                    _ => None,
+                });
+            let gate = loaded.unwrap_or_else(|| {
+                sbo_daemon::trust::TrustGate::open(std::path::PathBuf::from("."))
+            });
+            if gate.is_gated() {
+                tracing::warn!(
+                    "fast-sync trust gate ACTIVE: reads refused until {} pinned attestors verify \
+                     the anchor root on chain",
+                    gate.threshold()
+                );
+            }
+            std::sync::Arc::new(std::sync::RwLock::new(gate))
+        };
+
         Ok(Self {
             config,
             repos,
@@ -149,6 +178,7 @@ impl DaemonState {
             turbo,
             sign_requests: HashMap::new(),
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
+            trust_gate,
         })
     }
 }
@@ -396,6 +426,20 @@ fn read_object_list(
 
 #[async_trait::async_trait]
 impl RepoApi for DaemonState {
+    fn read_gate_reason(&self) -> Option<String> {
+        let gate = self.trust_gate.read().ok()?;
+        if gate.is_gated() {
+            Some(format!(
+                "fast-sync trust not yet established ({}/{} pinned attestors verified the anchor \
+                 root on chain); reads refused",
+                gate.backer_count(),
+                gate.threshold(),
+            ))
+        } else {
+            None
+        }
+    }
+
     fn get_object(
         &self,
         repo: Option<&str>,
@@ -1054,7 +1098,33 @@ async fn main() -> anyhow::Result<()> {
             };
             let db = sbo_daemon::shared_state_db(&dir)?;
             println!("Bootstrapping from {node} into {} …", dir.display());
-            let result = sbo_daemon::bootstrap::bootstrap(&db, &node).await?;
+            // Under a key-pinned trust policy the snapshot root is UNTRUSTED until
+            // verified on chain: load provisionally, persist a pending anchor, and
+            // let `start`'s walk-forward promote it. With no `[trust]` config, keep
+            // the legacy trust-the-node bootstrap.
+            let policy = sbo_daemon::trust::TrustPolicy::from_config(
+                &config.trust.attestors,
+                config.trust.threshold,
+            )?;
+            let result = if policy.is_enforcing() {
+                let min_att = config.trust.threshold.saturating_sub(1);
+                let r = sbo_daemon::bootstrap::bootstrap_provisional(&db, &node, min_att).await?;
+                let anchor = sbo_daemon::trust::PendingAnchor {
+                    block: r.block,
+                    state_root: hex::encode(r.state_root),
+                    attestors: config.trust.attestors.clone(),
+                    threshold: config.trust.threshold,
+                };
+                anchor.save(&dir)?;
+                println!(
+                    "⚠ provisional anchor at block {} — reads GATED until {} pinned attestors \
+                     verify the root on chain (walk-forward via `start`)",
+                    r.block, config.trust.threshold
+                );
+                r
+            } else {
+                sbo_daemon::bootstrap::bootstrap(&db, &node).await?
+            };
             println!(
                 "✓ loaded snapshot at block {} ({} objects); trust={:?}; state_root={}",
                 result.block,
@@ -1228,6 +1298,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
     // Start sync engine
     let state_for_sync = Arc::clone(&state);
     let pending_for_sync = state.read().await.pending.clone();
+    let trust_gate_for_sync = state.read().await.trust_gate.clone();
     let verbose_for_sync = verbose.clone();
     let debug_for_sync = debug.clone();
     let prover_config = config.prover.clone();
@@ -1433,6 +1504,49 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                             // Drive the write-count checkpoint trigger (approximate;
                             // includes the occasional checkpoint object itself).
                             writes_since_checkpoint += result.tx_count as u64;
+
+                            // Fast-sync trust: feed any observed checkpoint/attestation
+                            // claims to the gate. Promotion lifts the read gate; a
+                            // configured timeout past the anchor aborts sync (reads
+                            // stay refused — never a silent downgrade).
+                            if !result.trust_evidence.is_empty() {
+                                if let Ok(mut gate) = trust_gate_for_sync.write() {
+                                    for claim in &result.trust_evidence {
+                                        if let sbo_daemon::trust::Promotion::Promoted { backers } =
+                                            gate.observe(claim)
+                                        {
+                                            tracing::warn!(
+                                                "fast-sync trust ESTABLISHED: {} pinned attestors \
+                                                 verified anchor block {} on chain — reads enabled",
+                                                backers,
+                                                claim.block
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            {
+                                let gate = trust_gate_for_sync.read().ok();
+                                if let Some(g) = gate {
+                                    if g.is_gated() {
+                                        if let Some(anchor) = g.anchor() {
+                                            let timeout = config.trust.timeout_blocks;
+                                            if timeout > 0 && block_num > anchor.block + timeout {
+                                                tracing::error!(
+                                                    "fast-sync trust NOT established within {} blocks \
+                                                     of anchor {} ({}/{} attestors); stopping sync — \
+                                                     reads remain refused",
+                                                    timeout,
+                                                    anchor.block,
+                                                    g.backer_count(),
+                                                    g.threshold(),
+                                                );
+                                                return Ok::<(), anyhow::Error>(());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             // Genesis verification: when this block is a repo's genesis
                             // anchor and an expected hash was recorded, verify the
