@@ -879,11 +879,16 @@ async fn attest_if_due(
             continue;
         }
 
-        // Independent verification: compare OUR recorded root at `block` to the
-        // checkpoint's. If we never recorded it (e.g. bootstrapped past it), we
-        // cannot independently vouch → skip. Mismatch → divergence alarm, no post.
-        let our_root = match state_db.get_state_root_at_block(block) {
-            Ok(Some(r)) => hex::encode(r),
+        // Independent verification: compare OUR root AS OF `block` to the
+        // checkpoint's. Roots are recorded only at blocks where state CHANGED, but
+        // a checkpoint commits the root as of an arbitrary height `block` (often a
+        // quiet block), so we must use the last recorded root at-or-before `block`
+        // (the root as of `block`), not an exact-height lookup — otherwise every
+        // checkpoint at a non-change height is silently skipped and nothing is ever
+        // attested. If we have no root at or before `block` (bootstrapped past it),
+        // we cannot independently vouch → skip. Mismatch → divergence alarm.
+        let our_root = match state_db.get_state_root_at_or_before(block) {
+            Ok(Some((_, r))) => hex::encode(r),
             Ok(None) => continue,
             Err(e) => {
                 tracing::warn!("attest: root lookup for block {block} failed: {e}");
