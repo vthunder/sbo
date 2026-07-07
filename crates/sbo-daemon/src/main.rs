@@ -939,7 +939,12 @@ fn build_attestation_wire(
         content_type: Some("application/json".to_string()),
         content_hash: Some(ContentHash::sha256(&payload)),
         payload: Some(payload),
-        owner: None,
+        // Declare the attestor identity as Owner so the `/u/$owner/**` grant
+        // matches: `$owner` is the DECLARED owner (never path-derived), and a
+        // create with no owner leaves `$owner` undefined → the grant fails closed.
+        // `attestor` MUST be a registered identity the signing key controls (a
+        // /sys/names name or a domain-certified email), never a bare key.
+        owner: Some(Id::new(attestor).expect("attestor identity is a valid Id")),
         creator: None,
         content_encoding: None,
         content_schema: Some("checkpoint-attestation.v1".to_string()),

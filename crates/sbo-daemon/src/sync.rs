@@ -760,6 +760,21 @@ impl SyncEngine {
                             }
                         };
 
+                        // Fast-sync trust evidence is SIGNATURE-rooted, and must be
+                        // captured independently of L2 write-authorization: a
+                        // fast-synced node lacks the full genesis policy chain to
+                        // L2-validate a `/sys/checkpoints` write ("No applicable
+                        // policy found"), yet trust rests only on a PINNED KEY having
+                        // signed the `(block, root)` claim, observed in a DA block.
+                        // The gate's anchor-binding (height + root match) prevents a
+                        // replayed old claim from counting. So verify the signature
+                        // here and emit evidence regardless of the L2 outcome below.
+                        if let Some(claim) = crate::trust::claim_from_message(msg) {
+                            if sbo_core::message::verify_message(msg).is_ok() {
+                                trust_evidence.push(claim);
+                            }
+                        }
+
                         // Validate message against state. The L2 attribution
                         // layer checks attribution windows against the DA block's
                         // inclusion time (from its `timestamp.set` inherent).
@@ -776,13 +791,6 @@ impl SyncEngine {
                                     msg.id,
                                     creator
                                 );
-                                // Trust evidence: this object passed signature +
-                                // authorization, so if it is a checkpoint/attestation
-                                // claim, record the (verified) signing key + root for
-                                // the fast-sync trust gate.
-                                if let Some(claim) = crate::trust::claim_from_message(msg) {
-                                    trust_evidence.push(claim);
-                                }
                             }
                             ValidationResult::Invalid { stage, reason } => {
                                 // Condensed failure log: [block/tx] Action path/id → stage:✗ (reason)
