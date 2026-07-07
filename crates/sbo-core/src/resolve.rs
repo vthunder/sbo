@@ -89,9 +89,31 @@ where
             if let (Some(pd), Some((local, domain))) =
                 (primary_domain, current.split_once('@'))
             {
-                if domain == pd && !local.is_empty() && lookup(local).is_some() {
-                    current = local.to_string();
-                    continue;
+                if domain == pd && !local.is_empty() {
+                    match lookup(local) {
+                        // A key-rooted record is the identity's on-chain control
+                        // policy and wins over browserid (the sovereignty upgrade):
+                        // resolve through it to the pinned key.
+                        Some(NameRecord::KeyRooted(_)) => {
+                            current = local.to_string();
+                            continue;
+                        }
+                        // Email-rooted back to this SAME canonical email: the record
+                        // merely affirms browserid auth for `<local>@<domain>`. Follow-
+                        // ing it would loop email→local→email forever (→ Unresolved),
+                        // so terminate here at the browserid email controller.
+                        Some(NameRecord::EmailRooted(ref o)) if o == &current => {
+                            return Controller::Email(current);
+                        }
+                        // Email-rooted to a DIFFERENT owner (e.g. an external parent
+                        // email): follow the indirection.
+                        Some(NameRecord::EmailRooted(_)) => {
+                            current = local.to_string();
+                            continue;
+                        }
+                        // No record: a plain browserid-attributable email.
+                        None => {}
+                    }
                 }
             }
             return Controller::Email(current);
@@ -186,6 +208,45 @@ mod tests {
     }
 
     // --- Phase 3: primary-domain email→name sovereignty override -----------
+
+    // A `/sys/names/<local>` record email-rooted to its OWN canonical
+    // `<local>@<domain>` must terminate at that browserid email — NOT self-loop
+    // to Unresolved. (mingo-w41d: without this, no email-rooted handle resolves
+    // on a domain repo, and it can never authorize its own writes.)
+    #[test]
+    fn primary_domain_email_rooted_to_self_resolves_to_email_not_loop() {
+        let mut map = HashMap::new();
+        map.insert(
+            "attestor".to_string(),
+            NameRecord::EmailRooted("attestor@mingo.place".to_string()),
+        );
+        let lookup = lookup_from(map);
+        // Starting from the email form.
+        assert_eq!(
+            resolve_controller("attestor@mingo.place", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Email("attestor@mingo.place".to_string())
+        );
+        // And from the bare local name.
+        assert_eq!(
+            resolve_controller("attestor", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Email("attestor@mingo.place".to_string())
+        );
+    }
+
+    // Email-rooted to a DIFFERENT (external parent) email still follows through.
+    #[test]
+    fn primary_domain_email_rooted_to_external_parent_follows_through() {
+        let mut map = HashMap::new();
+        map.insert(
+            "attestor".to_string(),
+            NameRecord::EmailRooted("svc@sandmill.org".to_string()),
+        );
+        let lookup = lookup_from(map);
+        assert_eq!(
+            resolve_controller("attestor@mingo.place", &lookup, DEFAULT_HOP_LIMIT, Some("mingo.place")),
+            Controller::Email("svc@sandmill.org".to_string())
+        );
+    }
 
     #[test]
     fn primary_domain_email_resolves_through_key_record() {

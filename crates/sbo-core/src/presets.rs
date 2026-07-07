@@ -400,6 +400,53 @@ pub fn claim_name(signing_key: &SigningKey, name: &str) -> Vec<u8> {
     wire::serialize(&msg)
 }
 
+/// Claim a KEY-ROOTED name (`identity.v1`) carrying browserid `Auth-Cert` +
+/// DNSSEC `Auth-Evidence`. On a domain repo, claiming `/sys/names/<name>` maps to
+/// `<name>@<domain>` and the name-claim gate requires proving control of that
+/// email — so a key-rooted claim must still attach attribution. The RESULTING
+/// record is key-rooted (the pubkey lives in the identity JWT), so the identity's
+/// subsequent writes authorize by SIGNATURE (no per-write cert), while this one
+/// claim proves the right to occupy the domain handle. This is the "public key"
+/// auth method for a domain handle.
+pub fn claim_name_attributed(
+    signing_key: &SigningKey,
+    name: &str,
+    auth_cert: &str,
+    auth_evidence: &str,
+) -> Vec<u8> {
+    let public_key = signing_key.public_key();
+
+    let jwt = crate::jwt::create_self_signed_identity(signing_key, name, None)
+        .expect("JWT creation should not fail");
+    let payload_bytes = jwt.as_bytes().to_vec();
+    let content_hash = ContentHash::sha256(&payload_bytes);
+
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(name).unwrap(),
+        object_type: ObjectType::Object,
+        signing_key: public_key,
+        signature: crate::crypto::Signature([0u8; 64]),
+        content_type: Some("application/jwt".to_string()),
+        content_hash: Some(content_hash),
+        payload: Some(payload_bytes),
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: Some("identity.v1".to_string()),
+        policy_ref: None,
+        related: None,
+        hlc: None,
+        prev: None,
+        auth_cert: Some(auth_cert.to_string()),
+        auth_evidence: Some(auth_evidence.to_string()),
+    };
+    msg.sign(signing_key);
+
+    wire::serialize(&msg)
+}
+
 /// Claim a name with a profile link
 pub fn claim_name_with_profile(signing_key: &SigningKey, name: &str, profile_path: &str) -> Vec<u8> {
     let public_key = signing_key.public_key();

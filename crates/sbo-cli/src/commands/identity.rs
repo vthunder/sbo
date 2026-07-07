@@ -15,6 +15,7 @@ pub async fn create(
     uri: &str,
     name: &str,
     key_alias: Option<&str>,
+    cert_path: Option<&std::path::Path>,
     display_name: Option<&str>,
     description: Option<&str>,
     avatar: Option<&str>,
@@ -42,8 +43,27 @@ pub async fn create(
         None
     };
 
-    // Create identity JWT using presets
-    let wire_bytes = if profile_path.is_some() {
+    // Create identity JWT using presets. A KEY-ROOTED identity.v1; with `--cert`
+    // it carries browserid Auth-Cert + captured DNSSEC Auth-Evidence so it passes
+    // the primary-domain name-claim gate (claiming <name> proves <name>@<domain>),
+    // while the record itself remains key-rooted (writes signed by the key).
+    let wire_bytes = if let Some(cert_path) = cert_path {
+        let auth_cert = std::fs::read_to_string(cert_path)
+            .map_err(|e| anyhow::anyhow!("read cert {}: {}", cert_path.display(), e))?
+            .trim()
+            .to_string();
+        let cert = browserid_core::Certificate::parse(&auth_cert)
+            .map_err(|e| anyhow::anyhow!("parse cert: {}", e))?;
+        let issuer = cert.issuer().to_string();
+        let resolver = dns_resolver()?;
+        eprintln!("Key-rooted identity.v1 for '{name}' with cert (issuer {issuer}); capturing DNSSEC evidence …");
+        let proof = sbo_capture::capture_evidence(resolver, &issuer)
+            .await
+            .map_err(|e| anyhow::anyhow!("capture evidence for {issuer}: {}", e))?;
+        let auth_evidence = sbo_core::authorize::encode_auth_evidence_inline(&proof);
+        eprintln!("  ✓ evidence captured for {issuer}");
+        sbo_core::presets::claim_name_attributed(&signing_key, name, &auth_cert, &auth_evidence)
+    } else if profile_path.is_some() {
         sbo_core::presets::claim_name_with_profile(
             &signing_key,
             name,

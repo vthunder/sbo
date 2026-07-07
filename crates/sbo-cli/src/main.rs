@@ -1499,6 +1499,7 @@ async fn main() -> anyhow::Result<()> {
                             &uri,
                             &name,
                             key.as_deref(),
+                            cert.as_deref(),
                             display_name.as_deref(),
                             description.as_deref(),
                             avatar.as_deref(),
