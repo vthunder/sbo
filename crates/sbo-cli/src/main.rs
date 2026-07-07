@@ -277,6 +277,13 @@ enum IdCommands {
         #[arg(long)]
         key: Option<String>,
 
+        /// Path to a pre-minted browserid cert (with `--email`): skip the
+        /// interactive broker capture and use this cert as `Auth-Cert`. DNSSEC
+        /// `Auth-Evidence` is still captured for the cert's issuer. For
+        /// programmatic provisioning (e.g. via the IdP `/admin/provision`).
+        #[arg(long)]
+        cert: Option<PathBuf>,
+
         /// Display name (e.g., "Alice Smith")
         #[arg(long)]
         display_name: Option<String>,
@@ -1470,7 +1477,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Id(id_cmd) => {
             match id_cmd {
-                IdCommands::Create { uri, name, email, key, display_name, description, avatar, website, binding, dry_run, no_wait } => {
+                IdCommands::Create { uri, name, email, key, cert, display_name, description, avatar, website, binding, dry_run, no_wait } => {
                     if let Some(email_addr) = email {
                         // Email-rooted (browserid + DNSSEC) identity flow.
                         // `name` is an optional explicit handle (required to
@@ -1480,6 +1487,8 @@ async fn main() -> anyhow::Result<()> {
                             uri.as_deref(),
                             name.as_deref(),
                             key.as_deref(),
+                            cert.as_deref(),
+                            dry_run,
                             no_wait,
                         ).await?;
                     } else {

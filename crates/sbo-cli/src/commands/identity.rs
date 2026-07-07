@@ -784,6 +784,42 @@ async fn capture_for(
     Ok((signing_key, captured))
 }
 
+/// Like [`capture_for`], but use a PRE-MINTED browserid cert (e.g. from the IdP
+/// `/admin/provision` endpoint) instead of the interactive broker capture. The
+/// DNSSEC `Auth-Evidence` is still captured live for the cert's issuer, so the
+/// resulting attribution verifies identically. The signer key must match the
+/// cert's certified public key (checked downstream by the verifier).
+async fn capture_with_cert(
+    email: &str,
+    key_alias: Option<&str>,
+    cert_path: &std::path::Path,
+) -> Result<(sbo_core::crypto::SigningKey, sbo_capture::CapturedAttribution)> {
+    let keyring = Keyring::open()?;
+    let alias = keyring.resolve_alias(key_alias)?;
+    let signing_key = keyring.get_signing_key(&alias)?;
+
+    let auth_cert = std::fs::read_to_string(cert_path)
+        .map_err(|e| anyhow::anyhow!("read cert {}: {}", cert_path.display(), e))?
+        .trim()
+        .to_string();
+
+    // The evidence must cover the cert's ISSUER (the provider whose key signed
+    // it), since the verifier extracts `_browserid.<iss>` from the proof.
+    let cert = browserid_core::Certificate::parse(&auth_cert)
+        .map_err(|e| anyhow::anyhow!("parse cert: {}", e))?;
+    let issuer = cert.issuer().to_string();
+
+    let resolver = dns_resolver()?;
+    eprintln!("Using pre-minted cert (issuer {issuer}) for {email}; capturing DNSSEC evidence …");
+    let proof = sbo_capture::capture_evidence(resolver, &issuer)
+        .await
+        .map_err(|e| anyhow::anyhow!("capture evidence for {issuer}: {}", e))?;
+    let auth_evidence = sbo_core::authorize::encode_auth_evidence_inline(&proof);
+
+    eprintln!("  ✓ evidence captured for {issuer}");
+    Ok((signing_key, sbo_capture::CapturedAttribution { auth_cert, auth_evidence, issuer }))
+}
+
 /// Import an email identity into the local keyring.
 ///
 /// Captures attribution to *verify* the active key controls the email, then
@@ -817,6 +853,8 @@ pub async fn create_domain_certified(
     uri: Option<&str>,
     name_override: Option<&str>,
     key_alias: Option<&str>,
+    cert_path: Option<&std::path::Path>,
+    dry_run: bool,
     no_wait: bool,
 ) -> Result<()> {
     let (local_part, email_dom) = sbo_core::dns::parse_email(email)
@@ -856,7 +894,10 @@ pub async fn create_domain_certified(
         );
     }
 
-    let (signing_key, captured) = capture_for(email, key_alias).await?;
+    let (signing_key, captured) = match cert_path {
+        Some(path) => capture_with_cert(email, key_alias, path).await?,
+        None => capture_for(email, key_alias).await?,
+    };
     let iat = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -872,7 +913,15 @@ pub async fn create_domain_certified(
     );
 
     let tier = if domain_matches { "canonical name" } else { "external-email handle" };
-    println!("\n✓ Built identity.email.v1 '{name}' for {email} ({tier})");
+    eprintln!("\n✓ Built identity.email.v1 '{name}' for {email} ({tier})");
+
+    if dry_run {
+        // Emit the raw wire on stdout (diagnostics on stderr above), for piping
+        // to a submit endpoint. Skips the daemon/IPC submit path entirely.
+        use std::io::Write;
+        std::io::stdout().write_all(&wire).ok();
+        return Ok(());
+    }
 
     let Some(uri) = uri else {
         println!("\n  No target URI given — printing the message for manual posting.");
