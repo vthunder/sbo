@@ -7,7 +7,7 @@ description = "Client-side capture of browserid certificates + DNSSEC evidence (
 
 [dependencies]
 sbo-core.workspace = true
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "7d69c948890eb19e6d06daf2c97b68fb66951c9a" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "480a4be47465cab0626e6366b75ee536504a3896" }
 dnssec-prover = { version = "0.6.8", features = ["tokio"] }
 reqwest = { version = "0.12", features = ["json", "cookies"] }
 serde.workspace = true

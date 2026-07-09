@@ -316,14 +316,16 @@ enum IdCommands {
     /// Provision an agent identity headlessly and claim it on-chain
     ///
     /// One-shot service/agent onboarding (replaces the /admin/provision hard
-    /// path): mints an attributed `<name>@<domain>` cert for the KEYRING key
-    /// from an agent-enabled IdP (Bearer API key from SBO_AGENT_API_KEY, minted
-    /// once by a human at the IdP), then claims `/sys/names/<name>` KEY-ROOTED —
-    /// after which writes are authorized by signature alone. Idempotent.
+    /// path): using an agent CREDENTIAL created once by a human at
+    /// browserid.me/agents (delegation-chain provisioning), signs a mint
+    /// request for the KEYRING key, gets it endorsed by the broker, mints an
+    /// attributed `<name>@<domain>` cert at the IdP, then claims
+    /// `/sys/names/<name>` KEY-ROOTED — after which writes are authorized by
+    /// signature alone. Idempotent. Broker + IdP come from the credential.
     ///
     /// Examples:
-    ///   SBO_AGENT_API_KEY=bidk_… sbo id provision-agent attestor2 sbo+dns://mingo.place
-    ///   SBO_AGENT_API_KEY=bidk_… sbo id provision-agent attestor2 --idp https://mingo.place --dry-run
+    ///   SBO_AGENT_CREDENTIAL=cred.json sbo id provision-agent attestor2 sbo+dns://mingo.place
+    ///   sbo id provision-agent attestor2 --credential cred.json --dry-run
     ProvisionAgent {
         /// Agent name to mint and claim (e.g. attestor2)
         name: String,
@@ -336,9 +338,10 @@ enum IdCommands {
         #[arg(long)]
         key: Option<String>,
 
-        /// Agent-enabled IdP base URL (default: $SBO_AGENT_IDP, then https://mingo.place)
+        /// Agent credential file (default: $SBO_AGENT_CREDENTIAL). Created at
+        /// browserid.me/agents; holds the provisioning key + delegation.
         #[arg(long)]
-        idp: Option<String>,
+        credential: Option<PathBuf>,
 
         /// Output the SBO claim message to stdout instead of submitting
         #[arg(long)]
@@ -1546,12 +1549,12 @@ async fn main() -> anyhow::Result<()> {
                         ).await?;
                     }
                 }
-                IdCommands::ProvisionAgent { name, uri, key, idp, dry_run, no_wait } => {
+                IdCommands::ProvisionAgent { name, uri, key, credential, dry_run, no_wait } => {
                     commands::identity::provision_agent(
                         uri.as_deref(),
                         &name,
                         key.as_deref(),
-                        idp.as_deref(),
+                        credential.as_deref(),
                         dry_run,
                         no_wait,
                     ).await?;

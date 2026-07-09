@@ -744,6 +744,41 @@ fn repo_domain(uri: Option<&str>) -> Option<String> {
     uri.and_then(sbo_core::dns::extract_domain)
 }
 
+/// The agent credential file created at browserid.me/agents (delegation-chain
+/// provisioning, spec v0.2). Holds the provisioning private key and the
+/// user-signed delegation; never a bearer secret.
+#[derive(serde::Deserialize)]
+struct AgentCredential {
+    /// base64url (no pad) Ed25519 seed of the provisioning key `P_priv`
+    secret_key: String,
+    /// The `U_cert~P_cert` delegation bundle
+    delegation: String,
+    /// Broker base URL (endorses requests)
+    broker: String,
+    /// Target IdP base URL (mints)
+    idp: String,
+}
+
+impl AgentCredential {
+    fn provisioning_key(&self) -> Result<browserid_core::KeyPair> {
+        use base64::Engine;
+        let seed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(self.secret_key.trim())
+            .map_err(|e| anyhow::anyhow!("bad credential secret_key: {}", e))?;
+        browserid_core::KeyPair::from_seed(&seed)
+            .map_err(|e| anyhow::anyhow!("bad credential provisioning key: {}", e))
+    }
+}
+
+/// Host (with port) of a base URL — the `<idp-domain>` a request must target.
+fn url_host(url: &str) -> &str {
+    let after = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    after.split('/').next().unwrap_or(after)
+}
+
 /// Build a key-rooted `identity.v1` claim wire carrying a browserid `Auth-Cert`
 /// plus freshly captured DNSSEC `Auth-Evidence` for the cert's issuer — the
 /// primary-domain name-claim gate (claiming `<name>` proves `<name>@<domain>`),
@@ -770,66 +805,113 @@ async fn attributed_claim_wire(
 /// from an agent-enabled IdP for the KEYRING key, then claim it on-chain
 /// key-rooted. Replaces the /admin/provision hard path.
 ///
-/// The keyring key is the agent key (single custody system): the IdP certifies
-/// its public half via `POST /agent/identities` (spec: browserid-ng
-/// docs/specs/agent-provisioning-and-grant-api.md), gated by a browser-minted
-/// API key from `SBO_AGENT_API_KEY`. The cert is minted immediately before the
-/// claim, so the embedded Auth-Cert is always fresh. Idempotent end to end:
-/// the IdP re-provision returns a fresh cert for the same name, and re-claiming
-/// an on-chain name the same key already controls is a controller update.
+/// Uses the delegation-chain protocol (browserid-ng spec v0.2): a **credential
+/// file** (`SBO_AGENT_CREDENTIAL`, created once by a human at browserid.me) holds
+/// the provisioning private key `P_priv` and the `U_cert~P_cert` delegation. We
+/// sign a mint request for the KEYRING key (the sbo key IS the agent key, one
+/// custody system), get it endorsed by the broker, and present the dual-signed
+/// request to the IdP — which mints a fresh cert (Auth-Cert always current).
+/// Idempotent end to end: the IdP re-provision returns a fresh cert for the same
+/// name, and re-claiming an on-chain name the same key already controls is a
+/// controller update.
 pub async fn provision_agent(
     uri: Option<&str>,
     name: &str,
     key_alias: Option<&str>,
-    idp_override: Option<&str>,
+    credential_override: Option<&std::path::Path>,
     dry_run: bool,
     no_wait: bool,
 ) -> Result<()> {
+    use browserid_core::provisioning::{ProvisioningCert, ProvisioningRequest, RequestBundle};
+
     if sbo_core::message::Id::new(name).is_err() {
         anyhow::bail!(
             "'{name}' is not a valid name (allowed characters: letters, digits, '-' '.' '_' '~')"
         );
     }
 
-    let idp = idp_override
-        .map(str::to_string)
-        .or_else(|| std::env::var("SBO_AGENT_IDP").ok())
-        .unwrap_or_else(|| "https://mingo.place".to_string());
-    let idp = idp.trim_end_matches('/').to_string();
-    let api_key = std::env::var("SBO_AGENT_API_KEY").map_err(|_| {
-        anyhow::anyhow!(
-            "set SBO_AGENT_API_KEY (a bidk_… key minted at {idp} while signed in; \
-             optionally --idp or SBO_AGENT_IDP to pick the IdP)"
-        )
-    })?;
+    // Load the agent credential (P_priv + delegation + broker + idp).
+    let cred_path = credential_override
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("SBO_AGENT_CREDENTIAL").ok().map(std::path::PathBuf::from))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "set SBO_AGENT_CREDENTIAL to an agent credential file (create one at \
+                 https://browserid.me/agents, delegated from your identity), or pass --credential"
+            )
+        })?;
+    let cred: AgentCredential = serde_json::from_str(
+        &std::fs::read_to_string(&cred_path)
+            .map_err(|e| anyhow::anyhow!("read credential {}: {}", cred_path.display(), e))?,
+    )
+    .map_err(|e| anyhow::anyhow!("parse credential {}: {}", cred_path.display(), e))?;
+
+    let broker = cred.broker.trim_end_matches('/').to_string();
+    let idp = cred.idp.trim_end_matches('/').to_string();
+    let idp_domain = url_host(&idp).to_string();
+    let prov_key = cred.provisioning_key()?;
 
     let mut keyring = Keyring::open()?;
     let alias = keyring.resolve_alias(key_alias)?;
     let signing_key = keyring.get_signing_key(&alias)?;
-    let user_pubkey = browserid_core::PublicKey::from_bytes(&signing_key.public_key().bytes)
+    let agent_pubkey = browserid_core::PublicKey::from_bytes(&signing_key.public_key().bytes)
         .map_err(|e| anyhow::anyhow!("could not convert signing key: {}", e))?;
 
-    eprintln!("Provisioning agent identity '{name}' at {idp} …");
-    let resp = reqwest::Client::new()
-        .post(format!("{idp}/agent/identities"))
-        .bearer_auth(&api_key)
-        .json(&serde_json::json!({
-            "pubkey": { "algorithm": "Ed25519", "publicKey": user_pubkey.to_base64() },
-            "name": name,
-        }))
+    // Build the signed mint request for the keyring key, then endorse + mint.
+    let (u_cert, p_cert) = cred.delegation.split_once('~').ok_or_else(|| {
+        anyhow::anyhow!("credential delegation must be U_cert~P_cert")
+    })?;
+    let request = ProvisioningRequest::mint(&idp_domain, name, &agent_pubkey, false, &prov_key)
+        .map_err(|e| anyhow::anyhow!("build request: {}", e))?;
+    let bundle = RequestBundle::new(
+        browserid_core::Certificate::parse(u_cert).map_err(|e| anyhow::anyhow!("parse U_cert: {e}"))?,
+        ProvisioningCert::parse(p_cert).map_err(|e| anyhow::anyhow!("parse P_cert: {e}"))?,
+        request,
+    );
+    let bundle_str = bundle.encoded().to_string();
+
+    eprintln!("Provisioning agent identity '{name}' at {idp} (endorsed by {broker}) …");
+    let http = reqwest::Client::new();
+
+    // 1. Broker endorsement.
+    let endorsement = {
+        let resp = http
+            .post(format!("{broker}/provision/endorse"))
+            .json(&serde_json::json!({ "request_bundle": bundle_str }))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("broker request failed: {}", e))?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        if body["success"] != serde_json::Value::Bool(true) {
+            let reason = body["reason"].as_str().unwrap_or("no reason given");
+            let hint = match status {
+                403 => " (is the provisioning cert registered and unrevoked at the broker?)",
+                404 => " (broker doesn't know this provisioning cert — re-create the credential)",
+                429 => " (endorsement rate limit)",
+                _ => "",
+            };
+            anyhow::bail!("broker refused endorsement ({status}): {reason}{hint}");
+        }
+        body["endorsement"].as_str().unwrap_or_default().to_string()
+    };
+
+    // 2. IdP mint.
+    let resp = http
+        .post(format!("{idp}/provision/mint"))
+        .json(&serde_json::json!({ "request_bundle": bundle_str, "endorsement": endorsement }))
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("IdP request failed: {}", e))?;
-
     let status = resp.status().as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
     if body["success"] != serde_json::Value::Bool(true) {
         let reason = body["reason"].as_str().unwrap_or("no reason given");
         let hint = match status {
-            401 => " (is SBO_AGENT_API_KEY valid and unrevoked?)",
+            401 => " (endorsement invalid/stale, or from an untrusted broker)",
             403 => " (this agent identity was revoked; pick a new name)",
             404 => " (does the IdP have agent provisioning enabled?)",
-            409 => " (name taken by another account or a human handle)",
+            409 => " (name taken by another identity or a human handle)",
             429 => " (agent identity quota reached; revoke one or raise the quota)",
             _ => "",
         };

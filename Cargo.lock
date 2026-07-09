@@ -1084,7 +1084,7 @@ dependencies = [
 [[package]]
 name = "browserid-core"
 version = "0.1.0"
-source = "git+https://github.com/vthunder/browserid-ng?rev=7d69c948890eb19e6d06daf2c97b68fb66951c9a#7d69c948890eb19e6d06daf2c97b68fb66951c9a"
+source = "git+https://github.com/vthunder/browserid-ng?rev=480a4be47465cab0626e6366b75ee536504a3896#480a4be47465cab0626e6366b75ee536504a3896"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6014,6 +6014,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "avail-rust-client",
+ "base64 0.22.1",
  "browserid-core",
  "clap",
  "dirs 5.0.1",
