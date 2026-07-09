@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 flate2.workspace = true
 parity-scale-codec = "3"
 avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", branch = "main" }

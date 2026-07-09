@@ -313,6 +313,42 @@ enum IdCommands {
         no_wait: bool,
     },
 
+    /// Provision an agent identity headlessly and claim it on-chain
+    ///
+    /// One-shot service/agent onboarding (replaces the /admin/provision hard
+    /// path): mints an attributed `<name>@<domain>` cert for the KEYRING key
+    /// from an agent-enabled IdP (Bearer API key from SBO_AGENT_API_KEY, minted
+    /// once by a human at the IdP), then claims `/sys/names/<name>` KEY-ROOTED —
+    /// after which writes are authorized by signature alone. Idempotent.
+    ///
+    /// Examples:
+    ///   SBO_AGENT_API_KEY=bidk_… sbo id provision-agent attestor2 sbo+dns://mingo.place
+    ///   SBO_AGENT_API_KEY=bidk_… sbo id provision-agent attestor2 --idp https://mingo.place --dry-run
+    ProvisionAgent {
+        /// Agent name to mint and claim (e.g. attestor2)
+        name: String,
+
+        /// SBO URI of the chain/app to claim the name on. Optional: when
+        /// omitted, the claim message is printed for manual posting.
+        uri: Option<String>,
+
+        /// Key alias whose key becomes the agent's key (default: "default")
+        #[arg(long)]
+        key: Option<String>,
+
+        /// Agent-enabled IdP base URL (default: $SBO_AGENT_IDP, then https://mingo.place)
+        #[arg(long)]
+        idp: Option<String>,
+
+        /// Output the SBO claim message to stdout instead of submitting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Don't wait for on-chain verification
+        #[arg(long)]
+        no_wait: bool,
+    },
+
     /// List identities on chain
     ///
     /// Shows identities and which local keys they're associated with
@@ -1509,6 +1545,16 @@ async fn main() -> anyhow::Result<()> {
                             no_wait,
                         ).await?;
                     }
+                }
+                IdCommands::ProvisionAgent { name, uri, key, idp, dry_run, no_wait } => {
+                    commands::identity::provision_agent(
+                        uri.as_deref(),
+                        &name,
+                        key.as_deref(),
+                        idp.as_deref(),
+                        dry_run,
+                        no_wait,
+                    ).await?;
                 }
                 IdCommands::List { uri } => {
                     commands::identity::list(uri.as_deref()).await?;

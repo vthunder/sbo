@@ -6024,6 +6024,7 @@ dependencies = [
  "open",
  "parity-scale-codec",
  "rand 0.8.5",
+ "reqwest 0.12.25",
  "sbo-avail",
  "sbo-capture",
  "sbo-core",
