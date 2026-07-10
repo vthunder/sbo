@@ -778,7 +778,8 @@ impl SyncEngine {
                         // Validate message against state. The L2 attribution
                         // layer checks attribution windows against the DA block's
                         // inclusion time (from its `timestamp.set` inherent).
-                        let l2 = crate::validate::L2Context::for_block(block_timestamp, state_db);
+                        let l2 = crate::validate::L2Context::for_block(block_timestamp, state_db)
+                            .with_db(repo.uri.clone(), repo.expected_genesis.clone());
                         match validate_message(msg, state_db, &repo.path, &l2) {
                             ValidationResult::Valid { creator } => {
                                 // Condensed success log: [block/tx] Action path/id by creator → sig:✓ state:✓ applied

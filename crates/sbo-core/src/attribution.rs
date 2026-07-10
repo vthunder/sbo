@@ -36,7 +36,8 @@
 //! covered by an `#[ignore]`d live test, while the cert/window/authority logic
 //! is unit-tested offline via [`verify_attribution_with_provider_key`].
 
-use browserid_core::{Certificate, DnsRecord, PublicKey};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use browserid_core::{Certificate, DnsRecord, PublicKey, Warrant};
 use dnssec_prover::rr::{Name, RR};
 use dnssec_prover::ser::parse_rr_stream;
 use dnssec_prover::validation::verify_rr_stream;
@@ -130,6 +131,26 @@ pub enum AttributionError {
     /// The certificate signature did not verify against the provider key.
     #[error("certificate signature verification failed")]
     SignatureInvalid,
+    /// An agent certificate was presented without the required warrant.
+    #[error("agent certificate requires an Auth-Warrant")]
+    MissingWarrant,
+    /// The warrant could not be parsed or is structurally invalid.
+    #[error("warrant invalid: {0}")]
+    BadWarrant(String),
+    /// A warrant binding (agent/delegator/parent-email) did not match.
+    #[error("warrant binding mismatch: {0}")]
+    WarrantBindingMismatch(String),
+    /// The warrant (or its embedded parent certificate) signature did not verify.
+    #[error("warrant signature verification failed")]
+    WarrantSignatureInvalid,
+    /// `inclusion_time` falls outside the warrant window, or the warrant was
+    /// signed outside its parent certificate's window (signing-time rule).
+    #[error("warrant window mismatch")]
+    WarrantWindowMismatch,
+    /// The warrant's delegator (parent) certificate is from a different issuer
+    /// than the agent certificate — not yet supported (needs separate evidence).
+    #[error("warrant parent certificate has a different issuer than the agent certificate")]
+    ForeignParentIssuer,
     /// The issuer is neither the email's domain nor a pinned broker.
     #[error("issuer '{iss}' is not authorized for email domain '{domain}'")]
     IssuerNotAuthorized {
@@ -173,6 +194,143 @@ pub fn verify_attribution(
         inclusion_time,
         anchors,
     )
+}
+
+/// Attribution of an **agent** write (browserid-ng v0.4): the agent identity,
+/// its delegator, and the delegator-signed warrant's audience + scopes. Unlike
+/// a plain [`Attribution`], an agent certificate authorizes nothing on its own
+/// — this is only produced when a valid warrant accompanies it.
+#[derive(Debug, Clone)]
+pub struct WarrantAttribution {
+    /// The agent identity (`Auth-Cert.principal.email`).
+    pub agent_email: String,
+    /// The delegator the agent acts for (`agent.parent` == warrant `iss`).
+    pub delegator: String,
+    /// The warrant's audience (an `sbo+raw://` reference — the caller checks it
+    /// identifies this database).
+    pub audience: String,
+    /// The warrant scopes (`<dimension>:<value>` strings — the caller enforces).
+    pub scopes: Vec<String>,
+}
+
+/// Verify a raw JWS (`h.p.s`) signature against `key` — the warrant is signed
+/// by the delegator's certified key. Windows are checked separately (against
+/// inclusion time, not wall-clock, for replay determinism).
+fn jws_verify_raw(encoded: &str, key: &PublicKey) -> Result<(), AttributionError> {
+    let parts: Vec<&str> = encoded.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AttributionError::BadWarrant("expected 3 JWS parts".into()));
+    }
+    let message = format!("{}.{}", parts[0], parts[1]);
+    let sig = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|e| AttributionError::BadWarrant(format!("signature base64url: {e}")))?;
+    key.verify(message.as_bytes(), &sig)
+        .map_err(|_| AttributionError::WarrantSignatureInvalid)
+}
+
+/// Verify a warrant against an already-verified agent certificate, using the
+/// provider key already extracted from the DNSSEC proof (the delegator's
+/// embedded `parent-cert` shares the agent certificate's issuer, so the same
+/// key covers both). Pure and offline; windows use `inclusion_time`.
+///
+/// Returns the [`WarrantAttribution`] — the agent, the delegator, and the
+/// warrant's audience + scopes. **Does not** check that the audience identifies
+/// any particular database or that the scopes permit any particular write; the
+/// authorization layer does that (`sbo-core/src/authorize.rs`).
+pub fn verify_warrant_with_provider_key(
+    auth_warrant: &str,
+    agent_cert: &Certificate,
+    provider_key: &PublicKey,
+    inclusion_time: i64,
+) -> Result<WarrantAttribution, AttributionError> {
+    let warrant =
+        Warrant::parse(auth_warrant).map_err(|e| AttributionError::BadWarrant(e.to_string()))?;
+    let claims = warrant.claims();
+
+    // The cert must be an agent cert; bind the warrant to it.
+    let agent_email = agent_cert.email().ok_or(AttributionError::MissingEmail)?;
+    let parent_email = agent_cert
+        .agent_parent()
+        .ok_or_else(|| AttributionError::BadWarrant("Auth-Cert is not an agent certificate".into()))?;
+    if warrant.agent() != agent_email {
+        return Err(AttributionError::WarrantBindingMismatch(format!(
+            "warrant agent '{}' != certificate '{agent_email}'",
+            warrant.agent()
+        )));
+    }
+    if warrant.delegator() != parent_email {
+        return Err(AttributionError::WarrantBindingMismatch(format!(
+            "warrant iss '{}' != certificate agent.parent '{parent_email}'",
+            warrant.delegator()
+        )));
+    }
+
+    // The embedded delegator certificate: same issuer, verifies under the
+    // provider key, and certifies the delegator email.
+    let parent = Certificate::parse(&claims.parent_cert)
+        .map_err(|e| AttributionError::BadWarrant(format!("parent-cert: {e}")))?;
+    if parent.email() != Some(parent_email) {
+        return Err(AttributionError::WarrantBindingMismatch(
+            "parent-cert principal != warrant iss".into(),
+        ));
+    }
+    if parent.issuer() != agent_cert.issuer() {
+        return Err(AttributionError::ForeignParentIssuer);
+    }
+    parent
+        .verify(provider_key)
+        .map_err(|_| AttributionError::WarrantSignatureInvalid)?;
+
+    // The warrant JWS is signed by the delegator's certified key.
+    jws_verify_raw(warrant.encoded(), parent.public_key())?;
+
+    // Windows against inclusion_time (deterministic), plus signing-time:
+    // the warrant must have been signed while parent-cert was valid.
+    if inclusion_time < claims.iat || inclusion_time > claims.exp {
+        return Err(AttributionError::WarrantWindowMismatch);
+    }
+    let p = parent.claims();
+    let p_iat = p.iat.unwrap_or(p.exp);
+    if claims.iat < p_iat || claims.iat > p.exp {
+        return Err(AttributionError::WarrantWindowMismatch);
+    }
+
+    Ok(WarrantAttribution {
+        agent_email: agent_email.to_string(),
+        delegator: parent_email.to_string(),
+        audience: warrant.audience().to_string(),
+        scopes: claims.scopes.clone().unwrap_or_default(),
+    })
+}
+
+/// End-to-end agent attribution: verify the agent certificate (§4) **and** the
+/// accompanying warrant, sharing the single DNSSEC proof (agent and delegator
+/// are normally certified by the same broker). Offline; `inclusion_time` gated.
+pub fn verify_attribution_with_warrant(
+    public_key: &str,
+    auth_cert: &str,
+    auth_warrant: &str,
+    auth_evidence: &[u8],
+    inclusion_time: i64,
+    anchors: &TrustAnchors,
+) -> Result<WarrantAttribution, AttributionError> {
+    let cert = Certificate::parse(auth_cert)
+        .map_err(|e| AttributionError::BadCertificate(e.to_string()))?;
+    let iss = cert.issuer().to_string();
+    let (provider_key, inception, expiration) = extract_provider_key(auth_evidence, &iss)?;
+    // Agent certificate: key match, window, signature, issuer authority.
+    verify_attribution_with_provider_key(
+        public_key,
+        &cert,
+        &provider_key,
+        inception,
+        expiration,
+        inclusion_time,
+        anchors,
+    )?;
+    // Warrant: bindings, delegator cert, signatures, windows.
+    verify_warrant_with_provider_key(auth_warrant, &cert, &provider_key, inclusion_time)
 }
 
 /// Validate the RFC 9102 proof offline and extract the provider Ed25519 key
@@ -697,4 +855,84 @@ mod tests {
             Err(AttributionError::EvidenceWindowMismatch { .. })
         ));
     }
+
+    // ---- agent warrants (browserid-ng v0.4) ----
+
+    /// (provider, delegator identity kp, agent kp, agent_cert, warrant, sbo_pk)
+    fn make_agent_setup(
+        agent_scopes: Option<Vec<String>>,
+        audience: &str,
+    ) -> (KeyPair, Certificate, String, String) {
+        let provider = KeyPair::generate();       // browserid.me signing key
+        let user_kp = KeyPair::generate();        // delegator identity key
+        let agent_kp = KeyPair::generate();       // agent's own signing key
+        let parent_cert = Certificate::create(
+            "browserid.me", "human@example.com", &user_kp.public_key(),
+            Duration::days(1), &provider).unwrap();
+        let agent_cert = Certificate::create_agent(
+            "browserid.me", "attestor@browserid.me", "human@example.com",
+            &agent_kp.public_key(), Duration::days(1), &provider).unwrap();
+        let warrant = Warrant::create(
+            &parent_cert, "attestor@browserid.me", audience, agent_scopes,
+            Duration::days(30), &user_kp).unwrap();
+        let sbo_pk = agent_kp.public_key().to_base64();
+        (provider, agent_cert, warrant.encoded().to_string(), sbo_pk)
+    }
+
+    #[test]
+    fn warrant_happy_path() {
+        let aud = "sbo+raw://avail:turing:506/";
+        let (provider, agent_cert, warrant, _pk) =
+            make_agent_setup(Some(vec!["action:post".into()]), aud);
+        let now = Utc::now().timestamp();
+        let wa = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), now).unwrap();
+        assert_eq!(wa.agent_email, "attestor@browserid.me");
+        assert_eq!(wa.delegator, "human@example.com");
+        assert_eq!(wa.audience, aud);
+        assert_eq!(wa.scopes, vec!["action:post"]);
+    }
+
+    #[test]
+    fn warrant_wrong_provider_key_rejected() {
+        let (_p, agent_cert, warrant, _pk) = make_agent_setup(None, "sbo+raw://avail:turing:506/");
+        let now = Utc::now().timestamp();
+        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &KeyPair::generate().public_key(), now).unwrap_err();
+        assert!(matches!(err, AttributionError::WarrantSignatureInvalid));
+    }
+
+    #[test]
+    fn warrant_for_other_agent_rejected() {
+        // A warrant naming a different agent than the presented cert.
+        let provider = KeyPair::generate();
+        let user_kp = KeyPair::generate();
+        let agent_kp = KeyPair::generate();
+        let parent_cert = Certificate::create("browserid.me", "human@example.com", &user_kp.public_key(), Duration::days(1), &provider).unwrap();
+        let agent_cert = Certificate::create_agent("browserid.me", "attestor@browserid.me", "human@example.com", &agent_kp.public_key(), Duration::days(1), &provider).unwrap();
+        let warrant = Warrant::create(&parent_cert, "other@browserid.me", "sbo+raw://avail:turing:506/", None, Duration::days(30), &user_kp).unwrap();
+        let now = Utc::now().timestamp();
+        let err = verify_warrant_with_provider_key(warrant.encoded(), &agent_cert, &provider.public_key(), now).unwrap_err();
+        assert!(matches!(err, AttributionError::WarrantBindingMismatch(_)));
+    }
+
+    #[test]
+    fn warrant_inclusion_time_outside_window_rejected() {
+        let (provider, agent_cert, warrant, _pk) = make_agent_setup(None, "sbo+raw://avail:turing:506/");
+        // Way in the future, past the 30-day warrant exp.
+        let far = Utc::now().timestamp() + 400 * 24 * 3600;
+        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), far).unwrap_err();
+        assert!(matches!(err, AttributionError::WarrantWindowMismatch));
+    }
+
+    #[test]
+    fn plain_cert_is_not_an_agent_warrant_subject() {
+        // A warrant presented against a PLAIN (non-agent) cert has no agent.parent.
+        let provider = KeyPair::generate();
+        let user_kp = KeyPair::generate();
+        let plain = Certificate::create("browserid.me", "human@example.com", &user_kp.public_key(), Duration::days(1), &provider).unwrap();
+        let warrant = Warrant::create(&plain, "human@example.com", "sbo+raw://avail:turing:506/", None, Duration::days(30), &user_kp).unwrap();
+        let now = Utc::now().timestamp();
+        let err = verify_warrant_with_provider_key(warrant.encoded(), &plain, &provider.public_key(), now).unwrap_err();
+        assert!(matches!(err, AttributionError::BadWarrant(_)));
+    }
+
 }

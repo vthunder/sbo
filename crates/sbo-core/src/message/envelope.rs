@@ -53,6 +53,10 @@ pub struct Message {
     pub prev: Option<String>,
     pub auth_cert: Option<String>,
     pub auth_evidence: Option<String>,
+    /// Delegator-signed agent warrant (browserid-agent-warrant-v1), required
+    /// when `auth_cert` is a typed agent certificate. See the SBO
+    /// Authorization Specification (Agent Warrant).
+    pub auth_warrant: Option<String>,
 }
 
 impl Id {
@@ -173,7 +177,7 @@ impl Message {
             "Attestation", "Content-Schema", "Creator", "HLC", "New-ID", "New-Owner",
             "New-Path", "Object-Path", "Origin", "Owner", "Policy-Ref", "Prev",
             "Proof", "Proof-Type", "Registry-Path", "Related", "Auth-Cert",
-            "Auth-Evidence", "Public-Key",
+            "Auth-Evidence", "Auth-Warrant", "Public-Key",
             // NOTE: Signature is NOT included in signing content
         ];
 
@@ -221,6 +225,7 @@ impl Message {
         if let Some(ref v) = self.prev { headers.push(("Prev".to_string(), v.clone())); }
         if let Some(ref v) = self.auth_cert { headers.push(("Auth-Cert".to_string(), v.clone())); }
         if let Some(ref v) = self.auth_evidence { headers.push(("Auth-Evidence".to_string(), v.clone())); }
+        if let Some(ref v) = self.auth_warrant { headers.push(("Auth-Warrant".to_string(), v.clone())); }
         headers.push(("Public-Key".to_string(), self.signing_key.to_string()));
         // NOTE: Signature is NOT included
 

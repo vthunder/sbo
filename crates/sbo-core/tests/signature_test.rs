@@ -29,6 +29,7 @@ fn test_sign_and_verify_message() {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
 
     // Sign the message
@@ -66,6 +67,7 @@ fn test_verify_fails_with_wrong_key() {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
 
     msg.sign(&signing_key);

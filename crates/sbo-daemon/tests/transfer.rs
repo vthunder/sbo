@@ -135,6 +135,7 @@ fn signed_transfer(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(key);
     msg

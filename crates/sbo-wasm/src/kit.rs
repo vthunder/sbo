@@ -77,6 +77,8 @@ pub struct EnvelopeSpec {
     /// Auth-Evidence (DNSSEC chain) for email-rooted writes.
     #[serde(default)]
     pub auth_evidence: Option<String>,
+    #[serde(default)]
+    pub auth_warrant: Option<String>,
 }
 
 /// Serde helper so `payload` round-trips as a JSON array of bytes (and as a
@@ -135,6 +137,7 @@ pub fn build_message(spec: &EnvelopeSpec) -> Result<Message, KitError> {
         prev: spec.prev.clone(),
         auth_cert: spec.auth_cert.clone(),
         auth_evidence: spec.auth_evidence.clone(),
+        auth_warrant: spec.auth_warrant.clone(),
     })
 }
 
@@ -216,6 +219,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
+            auth_warrant: None,
         }
     }
 
@@ -315,6 +319,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
+            auth_warrant: None,
         };
         assert!(matches!(signing_bytes(&spec), Err(KitError::PublicKey(_))));
     }

@@ -617,7 +617,8 @@ impl RepoApi for DaemonState {
         // mutating the pool, so a rejected message leaves the pool untouched.
         let mut staged: Vec<(StoredObject, [u8; 32])> = Vec::with_capacity(messages.len());
         for msg in &messages {
-            let l2 = L2Context::for_block(Some(now), &overlay);
+            let l2 = L2Context::for_block(Some(now), &overlay)
+                .with_db(repo.uri.clone(), repo.expected_genesis.clone());
             match validate_message(msg, &overlay, &repo.path, &l2) {
                 ValidationResult::Valid { .. } => {}
                 ValidationResult::Invalid { stage, reason } => {
@@ -959,6 +960,7 @@ fn build_attestation_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)
@@ -1019,6 +1021,7 @@ fn build_checkpoint_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)

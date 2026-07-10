@@ -48,6 +48,7 @@ fn signed_post(
         prev: None,
         auth_cert: auth_cert.map(|s| s.to_string()),
         auth_evidence: auth_evidence.map(|s| s.to_string()),
+        auth_warrant: None,
     };
     msg.sign(key);
     msg

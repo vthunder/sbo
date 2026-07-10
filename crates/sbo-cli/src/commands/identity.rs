@@ -454,6 +454,7 @@ pub async fn update(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(&signing_key);
 

@@ -188,6 +188,7 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
     let prev = headers.get("Prev").map(|s| s.to_string());
     let auth_cert = headers.get("Auth-Cert").map(|s| s.to_string());
     let auth_evidence = headers.get("Auth-Evidence").map(|s| s.to_string());
+    let auth_warrant = headers.get("Auth-Warrant").map(|s| s.to_string());
 
     // Transfer destination headers. `Action::parse` cannot see headers, so it
     // yields `Transfer { None, None, None }`; populate the fields here and
@@ -237,5 +238,6 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
         prev,
         auth_cert,
         auth_evidence,
+        auth_warrant,
     }, end_pos))
 }

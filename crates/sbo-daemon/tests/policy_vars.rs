@@ -107,6 +107,7 @@ fn signed_post(key: &SigningKey, path: &str, id: &str, owner: Option<&str>) -> M
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(key);
     msg
@@ -148,6 +149,7 @@ fn signed_name_claim(key: &SigningKey, name: &str) -> Message {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
+        auth_warrant: None,
     };
     msg.sign(key);
     msg

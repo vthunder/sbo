@@ -31,6 +31,7 @@ const HEADER_ORDER: &[&str] = &[
     "Related",
     "Auth-Cert",
     "Auth-Evidence",
+    "Auth-Warrant",
     "Public-Key",
     "Signature",
 ];
@@ -81,6 +82,7 @@ pub fn serialize(msg: &Message) -> Vec<u8> {
     if let Some(ref v) = msg.prev { headers.push(("Prev".to_string(), v.clone())); }
     if let Some(ref v) = msg.auth_cert { headers.push(("Auth-Cert".to_string(), v.clone())); }
     if let Some(ref v) = msg.auth_evidence { headers.push(("Auth-Evidence".to_string(), v.clone())); }
+    if let Some(ref v) = msg.auth_warrant { headers.push(("Auth-Warrant".to_string(), v.clone())); }
 
     headers.push(("Public-Key".to_string(), msg.signing_key.to_string()));
     headers.push(("Signature".to_string(), msg.signature.to_hex()));

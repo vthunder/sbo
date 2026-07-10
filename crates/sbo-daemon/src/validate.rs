@@ -2,8 +2,12 @@
 //!
 //! Validates SBO messages before they are applied to the repo.
 
-use sbo_core::authorize::{authorize_message, encode_auth_evidence_inline, message_attribution, AuthzOutcome};
-use sbo_core::attribution::TrustAnchors;
+use sbo_core::authorize::{
+    agent_effective_email, authorize_message, authorize_owner, encode_auth_evidence_inline,
+    message_attribution, parse_auth_evidence, AuthzOutcome,
+};
+use sbo_core::attribution::{self, TrustAnchors};
+use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
 use sbo_core::policy::{evaluate, ActionType, AttestedSource, PolicyResult};
 use sbo_core::resolve::{resolve_controller, Controller, NameRecord, DEFAULT_HOP_LIMIT};
@@ -49,6 +53,19 @@ pub struct L2Context {
     pub inclusion_time: Option<i64>,
     /// Pinned trust anchors (authorized brokers + informational root KSK).
     pub anchors: TrustAnchors,
+    /// This database's canonical identity, for checking an agent warrant's
+    /// audience (Authorization Spec — the Agent Warrant). `None` when unknown
+    /// (e.g. some tests); agent writes then fail closed (no audience to check).
+    pub db: Option<DbIdentity>,
+}
+
+/// A database's canonical identity for warrant-audience matching.
+#[derive(Debug, Clone)]
+pub struct DbIdentity {
+    /// The repo's `sbo+raw://chain:appId[@firstBlock]` address.
+    pub uri: SboRawUri,
+    /// The genesis hash (`sha256:…`), if known — pins the audience further.
+    pub genesis: Option<String>,
 }
 
 impl L2Context {
@@ -57,7 +74,14 @@ impl L2Context {
         Self {
             inclusion_time,
             anchors: load_trust_anchors(state),
+            db: None,
         }
+    }
+
+    /// Attach this database's identity so agent-warrant audiences can be checked.
+    pub fn with_db(mut self, uri: SboRawUri, genesis: Option<String>) -> Self {
+        self.db = Some(DbIdentity { uri, genesis });
+        self
     }
 }
 
@@ -138,6 +162,37 @@ fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref:
     // An unknown block time cannot satisfy any cert/RRSig window, so email-rooted
     // owners fail closed; key-rooted owners are time-independent.
     let inclusion_time = l2.inclusion_time.unwrap_or(0);
+
+    // Agent write (browserid-ng v0.4): a typed agent certificate, or any
+    // presence of an Auth-Warrant. The agent certificate is inert without a
+    // warrant, so verify the warrant, confine it to this database, enforce
+    // scopes, and resolve the effective author (agent, or delegator under
+    // `as:`). Fail closed on any missing piece.
+    let cert_is_agent = msg
+        .auth_cert
+        .as_deref()
+        .map(sbo_core::authorize::auth_cert_is_agent)
+        .unwrap_or(false);
+    if cert_is_agent || msg.auth_warrant.is_some() {
+        let cert = msg.auth_cert.as_deref().ok_or_else(|| "agent write missing Auth-Cert".to_string())?;
+        let warrant = msg.auth_warrant.as_deref().ok_or(attribution::AttributionError::MissingWarrant.to_string())?;
+        let ev = evidence.ok_or_else(|| "agent write missing Auth-Evidence".to_string())?;
+        let ev_bytes = parse_auth_evidence(&ev)?;
+        let db = l2.db.as_ref().ok_or_else(|| "agent write cannot be validated without database identity".to_string())?;
+        let wa = attribution::verify_attribution_with_warrant(
+            &signer, cert, warrant, &ev_bytes, inclusion_time, &l2.anchors,
+        ).map_err(|e| e.to_string())?;
+        // on_behalf_allowed defaults to true (spec: honored absent a repo opt-out).
+        let effective = agent_effective_email(
+            &wa, &db.uri, db.genesis.as_deref(),
+            msg.action.name(), &msg.path.to_string(), msg.content_schema.as_deref(), true,
+        )?;
+        return match authorize_owner(owner_ref, &signer, Some(&effective), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) {
+            AuthzOutcome::Authorized => Ok(()),
+            AuthzOutcome::Unauthorized(reason) => Err(reason),
+        };
+    }
+
     match authorize_message(
         owner_ref,
         &signer,
@@ -947,6 +1002,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
+            auth_warrant: None,
         };
         msg.sign(&key);
 
