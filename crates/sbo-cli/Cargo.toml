@@ -13,7 +13,7 @@ path = "src/main.rs"
 sbo-core.workspace = true
 sbo-crypto.workspace = true
 sbo-capture = { path = "../sbo-capture" }
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "480a4be47465cab0626e6366b75ee536504a3896" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "4fdfa86" }
 sbo-avail.workspace = true
 sbo-daemon.workspace = true
 sbo-rpc.workspace = true
