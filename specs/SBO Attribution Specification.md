@@ -51,6 +51,14 @@ An object's owner reference resolves to a controller:
   email (`Controller::Email`). Each write MUST carry attribution (§3) proving
   the signing key spoke for that email at inclusion time.
 
+An email-rooted owner may itself be a browserid **agent identity** (one a human
+delegated headlessly). Its certificate is *typed* and inert on its own; writes
+by an agent additionally carry a delegator-signed **warrant** (§3a) confining
+the agent to this database. See the [Authorization
+Specification](./SBO%20Authorization%20Specification.md#the-agent-warrant-auth-warrant)
+for the normative rules; §3a and §4a below record how the reference
+implementation adds it.
+
 ## 3. The attribution proof
 
 A write attributing signer key `K` to email `e` carries:
@@ -68,6 +76,27 @@ domain and are **self-authorizing**: policy grants create/update on
 `/sys/dnssec/**` to any signer, because the proof attests its own domain — it
 needs no prior identity to post. This is what lets a fresh proof be published
 permissionlessly for *any* domain.
+
+## 3a. Agent writes — the warrant
+
+When `Auth-Cert` is a browserid **agent** certificate (`typ =
+"browserid-agent-cert-v1"`, carrying an `agent.parent` claim), the attribution
+proof gains one more artifact:
+
+- **`Auth-Warrant`** — a `browserid-agent-warrant-v1` JWS signed by the
+  delegator's identity key, embedding that delegator's own certificate
+  (`parent-cert`). It names the one audience the agent may act at and the
+  scopes granted there.
+
+A typed agent certificate **without** a warrant attributes nothing (fail-closed;
+mirrors browserid-ng §5.3). The warrant's `parent-cert` is DNSSEC-verified
+exactly like the `Auth-Cert` — and since an agent and its delegator are normally
+certified by the same broker, the single `Auth-Evidence` for that broker covers
+both certificates. The audience MUST be the canonical `sbo+raw://` identity of
+*this* database (never an `sbo://` DNS name — the `_sbo` record is not a trust
+root); scopes are the `<dimension>:<value>` grammar the validator enforces. All
+rules are normative in the Authorization Specification; this section only names
+the artifact and its place in the proof.
 
 ## 4. Verification algorithm
 
@@ -96,6 +125,32 @@ for email-rooted writes (`sbo-daemon/src/validate.rs`).
 > issuer-key check to verifying the certificate chain up to the DNSSEC key
 > `K_dns` (directly, or via a host cert also signed by `K_dns`). To be specified
 > here when host certs are implemented (browserid-ng bean `browserid-ng-dff5`).
+
+## 4a. Agent-write verification (extends §4)
+
+For an agent certificate, after §4 succeeds for the agent certificate itself:
+
+7. **Warrant present** — `Auth-Warrant` MUST be present; else UNAUTHORIZED.
+8. **Binding** — the warrant's `agent` equals the certificate's
+   `principal.email`; its `iss` equals the certificate's `agent.parent` and the
+   embedded `parent-cert`'s `principal.email`.
+9. **Delegator proof** — `parent-cert` verifies against its own
+   DNSSEC-proven provider key (§4 steps 2–6 applied to `parent-cert`), and the
+   warrant JWS verifies against `parent-cert`'s certified key.
+10. **Windows** — `inclusion_time` within the warrant's `[iat, exp]`, and the
+    warrant's `iat` within `parent-cert`'s `[iat, exp]` (signing-time
+    semantics).
+11. **Audience** — `aud` identifies this database (authority match; `@firstBlock`
+    / `?genesis` match if present).
+12. **Scopes** — the write's `Action` / `Path` / `Content-Schema` satisfy the
+    warrant scopes (AND across dimensions, OR within; unknown dimension ⇒
+    UNAUTHORIZED).
+
+The reference implementation adds this as a branch in
+`verify_attribution`/`authorize` (`sbo-core/src/attribution.rs`,
+`sbo-core/src/authorize.rs`) and a new `Auth-Warrant` header in the signed block
+(`sbo-core/src/wire`). The attributed email on success is the **agent** address;
+indexers additionally record `agent.parent` as the attribution root.
 
 ## 5. Evidence freshness
 

@@ -35,8 +35,9 @@ This specification does **not** redefine any of those. It defines only what SBO 
 |------|------------|------------------|-------------|
 | **Direct** | Key-rooted identity | none | `Public-Key` equals the owner's key; envelope signature |
 | **Attributed** | Email-rooted identity | `Auth-Cert` + DNSSEC evidence | certificate + DNSSEC chain to the pinned root KSK |
+| **Agent-attributed** | Email-rooted identity, written by a delegated agent | `Auth-Cert` (a **typed agent certificate**) + `Auth-Warrant` + DNSSEC evidence | as Attributed, **plus** a delegator-signed warrant scoping the agent to this database |
 
-Direct mode is used by genesis roots and self-sovereign users (see [Self-Sovereign Authorization](#self-sovereign-authorization)). Attributed mode is the default path for email-rooted identities and is the bulk of this document.
+Direct mode is used by genesis roots and self-sovereign users (see [Self-Sovereign Authorization](#self-sovereign-authorization)). Attributed mode is the default path for email-rooted identities and is the bulk of this document. **Agent-attributed** mode ([The Agent Warrant](#the-agent-warrant-auth-warrant)) is a strict refinement of Attributed mode for browserid *agent* identities: the credential is a typed agent certificate that is **inert on its own** and MUST be accompanied by a warrant. It exists because a browserid agent certificate is fail-closed by construction — it authorizes nothing without a per-audience, user-signed warrant (browserid-ng agent spec v0.4 §5.3) — and this specification is what supplies the "audience" on chain.
 
 ## On-Chain Trust Anchors
 
@@ -113,6 +114,69 @@ browserid normally pairs a certificate with a short, audience-bound *assertion* 
 - `public-key` MUST equal the envelope `Public-Key`.
 - The inclusion time (below) MUST fall within `[iat, exp]`.
 - `principal.email` MUST equal the email controller the message is authorized for.
+
+## The Agent Warrant (`Auth-Warrant`)
+
+A browserid **agent identity** (e.g. `attestor@browserid.me`) is an ordinary email controller on chain, but its certificate is a *typed agent certificate* (`typ: "browserid-agent-cert-v1"`) that carries an `agent.parent` claim naming the human it acts for. Per browserid-ng v0.4 such a certificate is **fail-closed**: it never authorizes a presentation on its own — it must be paired with a **warrant**, a short claim signed by the *delegator's* identity key that names one audience and the scopes granted there.
+
+SBO's base Attributed mode has no audience (the [Envelope-as-assertion](#envelope-as-assertion)), so nothing in it would confine an agent to one ledger. This section supplies that confinement.
+
+### When a warrant is required
+
+- If `Auth-Cert` is a **plain** certificate (no `typ`, no `agent` claim), Attributed mode applies unchanged and `Auth-Warrant` MUST be absent.
+- If `Auth-Cert` is an **agent** certificate (`typ == "browserid-agent-cert-v1"`), the message MUST carry an `Auth-Warrant` header, and Agent-attributed mode applies. An agent certificate **without** a warrant is UNAUTHORIZED — the on-chain analogue of browserid's fail-closed rule; a leaked agent certificate + key cannot write.
+
+### `Auth-Warrant`
+
+A `browserid-agent-warrant-v1` JWS (base64url), signed by the delegator's identity key, embedding the delegator's own certificate (`parent-cert`) so the whole chain verifies offline. Like `Auth-Cert`/`Auth-Evidence` it lives **inside the signed header block** (see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)), so it is message-bound and cannot be stripped or swapped.
+
+Claims (browserid-ng agent spec §5.2):
+
+```json
+{
+  "typ": "browserid-agent-warrant-v1",
+  "iss": "human@example.com",
+  "agent": "attestor@example.com",
+  "aud": "sbo+raw://avail:turing:506/",
+  "scopes": ["action:post", "path:/attestor/*"],
+  "parent-cert": "<the delegator's browserid certificate, JWS>",
+  "iat": 1783600000,
+  "exp": 1791376000
+}
+```
+
+| Claim | Meaning / rule |
+|-------|----------------|
+| `iss` | The delegator. MUST equal `parent-cert.principal.email` **and** the `Auth-Cert`'s `agent.parent`. |
+| `agent` | The agent identity. MUST equal the `Auth-Cert`'s `principal.email`. |
+| `aud` | The **canonical database identity** this warrant authorizes writing to (below). |
+| `scopes` | What the agent may write here ([Warrant Scopes](#warrant-scopes)). Absent ⇒ no on-chain write is authorized (a warrant minted for a web audience does not silently grant ledger writes). |
+| `parent-cert` | The delegator's certificate, embedded for self-contained offline verification. Its issuer is DNSSEC-proven exactly like the `Auth-Cert`'s (usually the same broker, so one `Auth-Evidence` covers both). |
+| `iat`/`exp` | Warrant window. Inclusion time MUST fall within it; and (signing-time semantics) `iat` MUST fall within `parent-cert`'s validity window. |
+
+### The audience rule (canonical, offline-verifiable)
+
+**`aud` MUST be an `sbo+raw://` reference that identifies *this* database — never an `sbo://` DNS name.** The `_sbo` DNS record is discovery-only and is not a trust root (see the [URI Specification](./SBO%20URI%20Specification.md) and [Identity Specification](./SBO%20Identity%20Specification.md)); a validator replaying offline neither performs nor trusts DNS. An `sbo://` audience is therefore not verifiable on chain and MUST be rejected. (`sbo://mingo.place` remains the human-facing label a consent surface may *display*; the warrant it signs carries the resolved `sbo+raw://` form.)
+
+Given the database's canonical identity `(chain, appId, firstBlock, genesisHash)`, a warrant audience `A` **identifies this database** iff `A` parses as an `sbo+raw://` reference and:
+
+1. its authority equals `chain:appId` (**required**); and
+2. if `A` carries an `@firstBlock` anchor, it equals this database's `firstBlock`; and
+3. if `A` carries `?genesis=sha256:…`, it equals this database's `genesisHash`.
+
+A **bare-authority** audience (`sbo+raw://avail:turing:506/`) thus authorizes the app across a regenesis; a **pinned** audience (`sbo+raw://avail:turing:506@3567386/?genesis=sha256:7c42…`) confines the grant to one genesis instance. Both are valid; the agent chooses per request how broad a grant to ask for. The reference MUST be **bare** in the sense of the URI spec (no `path`/`creator`/`id`) — path-level restriction is expressed by scopes, not by the audience.
+
+### Warrant Scopes
+
+Scopes are opaque to the broker and IdP (browserid never interprets them); this specification defines the grammar SBO validators enforce. Each scope is a string `<dimension>:<value>`:
+
+| Dimension | Constrains | Value |
+|-----------|-----------|-------|
+| `action` | the message `Action` | `post` \| `transfer` \| `delete` \| `import` |
+| `path` | the message `Path` | a glob (`*` within a segment, `**` across segments), e.g. `/attestor/*` |
+| `schema` | the message `Content-Schema` | exact schema id, e.g. `nft.v1` |
+
+Evaluation is deterministic (offline-replayable): **OR within a dimension** (any matching `path:` scope satisfies the path dimension) and **AND across dimensions** (every dimension that appears must be satisfied). A dimension with no scope is unconstrained. A write is scope-authorized iff it satisfies every present dimension. The grammar is intentionally open to extension (`owner:`, `policy:`, `size:`, …); an **unrecognized dimension MUST cause the write to be UNAUTHORIZED** (fail-closed — a validator that does not understand a restriction must not ignore it).
 
 ## DNSSEC Evidence (`Auth-Evidence`)
 
@@ -201,6 +265,32 @@ function authorize(message, chain_state):
         at_time    = T)                                # every RRSIG window must contain T
     if provider_key is None:                           return UNAUTHORIZED
     if not verify_jwt_signature(cert, provider_key):   return UNAUTHORIZED
+
+    # Agent-attributed: a typed agent certificate is inert without a warrant
+    if cert["typ"] == "browserid-agent-cert-v1":
+        if message.AuthWarrant is None:                return UNAUTHORIZED  # fail-closed
+        w = parse_jws(message.AuthWarrant)
+        if w["typ"]   != "browserid-agent-warrant-v1": return UNAUTHORIZED
+        if w["agent"] != addr:                         return UNAUTHORIZED  # this agent
+        if w["iss"]   != cert["agent"]["parent"]:      return UNAUTHORIZED  # its delegator
+        if not (w["iat"] <= T <= w["exp"]):            return UNAUTHORIZED
+
+        parent = parse_jwt(w["parent-cert"])
+        if w["iss"] != parent["principal"]["email"]:   return UNAUTHORIZED
+        # parent-cert's issuer key is DNSSEC-proven exactly like `cert`'s
+        # (usually the same broker → the same evidence). Signing-time semantics:
+        if not (parent["iat"] <= w["iat"] <= parent["exp"]): return UNAUTHORIZED
+        pkey = dnssec_validate(evidence_for(parent["iss"]),
+                 owner_name="_browserid."+parent["iss"],
+                 root_ksk=pinned_root_ksk(chain_state, T), at_time=T)
+        if pkey is None:                               return UNAUTHORIZED
+        if not verify_jws_signature(w, parent["public-key"]): return UNAUTHORIZED
+        if not verify_jwt_signature(parent, pkey):     return UNAUTHORIZED
+
+        # Audience must identify THIS database; scopes must permit THIS write
+        if not audience_identifies_db(w["aud"], chain_state): return UNAUTHORIZED
+        if not scopes_authorize(w["scopes"], message):        return UNAUTHORIZED
+        # Attribution root recorded for indexers = cert["agent"]["parent"]
 
     return AUTHORIZED
 ```

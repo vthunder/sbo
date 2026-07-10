@@ -21,7 +21,7 @@ base64 = "0.22"
 dirs = "5"
 hickory-resolver = "0.24"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "480a4be47465cab0626e6366b75ee536504a3896" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "4fdfa86" }
 dnssec-prover = "0.6.8"
 
 [dev-dependencies]
