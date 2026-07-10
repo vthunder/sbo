@@ -95,7 +95,7 @@ for email-rooted writes (`sbo-daemon/src/validate.rs`).
 > DNSSEC-signed host certificates land, step 5 generalizes from a single
 > issuer-key check to verifying the certificate chain up to the DNSSEC key
 > `K_dns` (directly, or via a host cert also signed by `K_dns`). To be specified
-> here when host certs are implemented (browserid-ng bean `28uc` Phase 2).
+> here when host certs are implemented (browserid-ng bean `browserid-ng-dff5`).
 
 ## 5. Evidence freshness
 
