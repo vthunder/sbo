@@ -175,8 +175,26 @@ Scopes are opaque to the broker and IdP (browserid never interprets them); this 
 | `action` | the message `Action` | `post` \| `transfer` \| `delete` \| `import` |
 | `path` | the message `Path` | a glob (`*` within a segment, `**` across segments), e.g. `/attestor/*` |
 | `schema` | the message `Content-Schema` | exact schema id, e.g. `nft.v1` |
+| `as` | the **effective author** of the write (see [On-behalf writes](#on-behalf-writes)) | an email — MUST equal the warrant's `iss` (the delegator). At most one per warrant. |
 
 Evaluation is deterministic (offline-replayable): **OR within a dimension** (any matching `path:` scope satisfies the path dimension) and **AND across dimensions** (every dimension that appears must be satisfied). A dimension with no scope is unconstrained. A write is scope-authorized iff it satisfies every present dimension. The grammar is intentionally open to extension (`owner:`, `policy:`, `size:`, …); an **unrecognized dimension MUST cause the write to be UNAUTHORIZED** (fail-closed — a validator that does not understand a restriction must not ignore it).
+
+### On-behalf writes
+
+By default an agent write authorizes as the **agent's own identity** (`Auth-Cert.principal.email`, e.g. `attestor@example.com`). To write to an object owned by the *delegator* — or to set the delegator as `Creator` — the agent must be authorized *as the delegator*, which the base agent identity is not. The `as:` scope grants exactly that, scoped:
+
+- A warrant carrying **`as:<email>`** (where `<email>` MUST equal the warrant's `iss`) makes the **effective author** of writes under that warrant the **delegator** rather than the agent. The write's owner-authorization, `Creator` integrity, and name-claim checks all evaluate against the delegator.
+- Because a warrant is signed by the delegator, `as:` can only ever name the delegator themselves — an agent cannot be warranted to act as a third party.
+
+**Safety — delegation never exceeds the delegator.** An on-behalf write authorizes *as the delegator, under the same on-chain policy the delegator faces*. So it can do **at most what the delegator can do**, narrowed by the warrant's other scopes. It is not a policy bypass: a restriction the delegator is subject to still applies. The warrant can only ever *narrow* the delegator's authority, never widen it.
+
+**Accountability — delegated, not silent.** The object's `Owner`/`Creator` is the delegator, but the `Auth-Warrant` is part of the (message-bound) proof, so the write's provenance always names the agent. Indexers MUST be able to surface "written by `<agent>` acting as `<delegator>`." This is accountable delegation, not untraceable impersonation.
+
+**Guardrails.**
+1. An `as:` warrant MUST also carry at least one `path:` scope — an unrestricted act-as-delegator grant MUST be rejected. Impersonation is never repository-wide.
+2. A repository MAY, by policy, decline to honor on-behalf warrants at all (a `direct-writes-only` repo); this hook is reserved (see [Policy Specification](./SBO%20Policy%20Specification.md)). Absent such a policy, on-behalf warrants are honored.
+
+**One warrant, one author.** `as:` is a *per-warrant* mode: a warrant is either agent-as-itself or on-behalf, never both (a single write has exactly one author). An agent that needs both — e.g. post to a shared area as itself *and* draft in the delegator's namespace as the delegator — holds **two warrants** at the same audience, distinguished by their scopes. Consequently a warrant's identity for grant/registry purposes is `(audience, scopes)`, not audience alone; two warrants may share an audience and differ only in mode.
 
 ## DNSSEC Evidence (`Auth-Evidence`)
 
@@ -290,10 +308,27 @@ function authorize(message, chain_state):
         # Audience must identify THIS database; scopes must permit THIS write
         if not audience_identifies_db(w["aud"], chain_state): return UNAUTHORIZED
         if not scopes_authorize(w["scopes"], message):        return UNAUTHORIZED
+
+        # Effective author: the agent by default, or the delegator if the
+        # warrant carries `as:<delegator>` (scoped — see On-behalf writes).
+        effective_email = addr                       # the agent identity
+        as_scope = scope_value(w["scopes"], "as")
+        if as_scope is not None:
+            if as_scope != w["iss"]:                  return UNAUTHORIZED
+            if not has_path_scope(w["scopes"]):       return UNAUTHORIZED  # guardrail 1
+            if repo_rejects_on_behalf(chain_state):   return UNAUTHORIZED  # guardrail 2
+            effective_email = w["iss"]                # act AS the delegator
+        # The message is authorized for `effective_email` (owner match, Creator,
+        # name-claim all evaluate against it). Provenance (agent + parent) stays
+        # recoverable from the message's Auth-Warrant.
+        if not authorized_for(effective_email, message, chain_state):
+            return UNAUTHORIZED
         # Attribution root recorded for indexers = cert["agent"]["parent"]
 
     return AUTHORIZED
 ```
+
+Note the last check folds the agent branch back into the owner-authorization it started from: `authorized_for(effective_email, …)` is the same email-controller match the outer algorithm performs, now run against the *effective* author. For a default (non-`as:`) agent write `effective_email` is the agent, so it authorizes writes to objects owned by the agent (or where the agent's policy grants access); for an on-behalf write it is the delegator, so no per-object policy is needed.
 
 Every input is on-chain (`chain_state`, the message, the pinned root KSK) or derived deterministically from them, so all correct clients reach the same decision and no sequencer, checkpoint, or trusted recorder is involved.
 

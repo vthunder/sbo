@@ -146,11 +146,19 @@ For an agent certificate, after §4 succeeds for the agent certificate itself:
     warrant scopes (AND across dimensions, OR within; unknown dimension ⇒
     UNAUTHORIZED).
 
+13. **Effective author** — the write authorizes as the **agent** address by
+    default; if the warrant carries `as:<delegator>` (== `iss`, and combined
+    with a `path:` scope), the effective author is the **delegator**, so
+    owner/`Creator`/name-claim checks evaluate against the delegator (an
+    on-behalf write — see the Authorization Specification). An on-behalf write
+    can never exceed what the delegator's own policy permits.
+
 The reference implementation adds this as a branch in
 `verify_attribution`/`authorize` (`sbo-core/src/attribution.rs`,
 `sbo-core/src/authorize.rs`) and a new `Auth-Warrant` header in the signed block
-(`sbo-core/src/wire`). The attributed email on success is the **agent** address;
-indexers additionally record `agent.parent` as the attribution root.
+(`sbo-core/src/wire`). The attributed email on success is the **effective**
+author (agent, or delegator under `as:`); indexers additionally record the agent
+identity and `agent.parent` as provenance.
 
 ## 5. Evidence freshness
 

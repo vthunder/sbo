@@ -5,7 +5,7 @@ status: todo
 type: feature
 priority: normal
 created_at: 2026-07-10T18:30:21Z
-updated_at: 2026-07-10T21:54:30Z
+updated_at: 2026-07-10T22:22:41Z
 ---
 
 Coordination item from browserid-ng v0.4 (2026-07-10). Agent identities now present `agent_cert~warrant~assertion` chains where the warrant's `aud` is an opaque exact-match URI — non-HTTP schemes are explicitly valid (browserid-ng agent spec §5.2). The ledger should be a relying party with its own audience, so a principal grants "act at mingo.place the website" and "write to the ledger" as separate, separately-scoped warrants.
@@ -62,3 +62,11 @@ attestor writes objects owned by attestor@browserid.me -> per-write agent-cert+w
 3. sbo-core: attribution.rs warrant-aware branch; wire/parser Auth-Warrant header.
 4. browserid-agent / consent: resolve sbo://->sbo+raw:// for display+signing; agent requests the ledger warrant.
 5. mingo: attestor flow assembles the write (agent cert + warrant + evidence).
+
+## On-behalf writes (as:) — added 2026-07-11
+
+Two delegation models, both supported: (A) agent-as-itself (writes as attestor@…, needs an SBO policy to touch the user's objects) and (B) on-behalf (a warrant with an `as:<delegator>` scope makes the effective author the delegator — no policy edit; user is owner/Creator). B is required for 'set user as creator' and 'edit user-owned object w/o policy' (SBO's Creator-integrity + owner checks need authorization AS the user). Spec drafted in Authorization Spec (scope grammar `as:` row + On-behalf writes subsection + effective-author in the verify algorithm) and Attribution Spec §4a step 13.
+
+Key properties: on-behalf ≤ delegator's own rights (never a policy bypass; only narrows); accountable (Auth-Warrant in the proof names the agent even though owner=delegator); guardrails — `as:` MUST carry a `path:` scope, and a repo MAY decline on-behalf (direct-writes-only, hook reserved).
+
+`as:` is a **per-warrant mode** (one write, one author), not per-scope. Both models at once = **two warrants at the same audience**, distinguished by scopes → a grant's identity is (audience, scopes), not audience alone. Follow-up impl: g0ba batch-dedup and jipx registry key must include a scope fingerprint (broker hashes opaque scopes without interpreting them).
