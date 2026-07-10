@@ -13,7 +13,7 @@ path = "src/main.rs"
 sbo-core.workspace = true
 sbo-crypto.workspace = true
 sbo-capture = { path = "../sbo-capture" }
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "7d69c948890eb19e6d06daf2c97b68fb66951c9a" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "480a4be47465cab0626e6366b75ee536504a3896" }
 sbo-avail.workspace = true
 sbo-daemon.workspace = true
 sbo-rpc.workspace = true
@@ -29,6 +29,8 @@ tracing-subscriber.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
+base64.workspace = true
 flate2.workspace = true
 parity-scale-codec = "3"
 avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", branch = "main" }

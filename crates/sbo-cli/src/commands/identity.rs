@@ -15,6 +15,7 @@ pub async fn create(
     uri: &str,
     name: &str,
     key_alias: Option<&str>,
+    cert_path: Option<&std::path::Path>,
     display_name: Option<&str>,
     description: Option<&str>,
     avatar: Option<&str>,
@@ -42,8 +43,17 @@ pub async fn create(
         None
     };
 
-    // Create identity JWT using presets
-    let wire_bytes = if profile_path.is_some() {
+    // Create identity JWT using presets. A KEY-ROOTED identity.v1; with `--cert`
+    // it carries browserid Auth-Cert + captured DNSSEC Auth-Evidence so it passes
+    // the primary-domain name-claim gate (claiming <name> proves <name>@<domain>),
+    // while the record itself remains key-rooted (writes signed by the key).
+    let wire_bytes = if let Some(cert_path) = cert_path {
+        let auth_cert = std::fs::read_to_string(cert_path)
+            .map_err(|e| anyhow::anyhow!("read cert {}: {}", cert_path.display(), e))?
+            .trim()
+            .to_string();
+        attributed_claim_wire(&signing_key, name, &auth_cert).await?
+    } else if profile_path.is_some() {
         sbo_core::presets::claim_name_with_profile(
             &signing_key,
             name,
@@ -734,6 +744,251 @@ fn repo_domain(uri: Option<&str>) -> Option<String> {
     uri.and_then(sbo_core::dns::extract_domain)
 }
 
+/// The agent credential file created at browserid.me/agents (delegation-chain
+/// provisioning, spec v0.2). Holds the provisioning private key and the
+/// user-signed delegation; never a bearer secret.
+#[derive(serde::Deserialize)]
+struct AgentCredential {
+    /// base64url (no pad) Ed25519 seed of the provisioning key `P_priv`
+    secret_key: String,
+    /// The `U_cert~P_cert` delegation bundle
+    delegation: String,
+    /// Broker base URL (endorses requests)
+    broker: String,
+    /// Target IdP base URL (mints)
+    idp: String,
+}
+
+impl AgentCredential {
+    fn provisioning_key(&self) -> Result<browserid_core::KeyPair> {
+        use base64::Engine;
+        let seed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(self.secret_key.trim())
+            .map_err(|e| anyhow::anyhow!("bad credential secret_key: {}", e))?;
+        browserid_core::KeyPair::from_seed(&seed)
+            .map_err(|e| anyhow::anyhow!("bad credential provisioning key: {}", e))
+    }
+}
+
+/// Host (with port) of a base URL — the `<idp-domain>` a request must target.
+fn url_host(url: &str) -> &str {
+    let after = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    after.split('/').next().unwrap_or(after)
+}
+
+/// Build a key-rooted `identity.v1` claim wire carrying a browserid `Auth-Cert`
+/// plus freshly captured DNSSEC `Auth-Evidence` for the cert's issuer — the
+/// primary-domain name-claim gate (claiming `<name>` proves `<name>@<domain>`),
+/// while the record itself remains key-rooted (writes signed by the key).
+async fn attributed_claim_wire(
+    signing_key: &sbo_core::crypto::SigningKey,
+    name: &str,
+    auth_cert: &str,
+) -> Result<Vec<u8>> {
+    let cert = browserid_core::Certificate::parse(auth_cert)
+        .map_err(|e| anyhow::anyhow!("parse cert: {}", e))?;
+    let issuer = cert.issuer().to_string();
+    let resolver = dns_resolver()?;
+    eprintln!("Key-rooted identity.v1 for '{name}' with cert (issuer {issuer}); capturing DNSSEC evidence …");
+    let proof = sbo_capture::capture_evidence(resolver, &issuer)
+        .await
+        .map_err(|e| anyhow::anyhow!("capture evidence for {issuer}: {}", e))?;
+    let auth_evidence = sbo_core::authorize::encode_auth_evidence_inline(&proof);
+    eprintln!("  ✓ evidence captured for {issuer}");
+    Ok(sbo_core::presets::claim_name_attributed(signing_key, name, auth_cert, &auth_evidence))
+}
+
+/// One-shot agent provisioning (mingo-ua8w): mint an attributed agent identity
+/// from an agent-enabled IdP for the KEYRING key, then claim it on-chain
+/// key-rooted. Replaces the /admin/provision hard path.
+///
+/// Uses the delegation-chain protocol (browserid-ng spec v0.2): a **credential
+/// file** (`SBO_AGENT_CREDENTIAL`, created once by a human at browserid.me) holds
+/// the provisioning private key `P_priv` and the `U_cert~P_cert` delegation. We
+/// sign a mint request for the KEYRING key (the sbo key IS the agent key, one
+/// custody system), get it endorsed by the broker, and present the dual-signed
+/// request to the IdP — which mints a fresh cert (Auth-Cert always current).
+/// Idempotent end to end: the IdP re-provision returns a fresh cert for the same
+/// name, and re-claiming an on-chain name the same key already controls is a
+/// controller update.
+pub async fn provision_agent(
+    uri: Option<&str>,
+    name: &str,
+    key_alias: Option<&str>,
+    credential_override: Option<&std::path::Path>,
+    dry_run: bool,
+    no_wait: bool,
+) -> Result<()> {
+    use browserid_core::provisioning::{ProvisioningCert, ProvisioningRequest, RequestBundle};
+
+    if sbo_core::message::Id::new(name).is_err() {
+        anyhow::bail!(
+            "'{name}' is not a valid name (allowed characters: letters, digits, '-' '.' '_' '~')"
+        );
+    }
+
+    // Load the agent credential (P_priv + delegation + broker + idp).
+    let cred_path = credential_override
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("SBO_AGENT_CREDENTIAL").ok().map(std::path::PathBuf::from))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "set SBO_AGENT_CREDENTIAL to an agent credential file (create one at \
+                 https://browserid.me/agents, delegated from your identity), or pass --credential"
+            )
+        })?;
+    let cred: AgentCredential = serde_json::from_str(
+        &std::fs::read_to_string(&cred_path)
+            .map_err(|e| anyhow::anyhow!("read credential {}: {}", cred_path.display(), e))?,
+    )
+    .map_err(|e| anyhow::anyhow!("parse credential {}: {}", cred_path.display(), e))?;
+
+    let broker = cred.broker.trim_end_matches('/').to_string();
+    let idp = cred.idp.trim_end_matches('/').to_string();
+    let idp_domain = url_host(&idp).to_string();
+    let prov_key = cred.provisioning_key()?;
+
+    let mut keyring = Keyring::open()?;
+    let alias = keyring.resolve_alias(key_alias)?;
+    let signing_key = keyring.get_signing_key(&alias)?;
+    let agent_pubkey = browserid_core::PublicKey::from_bytes(&signing_key.public_key().bytes)
+        .map_err(|e| anyhow::anyhow!("could not convert signing key: {}", e))?;
+
+    // Build the signed mint request for the keyring key, then endorse + mint.
+    let (u_cert, p_cert) = cred.delegation.split_once('~').ok_or_else(|| {
+        anyhow::anyhow!("credential delegation must be U_cert~P_cert")
+    })?;
+    let request = ProvisioningRequest::mint(&idp_domain, name, &agent_pubkey, false, &prov_key)
+        .map_err(|e| anyhow::anyhow!("build request: {}", e))?;
+    let bundle = RequestBundle::new(
+        browserid_core::Certificate::parse(u_cert).map_err(|e| anyhow::anyhow!("parse U_cert: {e}"))?,
+        ProvisioningCert::parse(p_cert).map_err(|e| anyhow::anyhow!("parse P_cert: {e}"))?,
+        request,
+    );
+    let bundle_str = bundle.encoded().to_string();
+
+    eprintln!("Provisioning agent identity '{name}' at {idp} (endorsed by {broker}) …");
+    let http = reqwest::Client::new();
+
+    // 1. Broker endorsement.
+    let endorsement = {
+        let resp = http
+            .post(format!("{broker}/provision/endorse"))
+            .json(&serde_json::json!({ "request_bundle": bundle_str }))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("broker request failed: {}", e))?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        if body["success"] != serde_json::Value::Bool(true) {
+            let reason = body["reason"].as_str().unwrap_or("no reason given");
+            let hint = match status {
+                403 => " (is the provisioning cert registered and unrevoked at the broker?)",
+                404 => " (broker doesn't know this provisioning cert — re-create the credential)",
+                429 => " (endorsement rate limit)",
+                _ => "",
+            };
+            anyhow::bail!("broker refused endorsement ({status}): {reason}{hint}");
+        }
+        body["endorsement"].as_str().unwrap_or_default().to_string()
+    };
+
+    // 2. IdP mint.
+    let resp = http
+        .post(format!("{idp}/provision/mint"))
+        .json(&serde_json::json!({ "request_bundle": bundle_str, "endorsement": endorsement }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("IdP request failed: {}", e))?;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if body["success"] != serde_json::Value::Bool(true) {
+        let reason = body["reason"].as_str().unwrap_or("no reason given");
+        let hint = match status {
+            401 => " (endorsement invalid/stale, or from an untrusted broker)",
+            403 => " (this agent identity was revoked; pick a new name)",
+            404 => " (does the IdP have agent provisioning enabled?)",
+            409 => " (name taken by another identity or a human handle)",
+            429 => " (agent identity quota reached; revoke one or raise the quota)",
+            _ => "",
+        };
+        anyhow::bail!("IdP refused provisioning ({status}): {reason}{hint}");
+    }
+    let email = body["email"].as_str().unwrap_or_default().to_string();
+    let auth_cert = body["cert"].as_str().unwrap_or_default().to_string();
+    eprintln!("  ✓ IdP minted {email}");
+
+    // The on-chain claim gate binds <name> to <name>@<repo-primary-domain>; a
+    // cert from a different domain's IdP will fail it.
+    if let Some(repo_dom) = repo_domain(uri) {
+        if let Some((_, email_dom)) = sbo_core::dns::parse_email(&email) {
+            if email_dom != repo_dom {
+                eprintln!(
+                    "Warning: IdP minted {email} but the repo's primary domain is {repo_dom}; \
+                     the on-chain name claim will likely be rejected."
+                );
+            }
+        }
+    }
+
+    let wire = attributed_claim_wire(&signing_key, name, &auth_cert).await?;
+
+    if dry_run {
+        // Raw wire on stdout (diagnostics went to stderr), for piping to a
+        // submit endpoint.
+        use std::io::Write;
+        std::io::stdout().write_all(&wire).ok();
+        return Ok(());
+    }
+
+    let Some(uri) = uri else {
+        println!("\n  No target URI given — printing the message for manual posting.");
+        println!("\n--- SBO message (post to /sys/names/{name}) ---");
+        println!("{}", String::from_utf8_lossy(&wire));
+        return Ok(());
+    };
+
+    let config = Config::load(&Config::config_path())?;
+    let client = IpcClient::new(config.daemon.socket_path);
+    let identity_uri = compose_identity_uri(uri, name);
+
+    println!("  Submitting to {uri} …");
+    match client
+        .request(Request::SubmitIdentity {
+            uri: uri.to_string(),
+            name: name.to_string(),
+            data: wire,
+            wait: !no_wait,
+        })
+        .await
+    {
+        Ok(Response::Ok { data }) => {
+            let status = data["status"].as_str().unwrap_or("unknown");
+            println!("\n  {} {}", status_glyph(status), status);
+            println!("  URI: {identity_uri}");
+            if let Some(msg) = data["message"].as_str() {
+                println!("  {msg}");
+            }
+            if let Err(e) = keyring.add_identity(&alias, &identity_uri) {
+                eprintln!("Warning: failed to update keyring: {e}");
+            }
+            println!("\n  Agent '{name}' is ready: writes signed by key '{alias}' with");
+            println!("  `Owner: {name}` are authorized by signature (no per-write certs).");
+            println!("  Re-mint certs anytime via the same API key (e.g. daemon [attest]).");
+        }
+        Ok(Response::Error { message }) => {
+            anyhow::bail!("submission failed: {message}");
+        }
+        Err(e) => {
+            anyhow::bail!("failed to connect to daemon: {e}. Is it running? Try: sbo daemon start");
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the broker base URL and password from env, with sensible defaults.
 /// `SBO_BROKER_URL` overrides the default `https://id.<email-domain>`;
 /// `SBO_BROKER_PASSWORD` is required (no interactive prompt yet).
@@ -784,6 +1039,42 @@ async fn capture_for(
     Ok((signing_key, captured))
 }
 
+/// Like [`capture_for`], but use a PRE-MINTED browserid cert (e.g. from the IdP
+/// `/admin/provision` endpoint) instead of the interactive broker capture. The
+/// DNSSEC `Auth-Evidence` is still captured live for the cert's issuer, so the
+/// resulting attribution verifies identically. The signer key must match the
+/// cert's certified public key (checked downstream by the verifier).
+async fn capture_with_cert(
+    email: &str,
+    key_alias: Option<&str>,
+    cert_path: &std::path::Path,
+) -> Result<(sbo_core::crypto::SigningKey, sbo_capture::CapturedAttribution)> {
+    let keyring = Keyring::open()?;
+    let alias = keyring.resolve_alias(key_alias)?;
+    let signing_key = keyring.get_signing_key(&alias)?;
+
+    let auth_cert = std::fs::read_to_string(cert_path)
+        .map_err(|e| anyhow::anyhow!("read cert {}: {}", cert_path.display(), e))?
+        .trim()
+        .to_string();
+
+    // The evidence must cover the cert's ISSUER (the provider whose key signed
+    // it), since the verifier extracts `_browserid.<iss>` from the proof.
+    let cert = browserid_core::Certificate::parse(&auth_cert)
+        .map_err(|e| anyhow::anyhow!("parse cert: {}", e))?;
+    let issuer = cert.issuer().to_string();
+
+    let resolver = dns_resolver()?;
+    eprintln!("Using pre-minted cert (issuer {issuer}) for {email}; capturing DNSSEC evidence …");
+    let proof = sbo_capture::capture_evidence(resolver, &issuer)
+        .await
+        .map_err(|e| anyhow::anyhow!("capture evidence for {issuer}: {}", e))?;
+    let auth_evidence = sbo_core::authorize::encode_auth_evidence_inline(&proof);
+
+    eprintln!("  ✓ evidence captured for {issuer}");
+    Ok((signing_key, sbo_capture::CapturedAttribution { auth_cert, auth_evidence, issuer }))
+}
+
 /// Import an email identity into the local keyring.
 ///
 /// Captures attribution to *verify* the active key controls the email, then
@@ -817,6 +1108,8 @@ pub async fn create_domain_certified(
     uri: Option<&str>,
     name_override: Option<&str>,
     key_alias: Option<&str>,
+    cert_path: Option<&std::path::Path>,
+    dry_run: bool,
     no_wait: bool,
 ) -> Result<()> {
     let (local_part, email_dom) = sbo_core::dns::parse_email(email)
@@ -856,7 +1149,10 @@ pub async fn create_domain_certified(
         );
     }
 
-    let (signing_key, captured) = capture_for(email, key_alias).await?;
+    let (signing_key, captured) = match cert_path {
+        Some(path) => capture_with_cert(email, key_alias, path).await?,
+        None => capture_for(email, key_alias).await?,
+    };
     let iat = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -872,7 +1168,15 @@ pub async fn create_domain_certified(
     );
 
     let tier = if domain_matches { "canonical name" } else { "external-email handle" };
-    println!("\n✓ Built identity.email.v1 '{name}' for {email} ({tier})");
+    eprintln!("\n✓ Built identity.email.v1 '{name}' for {email} ({tier})");
+
+    if dry_run {
+        // Emit the raw wire on stdout (diagnostics on stderr above), for piping
+        // to a submit endpoint. Skips the daemon/IPC submit path entirely.
+        use std::io::Write;
+        std::io::stdout().write_all(&wire).ok();
+        return Ok(());
+    }
 
     let Some(uri) = uri else {
         println!("\n  No target URI given — printing the message for manual posting.");

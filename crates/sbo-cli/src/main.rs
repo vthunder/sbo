@@ -277,6 +277,13 @@ enum IdCommands {
         #[arg(long)]
         key: Option<String>,
 
+        /// Path to a pre-minted browserid cert (with `--email`): skip the
+        /// interactive broker capture and use this cert as `Auth-Cert`. DNSSEC
+        /// `Auth-Evidence` is still captured for the cert's issuer. For
+        /// programmatic provisioning (e.g. via the IdP `/admin/provision`).
+        #[arg(long)]
+        cert: Option<PathBuf>,
+
         /// Display name (e.g., "Alice Smith")
         #[arg(long)]
         display_name: Option<String>,
@@ -302,6 +309,45 @@ enum IdCommands {
         dry_run: bool,
 
         /// Don't wait for on-chain verification (return immediately after submission)
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// Provision an agent identity headlessly and claim it on-chain
+    ///
+    /// One-shot service/agent onboarding (replaces the /admin/provision hard
+    /// path): using an agent CREDENTIAL created once by a human at
+    /// browserid.me/agents (delegation-chain provisioning), signs a mint
+    /// request for the KEYRING key, gets it endorsed by the broker, mints an
+    /// attributed `<name>@<domain>` cert at the IdP, then claims
+    /// `/sys/names/<name>` KEY-ROOTED — after which writes are authorized by
+    /// signature alone. Idempotent. Broker + IdP come from the credential.
+    ///
+    /// Examples:
+    ///   SBO_AGENT_CREDENTIAL=cred.json sbo id provision-agent attestor2 sbo+dns://mingo.place
+    ///   sbo id provision-agent attestor2 --credential cred.json --dry-run
+    ProvisionAgent {
+        /// Agent name to mint and claim (e.g. attestor2)
+        name: String,
+
+        /// SBO URI of the chain/app to claim the name on. Optional: when
+        /// omitted, the claim message is printed for manual posting.
+        uri: Option<String>,
+
+        /// Key alias whose key becomes the agent's key (default: "default")
+        #[arg(long)]
+        key: Option<String>,
+
+        /// Agent credential file (default: $SBO_AGENT_CREDENTIAL). Created at
+        /// browserid.me/agents; holds the provisioning key + delegation.
+        #[arg(long)]
+        credential: Option<PathBuf>,
+
+        /// Output the SBO claim message to stdout instead of submitting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Don't wait for on-chain verification
         #[arg(long)]
         no_wait: bool,
     },
@@ -1470,7 +1516,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Id(id_cmd) => {
             match id_cmd {
-                IdCommands::Create { uri, name, email, key, display_name, description, avatar, website, binding, dry_run, no_wait } => {
+                IdCommands::Create { uri, name, email, key, cert, display_name, description, avatar, website, binding, dry_run, no_wait } => {
                     if let Some(email_addr) = email {
                         // Email-rooted (browserid + DNSSEC) identity flow.
                         // `name` is an optional explicit handle (required to
@@ -1480,6 +1526,8 @@ async fn main() -> anyhow::Result<()> {
                             uri.as_deref(),
                             name.as_deref(),
                             key.as_deref(),
+                            cert.as_deref(),
+                            dry_run,
                             no_wait,
                         ).await?;
                     } else {
@@ -1490,6 +1538,7 @@ async fn main() -> anyhow::Result<()> {
                             &uri,
                             &name,
                             key.as_deref(),
+                            cert.as_deref(),
                             display_name.as_deref(),
                             description.as_deref(),
                             avatar.as_deref(),
@@ -1499,6 +1548,16 @@ async fn main() -> anyhow::Result<()> {
                             no_wait,
                         ).await?;
                     }
+                }
+                IdCommands::ProvisionAgent { name, uri, key, credential, dry_run, no_wait } => {
+                    commands::identity::provision_agent(
+                        uri.as_deref(),
+                        &name,
+                        key.as_deref(),
+                        credential.as_deref(),
+                        dry_run,
+                        no_wait,
+                    ).await?;
                 }
                 IdCommands::List { uri } => {
                     commands::identity::list(uri.as_deref()).await?;
