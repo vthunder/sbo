@@ -8,7 +8,7 @@
 
 use browserid_core::{Certificate, KeyPair, Warrant};
 use chrono::{Duration, Utc};
-use sbo_core::attribution::verify_warrant_with_provider_key;
+use sbo_core::attribution::{verify_warrant_with_provider_key, TrustAnchors};
 use sbo_core::authorize::{agent_effective_email, audience_identifies_db};
 use sbo_core::crypto::{ContentHash, Signature, SigningKey};
 use sbo_core::message::{Action, Id, Message, ObjectType, Path};
@@ -47,6 +47,14 @@ fn artifacts(scopes: Option<Vec<String>>, aud: &str) -> Artifacts {
         &parent, "attestor@browserid.me", aud, scopes, Duration::days(30), &human,
     ).unwrap();
     Artifacts { provider, agent_cert, warrant: warrant.encoded().to_string(), agent_seed: *agent.secret_bytes() }
+}
+
+/// The delegator here (`human@example.com`) is fallback-certified by browserid.me
+/// (domain != issuer), so verifying the warrant needs browserid.me pinned as a
+/// broker for the delegator-authority check. A wide DNSSEC window (0..MAX) stands
+/// in for the proof these unit tests supply the provider key directly for.
+fn broker_anchors() -> TrustAnchors {
+    TrustAnchors::with_brokers(vec!["browserid.me".to_string()])
 }
 
 /// Assemble the SBO write an agent would post: signed by the agent's own key
@@ -101,7 +109,10 @@ fn warrant_backed_write_verifies_end_to_end_offline() {
         parsed.auth_warrant.as_deref().unwrap(),
         &a.agent_cert,
         &a.provider.public_key(),
+        0,
+        i64::MAX,
         now,
+        &broker_anchors(),
     )
     .expect("warrant should verify");
     assert_eq!(wa.agent_email, "attestor@browserid.me");
@@ -124,7 +135,7 @@ fn warrant_for_a_different_chain_is_rejected() {
     let a = artifacts(Some(vec!["action:post".into()]), "sbo+raw://avail:turing:999/");
     let msg = agent_write(&a, Action::Post, "/attestor/", None);
     let now = Utc::now().timestamp();
-    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), now).unwrap();
+    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), 0, i64::MAX, now, &broker_anchors()).unwrap();
     // Warrant is cryptographically fine, but its audience is a different app.
     assert!(agent_effective_email(&wa, &mingo_db(), None, "post", "/attestor/", None, true).is_err());
 }
@@ -134,7 +145,7 @@ fn out_of_scope_write_is_rejected() {
     let a = artifacts(Some(vec!["path:/attestor/**".into()]), MINGO_AUD_BARE);
     let msg = agent_write(&a, Action::Post, "/somewhere/", None);
     let now = Utc::now().timestamp();
-    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), now).unwrap();
+    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), 0, i64::MAX, now, &broker_anchors()).unwrap();
     assert!(agent_effective_email(&wa, &mingo_db(), None, "post", "/somewhere/", None, true).is_err());
 }
 
@@ -147,7 +158,7 @@ fn on_behalf_write_attributes_to_the_delegator() {
     );
     let msg = agent_write(&a, Action::Post, "/u/human/", None);
     let now = Utc::now().timestamp();
-    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), now).unwrap();
+    let wa = verify_warrant_with_provider_key(msg.auth_warrant.as_deref().unwrap(), &a.agent_cert, &a.provider.public_key(), 0, i64::MAX, now, &broker_anchors()).unwrap();
     let email = agent_effective_email(&wa, &mingo_db(), None, "post", "/u/human/", None, true).unwrap();
     assert_eq!(email, "human@example.com", "on-behalf: the write authorizes as the delegator");
     // And a repo that opts out of on-behalf rejects it.

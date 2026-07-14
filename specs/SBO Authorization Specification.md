@@ -151,7 +151,7 @@ Claims (browserid-ng agent spec §5.2):
 | `agent` | The agent identity. MUST equal the `Auth-Cert`'s `principal.email`. |
 | `aud` | The **canonical database identity** this warrant authorizes writing to (below). |
 | `scopes` | What the agent may write here ([Warrant Scopes](#warrant-scopes)). Absent ⇒ no on-chain write is authorized (a warrant minted for a web audience does not silently grant ledger writes). |
-| `parent-cert` | The delegator's certificate, embedded for self-contained offline verification. Its issuer is DNSSEC-proven exactly like the `Auth-Cert`'s (usually the same broker, so one `Auth-Evidence` covers both). |
+| `parent-cert` | The delegator's certificate, embedded for self-contained offline verification. Its issuer is DNSSEC-proven and its principal fully attributed **exactly like the `Auth-Cert`'s** — including the issuer-authority rule (the delegator's email domain equals its issuer, or the issuer is a pinned broker). The delegator's issuer **need not equal the agent's** (cross-issuer delegation: any user, certified by their own IdP, may warrant a third-party service agent certified by a different IdP). When the issuers are the same the one `Auth-Evidence` covers both; when they differ, the delegator issuer's proof is supplied separately — inline as a second evidence, or resolved on chain from `/sys/dnssec/<delegator-issuer>`. |
 | `iat`/`exp` | Warrant window. Inclusion time MUST fall within it; and (signing-time semantics) `iat` MUST fall within `parent-cert`'s validity window. |
 
 ### The audience rule (canonical, offline-verifiable)
@@ -295,13 +295,22 @@ function authorize(message, chain_state):
 
         parent = parse_jwt(w["parent-cert"])
         if w["iss"] != parent["principal"]["email"]:   return UNAUTHORIZED
-        # parent-cert's issuer key is DNSSEC-proven exactly like `cert`'s
-        # (usually the same broker → the same evidence). Signing-time semantics:
+        # The delegator's issuer key is DNSSEC-proven exactly like `cert`'s. It
+        # MAY differ from the agent's issuer (cross-issuer delegation): when the
+        # same, one evidence covers both; when different, evidence_for() supplies
+        # the delegator issuer's own proof (a second inline evidence, or the
+        # on-chain /sys/dnssec/<delegator-issuer>). Signing-time semantics:
         if not (parent["iat"] <= w["iat"] <= parent["exp"]): return UNAUTHORIZED
-        pkey = dnssec_validate(evidence_for(parent["iss"]),
+        # inclusion time must also fall within the delegator proof + cert windows
+        pkey, p_from, p_until = dnssec_validate(evidence_for(parent["iss"]),
                  owner_name="_browserid."+parent["iss"],
                  root_ksk=pinned_root_ksk(chain_state, T), at_time=T)
         if pkey is None:                               return UNAUTHORIZED
+        if not (p_from <= T <= p_until):               return UNAUTHORIZED
+        if not (parent["iat"] <= T <= parent["exp"]):  return UNAUTHORIZED
+        # Delegator authority: primary IdP (domain == iss) or a pinned broker.
+        if domain_of(w["iss"]) != parent["iss"] and parent["iss"] not in brokers:
+            return UNAUTHORIZED
         if not verify_jws_signature(w, parent["public-key"]): return UNAUTHORIZED
         if not verify_jwt_signature(parent, pkey):     return UNAUTHORIZED
 

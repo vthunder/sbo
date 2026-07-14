@@ -179,8 +179,13 @@ fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref:
         let ev = evidence.ok_or_else(|| "agent write missing Auth-Evidence".to_string())?;
         let ev_bytes = parse_auth_evidence(&ev)?;
         let db = l2.db.as_ref().ok_or_else(|| "agent write cannot be validated without database identity".to_string())?;
+        // Cross-issuer warrant: the delegator may be certified by a different IdP
+        // than the agent. Resolve that issuer's on-chain /sys/dnssec proof and
+        // pass it (same-issuer warrants ignore it — the agent proof covers both).
+        let deleg_ev_bytes = attribution::warrant_delegator_issuer(warrant)
+            .and_then(|iss| fetch_evidence_object(state, &format!("/sys/dnssec/{iss}")));
         let wa = attribution::verify_attribution_with_warrant(
-            &signer, cert, warrant, &ev_bytes, inclusion_time, &l2.anchors,
+            &signer, cert, warrant, &ev_bytes, deleg_ev_bytes.as_deref(), inclusion_time, &l2.anchors,
         ).map_err(|e| e.to_string())?;
         // on_behalf_allowed defaults to true (spec: honored absent a repo opt-out).
         let effective = agent_effective_email(

@@ -89,10 +89,14 @@ proof gains one more artifact:
   scopes granted there.
 
 A typed agent certificate **without** a warrant attributes nothing (fail-closed;
-mirrors browserid-ng §5.3). The warrant's `parent-cert` is DNSSEC-verified
-exactly like the `Auth-Cert` — and since an agent and its delegator are normally
-certified by the same broker, the single `Auth-Evidence` for that broker covers
-both certificates. The audience MUST be the canonical `sbo+raw://` identity of
+mirrors browserid-ng §5.3). The warrant's `parent-cert` (the delegator) is
+DNSSEC-verified and fully attributed exactly like the `Auth-Cert` — key/window/
+signature **and** issuer authority. The delegator's issuer **need not equal the
+agent's**: a user certified by their own IdP may warrant a third-party service
+agent certified by a different IdP (cross-issuer delegation). When both share an
+issuer, the single `Auth-Evidence` covers both certificates; when they differ,
+the delegator issuer's proof is supplied separately (a second inline evidence,
+or resolved on chain from `/sys/dnssec/<delegator-issuer>`). The audience MUST be the canonical `sbo+raw://` identity of
 *this* database (never an `sbo://` DNS name — the `_sbo` record is not a trust
 root); scopes are the `<dimension>:<value>` grammar the validator enforces. All
 rules are normative in the Authorization Specification; this section only names

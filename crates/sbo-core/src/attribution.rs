@@ -148,9 +148,10 @@ pub enum AttributionError {
     #[error("warrant window mismatch")]
     WarrantWindowMismatch,
     /// The warrant's delegator (parent) certificate is from a different issuer
-    /// than the agent certificate — not yet supported (needs separate evidence).
-    #[error("warrant parent certificate has a different issuer than the agent certificate")]
-    ForeignParentIssuer,
+    /// than the agent certificate, and no DNSSEC evidence for the delegator's
+    /// issuer was supplied (needed to verify the parent certificate).
+    #[error("cross-issuer warrant is missing DNSSEC evidence for the delegator's issuer")]
+    MissingDelegatorEvidence,
     /// The issuer is neither the email's domain nor a pinned broker.
     #[error("issuer '{iss}' is not authorized for email domain '{domain}'")]
     IssuerNotAuthorized {
@@ -229,20 +230,29 @@ fn jws_verify_raw(encoded: &str, key: &PublicKey) -> Result<(), AttributionError
         .map_err(|_| AttributionError::WarrantSignatureInvalid)
 }
 
-/// Verify a warrant against an already-verified agent certificate, using the
-/// provider key already extracted from the DNSSEC proof (the delegator's
-/// embedded `parent-cert` shares the agent certificate's issuer, so the same
-/// key covers both). Pure and offline; windows use `inclusion_time`.
+/// Verify a warrant against an already-verified agent certificate. The
+/// delegator's embedded `parent-cert` is attributed with the same rigor as the
+/// agent certificate (§4) — DNSSEC window, cert window, signature, and issuer
+/// authority — under **the delegator's own** issuer provider key + proof window
+/// (`delegator_*`). For same-issuer delegation the caller passes the agent's
+/// provider key + window (one proof covers both); for cross-issuer delegation
+/// (a user certified by their own IdP warranting a service agent certified by a
+/// different IdP) the caller passes the delegator issuer's separate proof. Pure
+/// and offline; windows use `inclusion_time`.
 ///
 /// Returns the [`WarrantAttribution`] — the agent, the delegator, and the
 /// warrant's audience + scopes. **Does not** check that the audience identifies
 /// any particular database or that the scopes permit any particular write; the
 /// authorization layer does that (`sbo-core/src/authorize.rs`).
+#[allow(clippy::too_many_arguments)]
 pub fn verify_warrant_with_provider_key(
     auth_warrant: &str,
     agent_cert: &Certificate,
-    provider_key: &PublicKey,
+    delegator_provider_key: &PublicKey,
+    delegator_inception: i64,
+    delegator_expiration: i64,
     inclusion_time: i64,
+    anchors: &TrustAnchors,
 ) -> Result<WarrantAttribution, AttributionError> {
     let warrant =
         Warrant::parse(auth_warrant).map_err(|e| AttributionError::BadWarrant(e.to_string()))?;
@@ -266,8 +276,11 @@ pub fn verify_warrant_with_provider_key(
         )));
     }
 
-    // The embedded delegator certificate: same issuer, verifies under the
-    // provider key, and certifies the delegator email.
+    // Fully attribute the DELEGATOR under its own issuer's provider key — the
+    // same checks agent attribution runs (§4): the parent-cert certifies the
+    // delegator email, is signed by that issuer's key, and both the DNSSEC proof
+    // window and the cert window cover inclusion_time. The delegator's issuer may
+    // differ from the agent's (cross-issuer delegation).
     let parent = Certificate::parse(&claims.parent_cert)
         .map_err(|e| AttributionError::BadWarrant(format!("parent-cert: {e}")))?;
     if parent.email() != Some(parent_email) {
@@ -275,23 +288,42 @@ pub fn verify_warrant_with_provider_key(
             "parent-cert principal != warrant iss".into(),
         ));
     }
-    if parent.issuer() != agent_cert.issuer() {
-        return Err(AttributionError::ForeignParentIssuer);
+    if inclusion_time < delegator_inception || inclusion_time > delegator_expiration {
+        return Err(AttributionError::EvidenceWindowMismatch {
+            time: inclusion_time,
+            from: delegator_inception,
+            until: delegator_expiration,
+        });
+    }
+    let p = parent.claims();
+    let p_iat = p.iat.unwrap_or(p.exp);
+    if inclusion_time < p_iat || inclusion_time > p.exp {
+        return Err(AttributionError::CertWindowMismatch {
+            time: inclusion_time,
+            iat: p_iat,
+            exp: p.exp,
+        });
     }
     parent
-        .verify(provider_key)
+        .verify(delegator_provider_key)
         .map_err(|_| AttributionError::WarrantSignatureInvalid)?;
+    // Delegator authority: primary IdP (email domain == issuer) or pinned broker.
+    let deleg_domain = parent_email.split('@').nth(1).unwrap_or("");
+    if deleg_domain != parent.issuer() && !anchors.is_broker(parent.issuer()) {
+        return Err(AttributionError::IssuerNotAuthorized {
+            iss: parent.issuer().to_string(),
+            domain: deleg_domain.to_string(),
+        });
+    }
 
     // The warrant JWS is signed by the delegator's certified key.
     jws_verify_raw(warrant.encoded(), parent.public_key())?;
 
-    // Windows against inclusion_time (deterministic), plus signing-time:
-    // the warrant must have been signed while parent-cert was valid.
+    // Warrant window against inclusion_time, plus signing-time: the warrant must
+    // have been signed while the parent-cert was valid.
     if inclusion_time < claims.iat || inclusion_time > claims.exp {
         return Err(AttributionError::WarrantWindowMismatch);
     }
-    let p = parent.claims();
-    let p_iat = p.iat.unwrap_or(p.exp);
     if claims.iat < p_iat || claims.iat > p.exp {
         return Err(AttributionError::WarrantWindowMismatch);
     }
@@ -304,33 +336,70 @@ pub fn verify_warrant_with_provider_key(
     })
 }
 
+/// The issuer domain of a warrant's delegator, read from its embedded
+/// `parent-cert`. A caller (e.g. the daemon) uses this to resolve that issuer's
+/// DNSSEC proof for a cross-issuer warrant. Returns `None` if the warrant or its
+/// parent-cert can't be parsed.
+pub fn warrant_delegator_issuer(auth_warrant: &str) -> Option<String> {
+    let warrant = Warrant::parse(auth_warrant).ok()?;
+    let parent = Certificate::parse(&warrant.claims().parent_cert).ok()?;
+    Some(parent.issuer().to_string())
+}
+
 /// End-to-end agent attribution: verify the agent certificate (§4) **and** the
-/// accompanying warrant, sharing the single DNSSEC proof (agent and delegator
-/// are normally certified by the same broker). Offline; `inclusion_time` gated.
+/// accompanying warrant. Agent and delegator may be certified by the same IdP
+/// (one DNSSEC proof covers both — the common case) or by different IdPs
+/// (cross-issuer delegation — `delegator_evidence` supplies the delegator
+/// issuer's proof; required when the issuers differ). Offline; `inclusion_time`
+/// gated.
 pub fn verify_attribution_with_warrant(
     public_key: &str,
     auth_cert: &str,
     auth_warrant: &str,
     auth_evidence: &[u8],
+    delegator_evidence: Option<&[u8]>,
     inclusion_time: i64,
     anchors: &TrustAnchors,
 ) -> Result<WarrantAttribution, AttributionError> {
     let cert = Certificate::parse(auth_cert)
         .map_err(|e| AttributionError::BadCertificate(e.to_string()))?;
-    let iss = cert.issuer().to_string();
-    let (provider_key, inception, expiration) = extract_provider_key(auth_evidence, &iss)?;
+    let agent_iss = cert.issuer().to_string();
+    let (agent_key, ag_inception, ag_expiration) = extract_provider_key(auth_evidence, &agent_iss)?;
     // Agent certificate: key match, window, signature, issuer authority.
     verify_attribution_with_provider_key(
         public_key,
         &cert,
-        &provider_key,
-        inception,
-        expiration,
+        &agent_key,
+        ag_inception,
+        ag_expiration,
         inclusion_time,
         anchors,
     )?;
-    // Warrant: bindings, delegator cert, signatures, windows.
-    verify_warrant_with_provider_key(auth_warrant, &cert, &provider_key, inclusion_time)
+
+    // The delegator's issuer, from the warrant's embedded parent-cert. Same
+    // issuer → reuse the agent's proof; different → resolve/verify under the
+    // delegator issuer's own proof (must be supplied).
+    let warrant =
+        Warrant::parse(auth_warrant).map_err(|e| AttributionError::BadWarrant(e.to_string()))?;
+    let parent = Certificate::parse(&warrant.claims().parent_cert)
+        .map_err(|e| AttributionError::BadWarrant(format!("parent-cert: {e}")))?;
+    let deleg_iss = parent.issuer().to_string();
+    let (deleg_key, dl_inception, dl_expiration) = if deleg_iss == agent_iss {
+        (agent_key, ag_inception, ag_expiration)
+    } else {
+        let ev = delegator_evidence.ok_or(AttributionError::MissingDelegatorEvidence)?;
+        extract_provider_key(ev, &deleg_iss)?
+    };
+    // Warrant: bindings, full delegator attribution, signatures, windows.
+    verify_warrant_with_provider_key(
+        auth_warrant,
+        &cert,
+        &deleg_key,
+        dl_inception,
+        dl_expiration,
+        inclusion_time,
+        anchors,
+    )
 }
 
 /// Validate the RFC 9102 proof offline and extract the provider Ed25519 key
@@ -879,13 +948,21 @@ mod tests {
         (provider, agent_cert, warrant.encoded().to_string(), sbo_pk)
     }
 
+    // The delegator (`human@example.com`) is fallback-certified by browserid.me,
+    // so the delegator-authority check needs browserid.me pinned as a broker. A
+    // wide window stands in for the DNSSEC proof (the provider key is supplied
+    // directly in these unit tests).
+    fn wa_anchors() -> TrustAnchors {
+        TrustAnchors::with_brokers(vec!["browserid.me".to_string()])
+    }
+
     #[test]
     fn warrant_happy_path() {
         let aud = "sbo+raw://avail:turing:506/";
         let (provider, agent_cert, warrant, _pk) =
             make_agent_setup(Some(vec!["action:post".into()]), aud);
         let now = Utc::now().timestamp();
-        let wa = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), now).unwrap();
+        let wa = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), 0, i64::MAX, now, &wa_anchors()).unwrap();
         assert_eq!(wa.agent_email, "attestor@browserid.me");
         assert_eq!(wa.delegator, "human@example.com");
         assert_eq!(wa.audience, aud);
@@ -896,7 +973,7 @@ mod tests {
     fn warrant_wrong_provider_key_rejected() {
         let (_p, agent_cert, warrant, _pk) = make_agent_setup(None, "sbo+raw://avail:turing:506/");
         let now = Utc::now().timestamp();
-        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &KeyPair::generate().public_key(), now).unwrap_err();
+        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &KeyPair::generate().public_key(), 0, i64::MAX, now, &wa_anchors()).unwrap_err();
         assert!(matches!(err, AttributionError::WarrantSignatureInvalid));
     }
 
@@ -910,7 +987,7 @@ mod tests {
         let agent_cert = Certificate::create_agent("browserid.me", "attestor@browserid.me", "human@example.com", &agent_kp.public_key(), Duration::days(1), &provider).unwrap();
         let warrant = Warrant::create(&parent_cert, "other@browserid.me", "sbo+raw://avail:turing:506/", None, Duration::days(30), &user_kp).unwrap();
         let now = Utc::now().timestamp();
-        let err = verify_warrant_with_provider_key(warrant.encoded(), &agent_cert, &provider.public_key(), now).unwrap_err();
+        let err = verify_warrant_with_provider_key(warrant.encoded(), &agent_cert, &provider.public_key(), 0, i64::MAX, now, &wa_anchors()).unwrap_err();
         assert!(matches!(err, AttributionError::WarrantBindingMismatch(_)));
     }
 
@@ -919,8 +996,8 @@ mod tests {
         let (provider, agent_cert, warrant, _pk) = make_agent_setup(None, "sbo+raw://avail:turing:506/");
         // Way in the future, past the 30-day warrant exp.
         let far = Utc::now().timestamp() + 400 * 24 * 3600;
-        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), far).unwrap_err();
-        assert!(matches!(err, AttributionError::WarrantWindowMismatch));
+        let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), 0, i64::MAX, far, &wa_anchors()).unwrap_err();
+        assert!(matches!(err, AttributionError::WarrantWindowMismatch | AttributionError::CertWindowMismatch { .. }));
     }
 
     #[test]
@@ -931,8 +1008,70 @@ mod tests {
         let plain = Certificate::create("browserid.me", "human@example.com", &user_kp.public_key(), Duration::days(1), &provider).unwrap();
         let warrant = Warrant::create(&plain, "human@example.com", "sbo+raw://avail:turing:506/", None, Duration::days(30), &user_kp).unwrap();
         let now = Utc::now().timestamp();
-        let err = verify_warrant_with_provider_key(warrant.encoded(), &plain, &provider.public_key(), now).unwrap_err();
+        let err = verify_warrant_with_provider_key(warrant.encoded(), &plain, &provider.public_key(), 0, i64::MAX, now, &wa_anchors()).unwrap_err();
         assert!(matches!(err, AttributionError::BadWarrant(_)));
     }
 
+    #[test]
+    fn cross_issuer_warrant_verifies() {
+        // Delegator certified by their OWN IdP (gmail.com); agent certified by a
+        // DIFFERENT service IdP (mingo.place). The warrant verifies under the
+        // delegator's issuer key — no same-issuer requirement. This is the
+        // mingo-poster case: any email can warrant a third-party service agent.
+        let deleg_provider = KeyPair::generate(); // gmail.com's IdP key
+        let agent_provider = KeyPair::generate(); // mingo.place's IdP key
+        let user_kp = KeyPair::generate();
+        let agent_kp = KeyPair::generate();
+        let parent_cert = Certificate::create(
+            "gmail.com", "alice@gmail.com", &user_kp.public_key(),
+            Duration::days(1), &deleg_provider).unwrap();
+        let agent_cert = Certificate::create_agent(
+            "mingo.place", "mingo-poster@mingo.place", "alice@gmail.com",
+            &agent_kp.public_key(), Duration::days(1), &agent_provider).unwrap();
+        let warrant = Warrant::create(
+            &parent_cert, "mingo-poster@mingo.place", "sbo+raw://avail:turing:506/",
+            Some(vec!["as:alice@gmail.com".into(), "path:/u/alice/**".into()]),
+            Duration::days(30), &user_kp).unwrap();
+        let now = Utc::now().timestamp();
+        // Verified under the DELEGATOR's provider key. alice@gmail.com is a
+        // primary (domain == issuer), so no broker anchor needed.
+        let wa = verify_warrant_with_provider_key(
+            warrant.encoded(), &agent_cert, &deleg_provider.public_key(),
+            0, i64::MAX, now, &TrustAnchors::default()).unwrap();
+        assert_eq!(wa.agent_email, "mingo-poster@mingo.place");
+        assert_eq!(wa.delegator, "alice@gmail.com");
+
+        // Verifying the delegator's parent-cert under the WRONG key (the agent's
+        // issuer key) is rejected — the two issuers are cryptographically distinct.
+        let err = verify_warrant_with_provider_key(
+            warrant.encoded(), &agent_cert, &agent_provider.public_key(),
+            0, i64::MAX, now, &TrustAnchors::default()).unwrap_err();
+        assert!(matches!(err, AttributionError::WarrantSignatureInvalid));
+    }
+
+    #[test]
+    fn cross_issuer_delegator_authority_enforced() {
+        // A rogue IdP can't certify an arbitrary-domain delegator: if the
+        // delegator's email domain != its issuer and the issuer isn't a pinned
+        // broker, the warrant is rejected even though the crypto is internally
+        // consistent.
+        let deleg_provider = KeyPair::generate();
+        let agent_provider = KeyPair::generate();
+        let user_kp = KeyPair::generate();
+        let agent_kp = KeyPair::generate();
+        let parent_cert = Certificate::create(
+            "gmail.com", "alice@evil.com", &user_kp.public_key(), // domain != issuer
+            Duration::days(1), &deleg_provider).unwrap();
+        let agent_cert = Certificate::create_agent(
+            "mingo.place", "mingo-poster@mingo.place", "alice@evil.com",
+            &agent_kp.public_key(), Duration::days(1), &agent_provider).unwrap();
+        let warrant = Warrant::create(
+            &parent_cert, "mingo-poster@mingo.place", "sbo+raw://avail:turing:506/",
+            None, Duration::days(30), &user_kp).unwrap();
+        let now = Utc::now().timestamp();
+        let err = verify_warrant_with_provider_key(
+            warrant.encoded(), &agent_cert, &deleg_provider.public_key(),
+            0, i64::MAX, now, &TrustAnchors::default()).unwrap_err();
+        assert!(matches!(err, AttributionError::IssuerNotAuthorized { .. }));
+    }
 }
