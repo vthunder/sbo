@@ -10,7 +10,7 @@ ed25519-dalek.workspace = true
 sha2.workspace = true
 rand.workspace = true
 hex.workspace = true
-rocksdb.workspace = true
+rocksdb = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -30,5 +30,10 @@ tempfile = "3"
 chrono = "0.4.45"
 
 [features]
-default = []
+# `storage` (default-on) is the RocksDB-backed state DB + indexer. Pure consumers
+# that only build/verify objects (e.g. mingo-idp's server-side signer) turn it
+# off with `default-features = false` to avoid the rocksdb → bindgen → libclang
+# build chain.
+default = ["storage"]
+storage = ["dep:rocksdb"]
 bls = ["sbo-crypto/bls"]
