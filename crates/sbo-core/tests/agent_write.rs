@@ -41,7 +41,7 @@ fn artifacts(scopes: Option<Vec<String>>, aud: &str) -> Artifacts {
     ).unwrap();
     let agent_cert = Certificate::create_agent(
         "browserid.me", "attestor@browserid.me", "human@example.com",
-        &agent.public_key(), Duration::days(1), &provider,
+        &agent.public_key(), Duration::days(1), &provider, None,
     ).unwrap();
     let warrant = Warrant::create(
         &parent, "attestor@browserid.me", aud, scopes, Duration::days(30), &human,

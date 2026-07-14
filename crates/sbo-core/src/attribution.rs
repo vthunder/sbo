@@ -940,7 +940,7 @@ mod tests {
             Duration::days(1), &provider).unwrap();
         let agent_cert = Certificate::create_agent(
             "browserid.me", "attestor@browserid.me", "human@example.com",
-            &agent_kp.public_key(), Duration::days(1), &provider).unwrap();
+            &agent_kp.public_key(), Duration::days(1), &provider, None).unwrap();
         let warrant = Warrant::create(
             &parent_cert, "attestor@browserid.me", audience, agent_scopes,
             Duration::days(30), &user_kp).unwrap();
@@ -984,7 +984,7 @@ mod tests {
         let user_kp = KeyPair::generate();
         let agent_kp = KeyPair::generate();
         let parent_cert = Certificate::create("browserid.me", "human@example.com", &user_kp.public_key(), Duration::days(1), &provider).unwrap();
-        let agent_cert = Certificate::create_agent("browserid.me", "attestor@browserid.me", "human@example.com", &agent_kp.public_key(), Duration::days(1), &provider).unwrap();
+        let agent_cert = Certificate::create_agent("browserid.me", "attestor@browserid.me", "human@example.com", &agent_kp.public_key(), Duration::days(1), &provider, None).unwrap();
         let warrant = Warrant::create(&parent_cert, "other@browserid.me", "sbo+raw://avail:turing:506/", None, Duration::days(30), &user_kp).unwrap();
         let now = Utc::now().timestamp();
         let err = verify_warrant_with_provider_key(warrant.encoded(), &agent_cert, &provider.public_key(), 0, i64::MAX, now, &wa_anchors()).unwrap_err();
@@ -1027,7 +1027,7 @@ mod tests {
             Duration::days(1), &deleg_provider).unwrap();
         let agent_cert = Certificate::create_agent(
             "mingo.place", "mingo-poster@mingo.place", "alice@gmail.com",
-            &agent_kp.public_key(), Duration::days(1), &agent_provider).unwrap();
+            &agent_kp.public_key(), Duration::days(1), &agent_provider, None).unwrap();
         let warrant = Warrant::create(
             &parent_cert, "mingo-poster@mingo.place", "sbo+raw://avail:turing:506/",
             Some(vec!["as:alice@gmail.com".into(), "path:/u/alice/**".into()]),
@@ -1064,7 +1064,7 @@ mod tests {
             Duration::days(1), &deleg_provider).unwrap();
         let agent_cert = Certificate::create_agent(
             "mingo.place", "mingo-poster@mingo.place", "alice@evil.com",
-            &agent_kp.public_key(), Duration::days(1), &agent_provider).unwrap();
+            &agent_kp.public_key(), Duration::days(1), &agent_provider, None).unwrap();
         let warrant = Warrant::create(
             &parent_cert, "mingo-poster@mingo.place", "sbo+raw://avail:turing:506/",
             None, Duration::days(30), &user_kp).unwrap();
