@@ -152,6 +152,64 @@ pub fn primary_domain(state: &dyn StateView) -> Option<String> {
     Some(first.id.as_str().to_string())
 }
 
+/// The **effective author** of an agent write (Authorization Spec §On-behalf
+/// writes): the **delegator** when the warrant carries `as:<delegator>`, else
+/// the agent's own identity. `Err` if the warrant/scopes don't verify for THIS
+/// write.
+///
+/// The spec requires owner-authorization, `Creator` integrity, name-claim
+/// checks, AND "the same on-chain policy the delegator faces" to all evaluate
+/// against this effective author. So `l2_authorize` (owner) and
+/// `attributed_email` (policy actor / `$email` / attestation subject) both
+/// resolve it here — they must never disagree on who the write acts as.
+fn resolve_agent_effective(
+    msg: &Message,
+    state: &dyn StateView,
+    l2: &L2Context,
+) -> Result<String, String> {
+    let signer = msg.signing_key.to_string();
+    let cert = msg
+        .auth_cert
+        .as_deref()
+        .ok_or_else(|| "agent write missing Auth-Cert".to_string())?;
+    let warrant = msg
+        .auth_warrant
+        .as_deref()
+        .ok_or(attribution::AttributionError::MissingWarrant.to_string())?;
+    let ev = resolve_evidence(msg, state)
+        .ok_or_else(|| "agent write missing Auth-Evidence".to_string())?;
+    let ev_bytes = parse_auth_evidence(&ev)?;
+    let db = l2
+        .db
+        .as_ref()
+        .ok_or_else(|| "agent write cannot be validated without database identity".to_string())?;
+    let inclusion_time = l2.inclusion_time.unwrap_or(0);
+    // Cross-issuer warrant: resolve the delegator issuer's on-chain /sys/dnssec
+    // proof (same-issuer warrants ignore it — the agent proof covers both).
+    let deleg_ev_bytes = attribution::warrant_delegator_issuer(warrant)
+        .and_then(|iss| fetch_evidence_object(state, &format!("/sys/dnssec/{iss}")));
+    let wa = attribution::verify_attribution_with_warrant(
+        &signer,
+        cert,
+        warrant,
+        &ev_bytes,
+        deleg_ev_bytes.as_deref(),
+        inclusion_time,
+        &l2.anchors,
+    )
+    .map_err(|e| e.to_string())?;
+    // on_behalf_allowed defaults to true (spec: honored absent a repo opt-out).
+    agent_effective_email(
+        &wa,
+        &db.uri,
+        db.genesis.as_deref(),
+        msg.action.name(),
+        &msg.path.to_string(),
+        msg.content_schema.as_deref(),
+        true,
+    )
+}
+
 fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref: &str) -> Result<(), String> {
     let signer = msg.signing_key.to_string();
     let lookup = name_lookup(state);
@@ -174,24 +232,9 @@ fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref:
         .map(sbo_core::authorize::auth_cert_is_agent)
         .unwrap_or(false);
     if cert_is_agent || msg.auth_warrant.is_some() {
-        let cert = msg.auth_cert.as_deref().ok_or_else(|| "agent write missing Auth-Cert".to_string())?;
-        let warrant = msg.auth_warrant.as_deref().ok_or(attribution::AttributionError::MissingWarrant.to_string())?;
-        let ev = evidence.ok_or_else(|| "agent write missing Auth-Evidence".to_string())?;
-        let ev_bytes = parse_auth_evidence(&ev)?;
-        let db = l2.db.as_ref().ok_or_else(|| "agent write cannot be validated without database identity".to_string())?;
-        // Cross-issuer warrant: the delegator may be certified by a different IdP
-        // than the agent. Resolve that issuer's on-chain /sys/dnssec proof and
-        // pass it (same-issuer warrants ignore it — the agent proof covers both).
-        let deleg_ev_bytes = attribution::warrant_delegator_issuer(warrant)
-            .and_then(|iss| fetch_evidence_object(state, &format!("/sys/dnssec/{iss}")));
-        let wa = attribution::verify_attribution_with_warrant(
-            &signer, cert, warrant, &ev_bytes, deleg_ev_bytes.as_deref(), inclusion_time, &l2.anchors,
-        ).map_err(|e| e.to_string())?;
-        // on_behalf_allowed defaults to true (spec: honored absent a repo opt-out).
-        let effective = agent_effective_email(
-            &wa, &db.uri, db.genesis.as_deref(),
-            msg.action.name(), &msg.path.to_string(), msg.content_schema.as_deref(), true,
-        )?;
+        // The write acts as its effective author (delegator under `as:`, else
+        // the agent). Owner-authorization evaluates against that identity.
+        let effective = resolve_agent_effective(msg, state, l2)?;
         return match authorize_owner(owner_ref, &signer, Some(&effective), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) {
             AuthzOutcome::Authorized => Ok(()),
             AuthzOutcome::Unauthorized(reason) => Err(reason),
@@ -280,6 +323,23 @@ const ROOT_POLICY_ID: &str = "root";
 /// signer carries no valid attribution. Deterministic given the message and
 /// chain state — the same inclusion-time-pinned check the L2 gate uses.
 fn attributed_email(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Option<String> {
+    // On-behalf agent write (Authorization Spec §On-behalf writes): the write's
+    // attributed identity is its **effective author** — the delegator when the
+    // warrant carries `as:<delegator>`, else the agent. This is the identity the
+    // policy actor, `$email`/`$user` vars, and attestation-role matching must
+    // all evaluate against, so an on-behalf write faces "the same on-chain
+    // policy the delegator faces". Resolving the effective author needs state
+    // (evidence + database identity); the pure path (no state) can't attribute
+    // an agent write and returns None (fails closed).
+    let cert_is_agent = msg
+        .auth_cert
+        .as_deref()
+        .map(sbo_core::authorize::auth_cert_is_agent)
+        .unwrap_or(false);
+    if cert_is_agent || msg.auth_warrant.is_some() {
+        return state.and_then(|s| resolve_agent_effective(msg, s, l2).ok());
+    }
+
     let signer = msg.signing_key.to_string();
     // Evidence resolution (ref:/dnssec) needs state; inline works without it.
     let evidence = state.and_then(|db| resolve_evidence(msg, db));
