@@ -115,13 +115,15 @@ Because every step is deterministic given the message, on-chain state, and the p
 
 ### The stored creator
 
-An object's durable **creator** — the author identity recorded in the state trie (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#creator-as-path-segment)) — is the author's *resolved controller*, not the (possibly ephemeral) signing key: the explicit `Creator` header, else the **attributed email** when the signer carries a valid attribution, else the signer's claimed name, else a stable encoding of the signing key. For an email-rooted author this keeps a single, stable creator across browserid key rotation; like authorization, it is pinned to the inclusion-time clock and so is deterministic on replay.
+An object's durable **creator** — the author identity recorded as the object's immutable `creator` attribute (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie)) — is the author's *resolved controller*, not the (possibly ephemeral) signing key: the explicit `Creator` header, else the **attributed email** when the signer carries a valid attribution, else the signer's claimed name, else a stable encoding of the signing key. For an email-rooted author this keeps a single, stable creator across browserid key rotation; like authorization, it is pinned to the inclusion-time clock and so is deterministic on replay.
 
 ## The `/sys/names/` Namespace
 
 `/sys/names/<name>` records register names. A name record provides a stable, human-friendly handle, optionally points to a profile, and — for email-rooted names — anchors reputation and other claims to a stable subject even as the controlling email changes.
 
 A name record is an ordinary SBO object: its **controller is its `Owner`**, and updating or transferring it follows the normal authorization rules. Creating names is governed by the repository's policy (the default root policy grants `create` on `/sys/names/*` to everyone — first-come-first-served — and `update`/`delete` to the owner; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
+
+First-come name creation is exactly the **global `(path, id)` first-valid-write-wins** rule (see the [State Commitment](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie) and [Core](./SBO%20Specification.md#object-identity) specs): the first valid claimant of `/sys/names/<name>` owns the slot; no second creator can shadow it. This is no longer a name-specific rule — it is the same invariant every path obeys.
 
 A name is **not required** to own objects: a bare email may be used as an owner directly. Register a name when you want a friendly handle, a profile, or a stable anchor independent of which email backs it.
 
@@ -237,7 +239,7 @@ longer silently impersonate the holder. The record is public, so any tampering i
 evident.
 
 **Canonical identity (stable across the upgrade).** The author's durable identity
-(the `creator` segment, and the policy `$user` variable) resolves to the same
+(the `creator` attribute, and the policy `$user` variable) resolves to the same
 string whichever credential signed: an attributed email yields `<local>@<D>`
 directly; a signature by a pinned key resolves the key to its local name `<local>`
 and, on a primary-domain repo, canonicalizes to `<local>@<D>`. The holder's

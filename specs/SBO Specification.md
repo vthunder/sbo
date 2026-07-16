@@ -22,15 +22,16 @@ SBO defines:
 
 ## Object Identity
 
-Each object in the system is identified by an ID, a creator, and a path. The fully qualified ID of an object is as follows, but not all elements are required to be specified when being referenced, depending on the context:
+Each object is identified by a **path** and an **ID**. The fully qualified reference to an object is `[path/]id`, but not all elements are required to be specified when being referenced, depending on the context:
 
 ```
-[path/][creator:]id
+[path/]id
 ```
 
 - `path` is a hierarchical namespace. See [Paths](#paths).
-- `creator` is the account identifier of the original creator of the object. See [Creators](#creators).
 - `id` is a string that is the logical identifier of the object.
+
+An object's **identity in state is `(path, id)`, globally unique** — at most one object per `(path, id)` across all creators. `creator` is an immutable **attribute** (the original author), carried on the object for provenance and authorization and *checkable* against expectation out-of-band, but it is **not** part of the reference/addressing grammar and never selects among objects (none coexist at a slot). See [Creators](#creators).
 
 ### Identifier Syntax
 
@@ -50,23 +51,19 @@ id       = 1*256id_char
 id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~" / "@" / ":"
 segment  = id
 path     = "/" *(segment "/")
-creator  = id
 ```
 
 **Parsing object references:**
 ```
-object_ref = [path] [creator ":"] id
+object_ref = [path] id
 
 Examples:
   "punk-001"              → id only
-  "alice:punk-001"        → creator:id
   "/nfts/punk-001"        → path + id
-  "/nfts/alice:punk-001"  → path + creator:id
 ```
 
 To parse an object reference:
-1. If the string contains `/`, split at the last `/`. Left part (including `/`) is `path`, right part is `remainder`. Otherwise, `remainder` is the whole string.
-2. If `remainder` contains `:`, split at the first `:`. Left part is `creator`, right part is `id`. Otherwise, `id` is the whole remainder.
+1. If the string contains `/`, split at the last `/`. Left part (including `/`) is `path`, right part is `id`. Otherwise, `id` is the whole string.
 
 ## Paths
 
@@ -84,7 +81,7 @@ Note that some references (owner, creator in particular) refer to identity objec
 
 SBO includes an identity name resolution system that allows users to map human-readable names to public keys or other identity objects. See the [Identity Specification](./SBO%20Identity%20Specification.md) for details.
 
-When an object is owned by the same identity as the collection it is in, references to the object may omit the creator's identity (e.g. `abc` instead of `userA:abc`). Otherwise, the creator's identity must be specified to prevent collisions and ambiguity.
+`creator` is an immutable **attribute** of an object (its original author, carried on the `Creator` header), not part of an object reference. Because `(path, id)` is globally unique, a reference never needs a creator to disambiguate — no two objects coexist at a slot. Authorship is checked by resolving the object and comparing its `creator` attribute to expectation, not by embedding a creator in the reference. Where per-author coexistence is wanted, the author is placed in the **path** (e.g. `/<author>/reactions/<id>`).
 
 ## URIs
 
@@ -158,7 +155,7 @@ See the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md) fo
 - `ID` header: Never contains `/`. Examples: `alice`, `nft-123`
 - Full path to an object or collection: `Path` + `ID`, no trailing slash. Examples: `/alice`, `/alice/nfts/punk-001`
 
-The same ID in the same collection may only refer to one object (or collection), unless the objects (or collections) have different creators.
+The same ID in the same collection may refer to **only one object (or collection), globally**. The **first valid write** (in DA inclusion order) to a `(path, id)` slot wins; a later `create` at an occupied slot by a **different creator is invalid**. Per-author coexistence is expressed by putting the author in the **path** (e.g. `/<author>/reactions/<id>`), not by sharing a slot.
 
 ### Actions
 
@@ -236,6 +233,7 @@ In the rules below, "the current owner" means a signer authorized per [Object Ow
 
 #### post
 - Object creation is idempotent: it may create a new object or update an existing one.
+- Creation targets a **globally unique** `(path, id)` slot: a `post` that would create a *new* object at a slot already occupied by a valid object of a **different creator** is invalid (the incumbent, established by earlier inclusion order, wins). A `post` by the incumbent's own creator/owner is an ordinary update.
 - Object creation is governed by the policy of the nearest ancestor collection object with a policy reference.
 - Object updates are governed by the policy of the object itself.
 - May only set or update `Policy-Ref` if the object is owned by the creator of the object.
@@ -247,7 +245,7 @@ In the rules below, "the current owner" means a signer authorized per [Object Ow
 - Only the current owner may transfer the object, unless allowed by the object's policy.
 - Transfers are governed by the policy of the object itself.
 - If `New-Path` or `New-ID` is specified:
-  - Only valid if the destination does not exist by the same creator at the destination path.
+  - Only valid if the destination slot `(New-Path, New-ID)` is occupied by **no valid object** (a **global** check, not per-creator). The transfer preserves the object's immutable `creator`.
   - Both source and destination path policies apply:
     - Source path: Must allow moving the object out of the collection.
     - Destination path: Must allow receiving the object.

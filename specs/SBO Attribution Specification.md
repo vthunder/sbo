@@ -176,12 +176,17 @@ Because the proof is what authorizes an email-rooted write, a stale or
 wrong-key proof breaks attribution for that domain until refreshed — so proof
 freshness (and correct IdP key rotation) is operationally load-bearing.
 
-> **Known issue (`mingo-jyzt`).** `/sys/dnssec/<domain>` objects are keyed by
-> *creator*, and evidence resolution currently returns the first creator's
-> object rather than a *valid* one — so multiple writers can fork the slot and a
-> stale fork can win. Resolution MUST select a proof that validates for the
-> domain at inclusion time (freshest valid window). This section is normatively
-> incomplete until that is fixed.
+> **Resolved (`mingo-jyzt`).** Under global `(path, id)` uniqueness (see the
+> [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie)),
+> `/sys/dnssec/<domain>` is a single slot: the first valid writer creates it, and `creator`
+> no longer keys the object, so a second writer can no longer *fork* the slot and the grindable
+> low-sorting-key shadow is eliminated. Because the `/sys/dnssec/**` policy is self-authorizing
+> (create **and update** granted to any signer), **any** party may refresh the slot in place with
+> a newer proof; last-writer-wins (by `HLC`) means the current value is the most recently
+> published proof. Evidence resolution reads that one occupying object and MUST still require its
+> proof to validate for the domain at `inclusion_time`; a stale occupant is simply refreshed
+> permissionlessly (as the daemon's freshness path already does) rather than shadowed by a
+> competing fork.
 
 ## 6. Trust anchors
 

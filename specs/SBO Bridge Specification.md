@@ -145,6 +145,8 @@ The `import` action performs these steps atomically:
 
 If any step fails, the entire action fails and nothing is created.
 
+**Registry create-once is now the global invariant, not bridge-specific machinery.** Because `(/sys/bridge/imported/, {origin-hash})` is a globally unique slot, "Check registry — verify it doesn't exist" is simply the ordinary first-valid-write-wins rule; a second `import` of the same origin is invalid because the slot is occupied. The `import` action still atomically creates *both* the registry entry and the object (so the pair is all-or-nothing), but the uniqueness guarantee for the registry entry no longer needs a bespoke atomic existence check — it is the same slot-uniqueness every `post` obeys.
+
 ### Registry Entry
 
 The registry entry is auto-generated:
@@ -304,9 +306,9 @@ Example policy:
 ### For Imports
 
 - Registry path is derived from origin: `/sys/bridge/imported/{origin-hash}`
-- Path can only be created once
+- The registry slot `(path, id)` can only be created once — this is the global first-valid-write-wins slot-uniqueness invariant, not bridge-specific machinery
 - Atomic `import` action ensures registry + object created together
-- Same origin cannot be imported twice
+- Same origin cannot be imported twice (the second `import` targets an occupied slot and is invalid)
 
 ### For Unlocks
 

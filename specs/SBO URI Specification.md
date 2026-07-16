@@ -28,8 +28,10 @@ SBO supports two URI schemes:
 ## DNS-Resolved URIs (`sbo://`)
 
 ```
-sbo://[domain]/[path/][creator:][id][?query]
+sbo://[domain]/[path/][id][?query]
 ```
+
+Because `(path, id)` is globally unique, an object reference needs only its path and id; `creator` is an object **attribute**, not an addressing element. Verifying authorship is done by resolving the object and comparing its `creator` attribute to expectation — not through the URI grammar.
 
 ### Components
 
@@ -37,7 +39,6 @@ sbo://[domain]/[path/][creator:][id][?query]
 |------|-------------|
 | `domain` | DNS domain name (e.g., `myapp.com`) |
 | `path` | Path within the SBO database |
-| `creator` | Optional. Original creator of the object |
 | `id` | Object identifier |
 | `query` | Optional filters and disambiguation |
 
@@ -82,7 +83,7 @@ Fields are space-separated `key=value` pairs. Unknown keys are ignored (forward-
 ## Direct Chain URIs (`sbo+raw://`)
 
 ```
-sbo+raw://[chain]:[appId][@firstBlock]/[path/][creator:][id][?query]
+sbo+raw://[chain]:[appId][@firstBlock]/[path/][id][?query]
 ```
 
 ### Components
@@ -93,7 +94,6 @@ sbo+raw://[chain]:[appId][@firstBlock]/[path/][creator:][id][?query]
 | `appId` | Application ID on the chain. The authority is exactly `chain:appId` (CAIP-2 + appId); it never grows further, so an opaque/non-numeric `appId` stays unambiguous. |
 | `@firstBlock` | Optional **genesis anchor** — the block where this database's genesis lives. A **database-level** locator: it identifies *which* database (and where to begin sync), and applies uniformly to every path composed under the authority. It is **not** a snapshot selector (for that, see `as_of`). |
 | `path` | Path within the SBO database |
-| `creator` | Optional. Original creator of the object |
 | `id` | Object identifier |
 | `query` | Optional selectors and disambiguation (see below) |
 
@@ -185,8 +185,9 @@ Reading the real DA layer at `@firstBlock` is authoritative (the block content i
 - If `as_of` is present → resolve object state **as of** that block (historical snapshot).
 - If `content_hash` is present → payload must match specified hash.
 - Without `as_of`, resolves to the latest version (LWW).
-- If `creator` is present, object must have been minted by that creator.
 - If `id` is omitted, URI references the collection at that path.
+
+Authorship is **not** an addressing element: `(path, id)` is globally unique, so a reference never carries a `creator`. To verify authorship, resolve the object and compare its immutable `creator` attribute to expectation.
 - `node`/`checkpoint` (from the `_sbo` record) MAY be used for performance, but their outputs are always verified against on-chain truth — they are never trust roots.
 
 ---

@@ -16,6 +16,7 @@ Draft
 - **v0.2**: Changed leaf value from `Content-Hash` to `object_hash` (SHA-256 of complete raw SBO bytes). This ensures proofs commit to the full object including headers, not just payload. Added creator as path segment for disambiguation.
 - **v0.2.1**: Specified that the creator path segment is the author's *resolved controller* (attributed email for email-rooted authors), not the signing key — so an author's objects do not fragment across browserid key rotation. Still deterministic (inclusion-time-pinned).
 - **v0.3**: Expanded the checkpoint model into a bootstrap/fast-sync story: publisher-chosen cadence with a RECOMMENDED (not mandated) max-staleness bound; the *exclude-self* root rule; **snapshots** (a compact, self-verifying object-set at a checkpoint height); **checkpoint attestations** (client-chosen web-of-trust over a checkpoint root); and a **sync-point discovery manifest**. All remain optional performance features — canonical state is still replay.
+- **v0.5**: Made object identity **globally unique on `(path, id)`** — dropped `creator` from the trie key (leaf keyed by `[path…, id]`); `creator` is retained as an immutable object attribute (wire `Creator` header, still gating creator-integrity authorization and preserved across transfer) but no longer disambiguates identity. First-valid-write-wins by DA inclusion order resolves the create race; transfer destination-collision is now a global empty-slot check; added the *Slot occupancy and create-race resolution* section (create-side analog of LWW, incl. reorg semantics).
 - **v0.4**: Unified the trust mechanisms — the authority signature and checkpoint attestations are the *same* mechanism over signed `(block, state_root)` claims under a client trust policy `{attestors, threshold}`; `T2-sys` is just `{attestors:[sys], threshold:1}` and the authority is no longer privileged in the protocol. Specified that attestations **lag** the checkpoint (an attestor attests a past block from a later height) and the resulting client behaviour: provisional anchor + accrue-while-tailing (the tail-replay *is* the discovery walk), *freshest-already-attested* selection, and a bounded liveness fallback.
 
 ## Overview
@@ -117,22 +118,25 @@ Root node:
 
 The leaf hashes (`sha256:111...`, etc.) are the **object hashes** (SHA-256 of complete raw bytes) of the objects at those paths.
 
-### Creator as Path Segment
+### Object Identity in the Trie
 
-In SBO, objects are uniquely identified by `(path, creator, id)` rather than just `(path, id)`. Multiple creators can post objects with the same ID at the same path. To handle this in the trie, the **creator** is included as a path segment between the path and the ID.
+In SBO, objects are **globally uniquely identified by `(path, id)`**: at most one object may occupy a given `(path, id)` across all creators (see the [SBO Specification](./SBO%20Specification.md#object-identity)). The trie is keyed on the path and id alone.
 
-**Full path segments:** `[path_segments..., creator, id]`
+**Full path segments:** `[path_segments..., id]`
 
-**The creator segment is the author's resolved controller, not the signing key.** It is derived deterministically from the message and chain state at inclusion time: the explicit `Creator` header if present, else — when the signer carries a valid attribution — the **attributed email** (the address the signer is proven to speak for; see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)), else the signer's claimed name, else a stable encoding of the signing key. Using the attributed email means an email-rooted author's objects share one creator segment **across browserid key rotation**, rather than fragmenting under each ephemeral cert key — and because attribution is pinned to the inclusion-time clock, the segment is a deterministic function of message + on-chain state, so a from-genesis replayer reconstructs the identical trie.
+`creator` is **not** a trie segment. It is retained as an immutable object attribute (the wire `Creator` header, resolved to the author's controller — see below), used for creator-integrity authorization and provenance, but it does not disambiguate identity.
 
-**Transfer is creator-invariant.** A `transfer` re-homes the existing `(path, creator, id)` leaf to `(new_path, creator, new_id)` — deleting the source leaf and inserting the destination leaf with the **same object hash**. The creator segment does not change (only `path`, `id`, and/or the object's `owner` may). The destination-collision rule ("does not exist by the same creator at the destination") is evaluated against this preserved creator.
+**The stored creator attribute is the author's resolved controller, not the signing key.** It is derived deterministically from the message and chain state at inclusion time: the explicit `Creator` header if present, else — when the signer carries a valid attribution — the **attributed email** (the address the signer is proven to speak for; see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)), else the signer's claimed name, else a stable encoding of the signing key. Using the attributed email means an email-rooted author's objects share one creator attribute **across browserid key rotation**, rather than fragmenting under each ephemeral cert key — and because attribution is pinned to the inclusion-time clock, the attribute is a deterministic function of message + on-chain state, so a from-genesis replayer reconstructs the identical object (and trie).
+
+**Transfer is creator-invariant.** A `transfer` re-homes the existing `(path, id)` leaf to `(new_path, new_id)` — deleting the source leaf and inserting the destination leaf with the **same object hash** and the **same immutable `creator` attribute**. The destination-collision rule is now **global**: the transfer is valid only if the destination `(new_path, new_id)` slot is occupied by **no valid object** (regardless of creator).
 
 **Example:**
 
-An object at `/sys/names/` with ID `alice` created by `user123` has trie segments:
+An object at `/sys/names/` with ID `alice` has trie segments:
 ```
-["sys", "names", "user123", "alice"]
+["sys", "names", "alice"]
 ```
+Its creator (`user123`) is recorded on the object, not in the key; a second creator cannot file a second `alice` here.
 
 The tree structure becomes:
 ```
@@ -153,25 +157,19 @@ Root:
 /sys/names node:
 {
   "children": {
-    "user123": "sha256:...",
-    "user456": "sha256:..."   // Different creator
-  }
-}
-
-/sys/names/user123 node:
-{
-  "children": {
-    "alice": "sha256:111...",   // object_hash
-    "bob": "sha256:222..."      // another object by same creator
+    "alice": "sha256:111...",   // object_hash; creator is a leaf attribute
+    "bob":   "sha256:222..."
   }
 }
 ```
 
 This design:
-1. Allows multiple creators at the same path to have objects with the same ID
-2. Enables proofs for all objects by a specific creator under a path
+1. Enforces one canonical object per `(path, id)` (first-valid-write-wins by inclusion order)
+2. Turns every existence/first-object lookup into a point lookup (no per-creator scan)
 3. Maintains the trie's hierarchical structure
-4. Makes proofs slightly larger due to the extra segment, but keeps them efficient (O(depth))
+4. Keeps proofs one segment shorter (`[path…, id]`), O(depth)
+
+(Per-creator enumeration is no longer a trie affordance; where per-author collections are wanted, the author is a **path** segment — e.g. `/<issuer>/attestations/…` — so a creator's objects remain a subtree by construction.)
 
 ---
 
@@ -254,6 +252,10 @@ transfer /userA/nft-001 to /userB/nft-001
 **Note:** Transfer preserves the object_hash because the raw bytes (including original path/id in headers) remain the same. The tree location changes but the committed content does not.
 
 **Cost:** All operations are O(depth) where depth = number of path segments.
+
+### Slot occupancy and create-race resolution
+
+**Slot occupancy.** Each `(path, id)` slot holds at most one object. Its occupant is determined by DA inclusion order over all *valid* creates targeting the slot while it is empty: within a block the lower message index wins; across blocks the earlier block wins. A create's validity is evaluated against confirmed+pending state **as of its own inclusion point** — a create into a slot occupied by a valid object at that point is invalid unless the signer is authorized to update the occupant. A **delete** or a **transfer away** vacates the slot; a later create by any authorized creator may then occupy it. In the optimistic-tip overlay a **pending** create MUST be superseded (dropped, not merged) once a create/transfer earlier in inclusion order is confirmed for the same slot. On a **reorg** that evicts the create establishing the occupant, the slot re-opens as of the reorg point and is re-resolved by this same rule; a previously-preempted create MAY become the occupant and a previously-valid one MAY become invalid. Occupancy is a function of the canonical chain at the read height (as content value is under LWW); consumers needing cross-reorg stability pin by `object_hash` / `as_of`.
 
 ---
 
@@ -523,7 +525,7 @@ A snapshot is **not trusted**; it is verified against a checkpoint root the clie
 ```
 1. Decode the objects from the snapshot.
 2. Reconstruct the state trie by inserting each object at its
-   [path, creator, id] segments (see State Tree Structure) with leaf = object_hash.
+   [path, id] segments (see State Tree Structure) with leaf = object_hash.
 3. Compute the state root.
 4. It MUST equal the state_root of the checkpoint at `block`
    (obtained on chain and trusted per Trust Mechanisms). Otherwise REJECT the snapshot.

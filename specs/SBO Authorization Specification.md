@@ -345,11 +345,9 @@ Every input is on-chain (`chain_state`, the message, the pinned root KSK) or der
 
 `effective_owner` is `Owner → else Creator → else signer`, so the algorithm above
 authorizes the `Creator` reference *only when no `Owner` is present*. But `Creator`
-independently determines the object's **identity in state** — its
-`(path, creator, id)` trie segment (see the [State Commitment
-Specification](./SBO%20State%20Commitment%20Specification.md#creator-as-path-segment)) —
-while `Owner` gates the *path*. A writer must therefore not be able to file an
-object under another identity's creator segment.
+is the object's immutable **author attribute** and gates provenance/ownership
+defaulting (`effective_owner = Owner → else Creator → else signer`). A writer must
+not be able to file an object under another identity's `Creator`.
 
 **Rule:** when a message declares a `Creator`, the signer MUST also be authorized
 for it — `authorize` is additionally run with `owner = Creator`. This holds for
@@ -366,6 +364,12 @@ Upgrade](./SBO%20Identity%20Specification.md#sovereignty-upgrade-email--key-over
 browserid attribution to that email; a later key rotation by the already-pinned
 key (the email resolves through the existing record). Off a primary-domain repo,
 or before the root policy exists (genesis), name claims are first-come.
+
+"First-come" here is the **global `(path, id)` first-valid-write-wins** invariant
+(see [State Commitment](./SBO%20State%20Commitment%20Specification.md#slot-occupancy-and-create-race-resolution)):
+the anti-hijack authorization requirement layers *on top of* it — policy makes the
+slot claimable only by the rightful email, and uniqueness makes the first valid
+claim final.
 
 ## Self-Sovereign Authorization
 

@@ -30,6 +30,8 @@ A content write is an ordinary SBO object (envelope + payload, signed, attribute
 
 Both are covered by the envelope signature. A collection that does not use the write model omits them and falls back to base ordering (see [Relationship to Core Ordering](#relationship-to-core-ordering)).
 
+**Shared-path ids must be collision-safe.** Because `(path, id)` is globally unique, multiple authors writing to a *shared* collection path (e.g. a community space `/communities/{c}/spaces/{s}/`) MUST mint ids that will not collide across authors — a content hash, or `author + random` — otherwise two concurrent writes to the same id collide and one is dropped (first-valid-write-wins). Wall-clock ids alone (`Date.now()`) are **not** collision-safe. Where per-author coexistence is intended, prefer putting the author in the path.
+
 The layer is deliberately **not a CRDT**: there is no automatic state merge. Append-only content (posts, comments) never conflicts; mutable objects are last-writer-wins registers; reactions are LWW toggles. `Prev` provides *detection* of concurrency and a verifiable per-object history, not *resolution* — resolution is always the simple, deterministic LWW rule below.
 
 ## Author Clock (HLC)
@@ -222,7 +224,7 @@ A reaction is **author-owned** and keyed by `(author, target, kind)` — at most
 
 ## Relationship to Core Ordering
 
-DA block inclusion order remains the substrate and the bound: every write is still an ordered, attributed object, and the `HLC` validity bound ties authoring order to inclusion time. For collections that adopt the write model, **`HLC` provides the intra-collection authoring order used by LWW**, layered on top of (and constrained by) inclusion order. Objects without an `HLC` continue to use base inclusion-order semantics unchanged. The State Commitment trie is unaffected — content objects are ordinary leaves keyed by `(path, creator, id)`.
+DA block inclusion order remains the substrate and the bound: every write is still an ordered, attributed object, and the `HLC` validity bound ties authoring order to inclusion time. For collections that adopt the write model, **`HLC` provides the intra-collection authoring order used by LWW**, layered on top of (and constrained by) inclusion order. Objects without an `HLC` continue to use base inclusion-order semantics unchanged. The State Commitment trie is unaffected — content objects are ordinary leaves keyed by `(path, id)`.
 
 ## Worked Example
 

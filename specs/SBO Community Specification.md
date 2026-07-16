@@ -36,6 +36,8 @@ A `community.v1` is an **object**, so a community can exist either as its own re
 - **Repository-per-community (recommended).** The community is its own SBO repository: its own genesis and root policy, its own `/sys/names/` namespace, and — for T1 — its own browserid provider for `@<community-domain>` identities. This gives the community full sovereignty over its rules and namespace, and makes it forkable (see [Forking and Liveness](#forking-and-liveness)). The descriptor lives at `/sys/community`.
 - **Aggregated (permitted).** Many communities share a host repository, each a `community.v1` at `/communities/<id>` with its own subtree. Cheaper to operate and better for cross-community discovery, at the cost of sharing the host's genesis and root policy. Suitable for a hosting platform offering many small spaces.
 
+Under global `(path, id)` uniqueness, the descriptor slot `(/communities/, <id>)` (and the repository-per-community `/sys/community`) holds **exactly one** `community.v1` — the single-canonical-descriptor guarantee is now **native**, not a convention. The first valid writer owns the community's descriptor slot; a competing creator cannot fork it. This resolves the board/descriptor case (a board is a singleton descriptor object per community id).
+
 Within either layout, a community subdivides into **spaces** (channels, subforums) as nested objects/paths — these need no new genesis (see [Spaces](#spaces)).
 
 Deployments SHOULD prefer repository-per-community where self-ownership matters; aggregation is an explicit trade of sovereignty for shared operation.
