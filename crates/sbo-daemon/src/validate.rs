@@ -562,12 +562,21 @@ pub fn validate_message(
         };
     }
 
-    // 2. Validate payload against Content-Schema (if specified)
-    if let Err(e) = validate_schema(msg) {
-        return ValidationResult::Invalid {
-            stage: ValidationStage::Schema,
-            reason: format_schema_error(&e),
-        };
+    // 2. Validate payload against Content-Schema (if specified). Transfer/delete
+    // are exempt: they act on an *existing* object and carry no new payload, but
+    // may still name the target's `Content-Schema` (e.g. so a delegated-signer
+    // warrant's `schema:` scope matches). Schema-validating their empty payload
+    // would spuriously fail (EOF parsing an empty body). Same "acts on an existing
+    // object" exemption the L2 attribution gate below applies.
+    let is_transfer_or_delete =
+        matches!(msg.action, Action::Transfer { .. } | Action::Delete);
+    if !is_transfer_or_delete {
+        if let Err(e) = validate_schema(msg) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Schema,
+                reason: format_schema_error(&e),
+            };
+        }
     }
 
     // 2.25. HLC ordering-integrity gate. A write that carries an `HLC` header
@@ -605,8 +614,7 @@ pub fn validate_message(
     // (via `Creator`). Their authorization — current owner OR a policy grant
     // (the admin-override) — is handled in full by `validate_transfer`, so the
     // owner-speaks-for-self gate would wrongly reject a legitimate admin move.
-    let is_transfer_or_delete =
-        matches!(msg.action, Action::Transfer { .. } | Action::Delete);
+    // (`is_transfer_or_delete` computed above at the schema gate.)
     if !is_transfer_or_delete {
         let effective_owner = effective_owner_ref(msg);
         if let Err(reason) = l2_authorize(msg, state, l2, &effective_owner) {
@@ -1131,6 +1139,98 @@ mod dnssec_repro_tests {
             root_policy_present(&db),
             "email-rooted root policy must be found (creator-agnostic) — else enforcement silently disabled"
         );
+    }
+
+    // A key-rooted owner deleting their own object, where the delete envelope
+    // carries the target's Content-Schema (post.v1) so a delegated-signer
+    // warrant's schema: scope matches, but has an EMPTY payload. Before the fix
+    // the schema gate ran on all actions and rejected this at Schema stage with
+    // "Invalid JSON payload: EOF while parsing" (observed live via mingo delete).
+    // Transfer/delete must be exempt from payload schema validation.
+    #[test]
+    fn owner_delete_with_schema_and_empty_payload_passes_schema_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+
+        let owner_key = SigningKey::generate();
+        let owner_ref = owner_key.public_key().to_string();
+
+        // Owner-can-always-act root policy (owner has * on their own subtree).
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "owner", "can": ["*"], "on": "/**"}]
+        })).unwrap();
+        db.put_policy(&SboPath::parse("/sys/policies/").unwrap(), &policy).unwrap();
+        let policy_payload = serde_json::to_vec(&policy).unwrap();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/sys/policies/").unwrap(),
+            id: Id::new("root").unwrap(),
+            creator: Id::new("sys@mingo.place").unwrap(),
+            owner: Id::new("sys@mingo.place").unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&policy_payload),
+            payload: policy_payload,
+            policy_ref: None,
+            content_schema: Some("policy.v2".to_string()),
+            owner_ref: Some("sys".to_string()),
+            block_number: 1,
+            object_hash: [9u8; 32],
+            hlc: Some("1.0".to_string()),
+            prev: None,
+        }).unwrap();
+
+        // The existing post the owner will delete.
+        let body = br#"{"title":"hi"}"#.to_vec();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/communities/cooks/spaces/general/").unwrap(),
+            id: Id::new("p1").unwrap(),
+            creator: Id::new(&owner_ref).unwrap(),
+            owner: Id::new(&owner_ref).unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&body),
+            payload: body,
+            policy_ref: None,
+            content_schema: Some("post.v1".to_string()),
+            owner_ref: Some(owner_ref.clone()),
+            block_number: 2,
+            object_hash: [7u8; 32],
+            hlc: Some("2.0".to_string()),
+            prev: None,
+        }).unwrap();
+
+        // Delete envelope: names post.v1 (for warrant schema scoping) but empty payload.
+        let mut msg = Message {
+            action: Action::Delete,
+            path: SboPath::parse("/communities/cooks/spaces/general/").unwrap(),
+            id: Id::new("p1").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: owner_key.public_key(),
+            signature: Signature([0u8; 64]),
+            content_type: None,
+            content_hash: None,
+            payload: None,
+            owner: Some(Id::new(&owner_ref).unwrap()),
+            creator: None,
+            content_encoding: None,
+            content_schema: Some("post.v1".to_string()),
+            policy_ref: None,
+            related: None,
+            hlc: Some("1700000000000.0".to_string()),
+            prev: None,
+            auth_cert: None,
+            auth_evidence: None,
+            auth_warrant: None,
+        };
+        msg.sign(&owner_key);
+
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+        let res = validate_message(&msg, &db, std::path::Path::new("/tmp"), &l2);
+        if let ValidationResult::Invalid { stage, reason } = &res {
+            assert_ne!(
+                *stage,
+                ValidationStage::Schema,
+                "delete with schema+empty payload must not be rejected at Schema stage (got: {reason})"
+            );
+        }
     }
 }
 
