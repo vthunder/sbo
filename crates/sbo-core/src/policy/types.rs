@@ -77,6 +77,14 @@ pub enum ActionType {
     Delete,
     Transfer,
     Import,
+    /// Authority to install/replace/delete a `policy.v2` object at a path —
+    /// i.e. to GOVERN a subtree. Deliberately NOT covered by `*`/`post`/`create`
+    /// (governance is meta-authority, granted only by an explicit `govern`), and
+    /// a policy write is authorized against the PARENT policy, never the object's
+    /// own. This is what stops an ordinary `create` grant from doubling as a
+    /// governance grant (a signer planting a shadowing policy to capture a
+    /// subtree). See the SBO policy-delegation model.
+    Govern,
     #[serde(rename = "*")]
     All,
 }

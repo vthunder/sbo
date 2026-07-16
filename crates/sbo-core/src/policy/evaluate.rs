@@ -93,6 +93,14 @@ pub fn evaluate(
 /// `create` or `update` by object existence), so the `post`⇒{create,update}
 /// expansion is what makes community `can: ["post"]` grants work.
 fn action_covered_by(granted: ActionType, requested: ActionType) -> bool {
+    // `govern` is meta-authority: only an explicit `govern` grant covers it.
+    // Crucially `*` does NOT — otherwise `to: admin can:[*]` (and any broad
+    // wildcard grant) would silently confer the power to install policies, which
+    // is exactly the capture vector we are closing. Governance must always be
+    // granted by name.
+    if requested == ActionType::Govern {
+        return granted == ActionType::Govern;
+    }
     granted == ActionType::All
         || granted == requested
         || (granted == ActionType::Post
@@ -476,6 +484,42 @@ mod tests {
         }
         assert!(matches!(
             evaluate(&policy, &actor, ActionType::Delete, "/public/p1/", &PolicyVars::default(), false, &no_attest, &msg, None),
+            PolicyResult::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn wildcard_and_post_do_not_confer_govern() {
+        // Governance is meta-authority: neither `*` nor `post` nor `create`
+        // covers a `govern` request — only an explicit `govern` grant does.
+        let msg = signed_msg();
+        let actor = Id::new("e_x").unwrap();
+        let no = |_: &AttestedSource| false;
+
+        for cans in [vec!["*"], vec!["post"], vec!["create", "update", "delete", "transfer"]] {
+            let policy: Policy = serde_json::from_value(serde_json::json!({
+                "grants": [{"to": "*", "can": cans, "on": "/**"}]
+            })).unwrap();
+            assert!(
+                matches!(
+                    evaluate(&policy, &actor, ActionType::Govern, "/communities/x/", &PolicyVars::default(), false, &no, &msg, None),
+                    PolicyResult::Denied(_)
+                ),
+                "grant {cans:?} must NOT confer govern"
+            );
+        }
+
+        // An explicit govern grant authorizes it.
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["govern"], "on": "/communities/**"}]
+        })).unwrap();
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Govern, "/communities/x/", &PolicyVars::default(), false, &no, &msg, None),
+            PolicyResult::Allowed
+        ));
+        // ...and a govern grant does not leak into ordinary content actions.
+        assert!(matches!(
+            evaluate(&policy, &actor, ActionType::Create, "/communities/x/", &PolicyVars::default(), false, &no, &msg, None),
             PolicyResult::Denied(_)
         ));
     }

@@ -317,6 +317,10 @@ pub enum ValidationResult {
 /// Root policy path constant
 const ROOT_POLICY_PATH: &str = "/sys/policies/";
 const ROOT_POLICY_ID: &str = "root";
+/// Content-Schema of a governing policy object. A write carrying this schema is
+/// what the apply path indexes via `put_policy`, so it is exactly the set of
+/// writes that must pass the `govern` gate.
+const POLICY_SCHEMA: &str = "policy.v2";
 
 /// The email the message's signer is *proven* to speak for at the block's
 /// inclusion time (valid `Auth-Cert` + DNSSEC evidence), or `None` if the
@@ -754,6 +758,23 @@ fn validate_post(
         }
     };
 
+    // Installing/replacing a governing policy is a `govern` action authorized by
+    // the PARENT policy, not by ordinary create/update grants and NOT by the
+    // owner fast-path — otherwise any `create` grant (or owning the policy slot)
+    // would let a signer plant a shadowing policy and capture the subtree. Genesis
+    // (no root policy yet) still bootstraps freely.
+    if is_policy_write(msg) {
+        if !root_policy_exists {
+            tracing::debug!("Allowing policy write without root policy (genesis mode)");
+        } else if let Err(reason) = require_govern(state, msg, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason),
+            };
+        }
+        return ValidationResult::Valid { creator: creator.to_string() };
+    }
+
     if let Some(existing_obj) = existing {
         // Slot occupied - this is an update. Authorize the signer against the
         // object's *resolved controller* (its stored `owner_ref`), not the legacy
@@ -917,12 +938,28 @@ fn validate_transfer(
     let is_delete = matches!(msg.action, sbo_core::message::Action::Delete)
         || new_owner.as_deref() == Some("null:");
 
-    // (A) SOURCE AUTHORIZATION — the current owner may always act on the object;
-    // otherwise the object's (source-path) policy must grant the action to the
-    // signer. This is the "unless allowed by the object's policy" clause in
-    // SBO Specification.md §transfer, and is how a sys/admin role (granted
-    // `transfer`/`delete` on `/**`) acts on objects it does not own.
-    if l2_authorize(msg, state, l2, &owner_ref).is_err() {
+    // (A) SOURCE AUTHORIZATION. Deleting or relocating a governing POLICY object
+    // is a `govern` action: authorized by the PARENT policy, never the owner
+    // fast-path — so an ancestor with `govern` can always reclaim a delegated
+    // subtree (reversibility), and owning a policy cannot be used to transfer it
+    // out of governance. Ordinary objects keep the owner-or-policy rule below.
+    if is_policy_object(&obj) {
+        if let Err(reason) = require_govern(state, msg, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!(
+                    "{:?} of policy object {} requires `govern` (from parent policy): {}",
+                    if is_delete { ActionType::Delete } else { ActionType::Transfer },
+                    msg.path, reason
+                ),
+            };
+        }
+    } else if l2_authorize(msg, state, l2, &owner_ref).is_err() {
+        // The current owner may always act on the object; otherwise the object's
+        // (source-path) policy must grant the action to the signer. This is the
+        // "unless allowed by the object's policy" clause in SBO
+        // Specification.md §transfer, and is how a sys/admin role (granted
+        // `transfer`/`delete` on `/**`) acts on objects it does not own.
         let action = if is_delete { ActionType::Delete } else { ActionType::Transfer };
         if let Err(reason) = check_policy(state, msg, action, Some(&owner_ref), l2) {
             return ValidationResult::Invalid {
@@ -1232,6 +1269,134 @@ mod dnssec_repro_tests {
             );
         }
     }
+
+    // Install a root policy (both the policies-CF index and the object, so
+    // root_policy_present() is true) that grants the sys key `govern` on /**.
+    fn install_root_with_admin_govern(db: &StateDb, sys_pubkey: &str) {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "roles": { "admin": [{ "key": sys_pubkey }] },
+            "grants": [
+                { "to": { "role": "admin" }, "can": ["govern", "delete"], "on": "/**" },
+                { "to": "owner", "can": ["*"], "on": "/**" }
+            ]
+        })).unwrap();
+        db.put_policy(&SboPath::parse("/sys/policies/").unwrap(), &policy).unwrap();
+        let payload = serde_json::to_vec(&policy).unwrap();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/sys/policies/").unwrap(),
+            id: Id::new("root").unwrap(),
+            creator: Id::new("sys@mingo.place").unwrap(),
+            owner: Id::new("sys@mingo.place").unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&payload),
+            payload,
+            policy_ref: None,
+            content_schema: Some("policy.v2".to_string()),
+            owner_ref: Some(sys_pubkey.to_string()),
+            block_number: 1,
+            object_hash: [9u8; 32],
+            hlc: Some("1.0".to_string()),
+            prev: None,
+        }).unwrap();
+    }
+
+    fn policy_write_msg(key: &SigningKey, path: &str, policy_json: serde_json::Value) -> Message {
+        let payload = serde_json::to_vec(&policy_json).unwrap();
+        let mut msg = Message {
+            action: Action::Post,
+            path: SboPath::parse(path).unwrap(),
+            id: Id::new("root").unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature([0u8; 64]),
+            content_type: Some("application/json".to_string()),
+            content_hash: Some(ContentHash::sha256(&payload)),
+            payload: Some(payload),
+            owner: None,
+            creator: None,
+            content_encoding: None,
+            content_schema: Some("policy.v2".to_string()),
+            policy_ref: None,
+            related: None,
+            hlc: Some("1700000000000.0".to_string()),
+            prev: None,
+            auth_cert: None,
+            auth_evidence: None,
+            auth_warrant: None,
+        };
+        msg.sign(key);
+        msg
+    }
+
+    // THE sbo-vos1 CAPTURE ATTACK, blocked. A community policy grants `create`
+    // under spaces/**; a member uses it to try to plant a shadowing `policy.v2`.
+    // Under P1 a policy write needs `govern` (resolved from the PARENT policy),
+    // which the community policy does not grant — so the plant is denied and the
+    // subtree cannot be captured.
+    #[test]
+    fn member_create_grant_cannot_install_shadowing_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let sys = SigningKey::generate();
+        install_root_with_admin_govern(&db, &sys.public_key().to_string());
+
+        // Community policy: anyone may CREATE under spaces/** (no govern).
+        let comm: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{ "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" }]
+        })).unwrap();
+        db.put_policy(&SboPath::parse("/communities/cooks/").unwrap(), &comm).unwrap();
+
+        // A member (random key) plants a self-serving policy under spaces/**.
+        let member = SigningKey::generate();
+        let evil = serde_json::json!({
+            "grants": [{ "to": "*", "can": ["*"], "on": "/communities/cooks/spaces/**" }]
+        });
+        let msg = policy_write_msg(&member, "/communities/cooks/spaces/general/evil/", evil);
+
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+        match validate_message(&msg, &db, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, reason } => {
+                assert_eq!(stage, ValidationStage::Policy, "reason: {reason}");
+                assert!(reason.contains("govern"), "expected a govern denial, got: {reason}");
+            }
+            ValidationResult::Valid { .. } => panic!("CAPTURE: member planted a shadowing policy"),
+        }
+    }
+
+    // The govern grant works for the delegated authority (sys/admin) and denies a
+    // non-authority. Also proves parent-resolution: the community policy at
+    // /communities/cooks/ is governed by the ROOT policy (its parent), so sys's
+    // admin-govern authorizes writing it, while a stranger is refused.
+    #[test]
+    fn admin_govern_authorizes_community_policy_write_stranger_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let sys = SigningKey::generate();
+        install_root_with_admin_govern(&db, &sys.public_key().to_string());
+
+        let comm = serde_json::json!({
+            "grants": [
+                { "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" },
+                { "to": "owner", "can": ["update"], "on": "/communities/cooks/spaces/**" }
+            ]
+        });
+
+        // sys holds admin-govern (from root, the parent of /communities/cooks/).
+        let sys_msg = policy_write_msg(&sys, "/communities/cooks/", comm.clone());
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+        assert!(
+            matches!(validate_message(&sys_msg, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "admin with govern must be able to write a community policy"
+        );
+
+        // A stranger cannot.
+        let stranger = SigningKey::generate();
+        let bad = policy_write_msg(&stranger, "/communities/cooks/", comm);
+        match validate_message(&bad, &db, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
+            ValidationResult::Valid { .. } => panic!("stranger wrote a community policy without govern"),
+        }
+    }
 }
 
 /// Check if an action is allowed by policy
@@ -1257,8 +1422,67 @@ fn check_policy_at(
     owner: Option<&str>,
     l2: &L2Context,
 ) -> Result<(), String> {
+    check_policy_resolving_at(state, msg, target, target, action, owner, l2)
+}
+
+/// The parent-container path of a policy object's own path — the path whose
+/// policy GOVERNS writes to this policy. `/communities/cooks/` → `/communities/`,
+/// `/sys/policies/` → `/sys/`. A policy is governed by its parent, never itself
+/// (self-governance is the lock-in vector we close); resolving one level up
+/// guarantees the walk cannot return the very policy being written. Root
+/// (`/sys/policies/`) resolves up to `/sys/` → no policy → falls back to the root
+/// policy itself, so the trust anchor is controlled by whoever it grants `govern`.
+fn parent_container_path(path: &sbo_core::message::Path) -> sbo_core::message::Path {
+    let s = path.to_string();
+    let trimmed = s.trim_end_matches('/');
+    let parent = match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(i) => format!("{}/", &trimmed[..i]),
+    };
+    sbo_core::message::Path::parse(&parent).unwrap_or_else(|_| path.clone())
+}
+
+/// Whether this write installs/replaces a policy object — the only writes that
+/// become governing policies (the apply path indexes exactly `policy.v2` objects
+/// via `put_policy`). Such writes require `govern` on the target, evaluated
+/// against the PARENT policy (see [`require_govern`]).
+fn is_policy_write(msg: &Message) -> bool {
+    msg.content_schema.as_deref() == Some(POLICY_SCHEMA)
+}
+
+/// Whether an existing object is a governing policy (for delete/transfer gating).
+fn is_policy_object(obj: &StoredObject) -> bool {
+    obj.content_schema.as_deref() == Some(POLICY_SCHEMA)
+}
+
+/// Authorize a `govern` action on `msg.path`: resolve the policy at the parent
+/// container and require it to grant `govern` matching `msg.path`. The owner
+/// fast-path is deliberately NOT consulted here — owning a policy object must not
+/// let you rewrite/relocate it without `govern`, else first-writer-owns would
+/// re-introduce self-governing capture.
+fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), String> {
+    let parent = parent_container_path(&msg.path);
+    check_policy_resolving_at(state, msg, &parent, &msg.path, ActionType::Govern, None, l2)
+}
+
+/// Core policy check: resolve the applicable policy at `resolve_at` (walking up
+/// its ancestors) but evaluate grants/restrictions against `match_target`. These
+/// coincide for ordinary writes; they differ for a `govern` check, which resolves
+/// one level up (the parent policy) yet matches `on:` patterns against the policy
+/// object's own path.
+#[allow(clippy::too_many_arguments)]
+fn check_policy_resolving_at(
+    state: &dyn StateView,
+    msg: &Message,
+    resolve_at: &sbo_core::message::Path,
+    match_target: &sbo_core::message::Path,
+    action: ActionType,
+    owner: Option<&str>,
+    l2: &L2Context,
+) -> Result<(), String> {
+    let target = match_target;
     // Resolve the applicable policy by walking up the path hierarchy
-    let policy = match state.resolve_policy(target) {
+    let policy = match state.resolve_policy(resolve_at) {
         Ok(Some(p)) => p,
         Ok(None) => {
             // No policy found - deny by default
