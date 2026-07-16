@@ -1,11 +1,11 @@
 ---
 # sbo-qv95
 title: 'Global (path,id) uniqueness: drop creator from trie key'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-07-16T14:15:05Z
-updated_at: 2026-07-16T15:38:59Z
+updated_at: 2026-07-16T16:16:02Z
 ---
 
 Core SBO change: make (path,id) globally unique (first valid write wins, resolved by inclusion order); drop creator from the state-trie key (leaf [path…,id]) while keeping it as an immutable stored attribute + wire Creator header. Resolves the mingo-jyzt under-specified-resolution / grindable-first-creator-tiebreak problem and the /sys/dnssec fork.
@@ -24,4 +24,7 @@ Decided with dan (2026-07-16) after a deep design review:
 - [x] Implemented in sbo (workspace builds, 33 suites green, clippy clean, zkVM builds+tests pass — image-id unchanged). Reviewer caught + fixed a real bug: creator must be preserved on update (immutable) or the overlay drops valid self-auth /sys/dnssec refreshes; added regression test update_by_different_signer_preserves_immutable_creator. Reorg re-resolution is moot (daemon is forward-only today) — flagged for when reorg handling lands.
 - [ ] mingo: collision-safe live ids (app.js); verify genesis/seed/poster unaffected
 - [x] tests/global_uniqueness.rs: two-creators-rejected, transfer-into-occupied-rejected, delete-frees-slot, self-auth-single-slot, creator-immutable-on-update, proof round-trip; overlay supersession test in state_view.rs; name-claim general+anti-hijack via existing suites
-- [ ] Re-genesis mingo (trie-key change → state root changes) — decide after impl
+- [x] Re-genesis v4 @3622378 (same wire hash 3c614c5d re-anchored; new daemon SBO_REV 215857f rebuilt fresh under new keying — 9 genesis objs, 0 posts). DNSSEC proofs (mingo.place + browserid.me) confirmed as single un-forked slots. DNS _sbo anchor updated by dan. Web (freshId) deployed. Chain write-ready.
+
+## Summary of Changes
+Global (path,id) uniqueness shipped end-to-end (2026-07-16): specs (10 files) + sbo implementation (creator dropped from trie key, kept as immutable attribute; scan helpers → point lookups; global transfer collision; overlay create-race supersession; is_name_claim_path retired). Reviewer caught+fixed a real bug (creator must be preserved on update or self-auth /sys/dnssec refresh is dropped by the overlay). 33 sbo suites green, zkVM builds (image-id unchanged). mingo freshId collision-safe ids. Re-genesis v4 @3622378 on the new daemon; DNSSEC re-established as single slots (the mingo-jyzt fork is structurally impossible now). Reorg re-resolution flagged as future work (daemon is forward-only today).
