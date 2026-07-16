@@ -8,6 +8,7 @@ pub mod repo;
 pub mod lc;
 pub mod rpc;
 pub mod turbo;
+pub mod submit_queue;
 pub mod sync;
 pub mod ipc;
 pub mod http;

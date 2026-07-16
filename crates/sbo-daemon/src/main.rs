@@ -131,6 +131,12 @@ struct DaemonState {
     /// handlers refuse. The sync loop promotes it on observing enough on-chain
     /// attestations. `open` (never gating) for full-replay nodes.
     trust_gate: sbo_daemon::trust::SharedTrustGate,
+    /// Ordered, finality-gated DA submission queue (bean sbo-hy4r). Accepted
+    /// writes enqueue here in submission order; the background batch scheduler
+    /// (spawned in `main`) drains them one finality-gated batch at a time so this
+    /// node never reorders its own writes on-chain. Single-repo model → one
+    /// global queue; a multi-repo daemon would key this per DA target.
+    submit_queue: std::sync::Arc<sbo_daemon::submit_queue::SubmitQueue>,
 }
 
 impl DaemonState {
@@ -179,6 +185,7 @@ impl DaemonState {
             sign_requests: HashMap::new(),
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
             trust_gate,
+            submit_queue: sbo_daemon::submit_queue::SubmitQueue::new(),
         })
     }
 }
@@ -655,13 +662,24 @@ impl RepoApi for DaemonState {
             }
         }
 
-        let result = self
-            .turbo
-            .submit_raw(&data)
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+        // Finality-gated batched DA submission (bean sbo-hy4r): instead of
+        // submitting inline (one DA tx per write — which TurboDA's account pool
+        // reorders on-chain), enqueue the unchanged wire bytes IN SUBMISSION
+        // ORDER. The background batch scheduler drains the queue one
+        // finality-gated batch at a time, so this node's on-chain order matches
+        // its submission order and a dependency staged in the same window lands
+        // in the same block as its dependent.
+        //
+        // DURABILITY: the write is now durable only in the in-memory pending pool
+        // + this in-memory queue until the batch lands. A crash before DA-submit
+        // loses it (client re-submits on non-confirmation) — same class as the
+        // pending pool. Not persisted deliberately (see submit_queue.rs).
+        self.submit_queue.enqueue(data).await;
         Ok(SubmitResultView {
-            submission_id: result.submission_id,
+            // No DA submission_id at accept time — the real id belongs to the
+            // batch the scheduler submits later. Clients track acceptance by
+            // `hash` (the write's object hash) and confirm via reads.
+            submission_id: String::new(),
             accepted: true,
             pending: true,
             hash: last_hash,
@@ -694,7 +712,7 @@ async fn checkpoint_if_due(
     latest_block: u64,
     last_checkpoint_block: &mut u64,
     writes_since_checkpoint: &mut u64,
-    turbo: &TurboDaClient,
+    queue: &Arc<sbo_daemon::submit_queue::SubmitQueue>,
     checkpoint_key: Option<&sbo_core::crypto::SigningKey>,
     prev_checkpoint: &mut Option<String>,
     now: i64,
@@ -777,13 +795,12 @@ async fn checkpoint_if_due(
                             prev_checkpoint.as_deref(),
                             now,
                         );
-                        match turbo.submit_raw(&wire).await {
-                            Ok(_) => {
-                                tracing::info!("published checkpoint.v1 for block {head} on-chain");
-                                *prev_checkpoint = Some(format!("/sys/checkpoints/block-{head}"));
-                            }
-                            Err(e) => tracing::error!("checkpoint publish submit failed: {e}"),
-                        }
+                        // Route through the ordered finality-gated queue (bean
+                        // sbo-hy4r) so a node-emitted checkpoint never reorders
+                        // relative to the content it commits.
+                        queue.enqueue(wire).await;
+                        tracing::info!("queued checkpoint.v1 for block {head} for on-chain submission");
+                        *prev_checkpoint = Some(format!("/sys/checkpoints/block-{head}"));
                     }
                     None => tracing::warn!(
                         "checkpoint publish=true but no authority key loaded; on-chain publish skipped"
@@ -804,7 +821,7 @@ async fn checkpoint_if_due(
 async fn attest_if_due(
     state: &Arc<RwLock<DaemonState>>,
     cfg: &sbo_daemon::config::AttestConfig,
-    turbo: &TurboDaClient,
+    queue: &Arc<sbo_daemon::submit_queue::SubmitQueue>,
     attest_key: Option<&sbo_core::crypto::SigningKey>,
     attested: &mut std::collections::HashSet<u64>,
     now: i64,
@@ -905,13 +922,10 @@ async fn attest_if_due(
         }
 
         let wire = build_attestation_wire(key, attestor, block, &our_root, now);
-        match turbo.submit_raw(&wire).await {
-            Ok(_) => {
-                tracing::info!("posted checkpoint-attestation.v1 for block {block}");
-                attested.insert(block);
-            }
-            Err(e) => tracing::error!("attest: submit for block {block} failed: {e}"),
-        }
+        // Route through the ordered finality-gated queue (bean sbo-hy4r).
+        queue.enqueue(wire).await;
+        tracing::info!("queued checkpoint-attestation.v1 for block {block}");
+        attested.insert(block);
     }
 }
 
@@ -1300,6 +1314,27 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         }
     });
 
+    // Start the finality-gated batched DA submission scheduler (bean sbo-hy4r).
+    // It drains the ordered submit queue one batch at a time, waiting for each
+    // batch to finalize on-chain before the next — so this node never reorders
+    // its own writes. Its own TurboDA client mirrors the sync task's pattern.
+    let submit_queue = state.read().await.submit_queue.clone();
+    let scheduler_shutdown = Arc::new(tokio::sync::Notify::new());
+    let scheduler_handle = {
+        let queue = submit_queue.clone();
+        let submitter = TurboDaClient::new(config.turbo_da.clone());
+        let shutdown = scheduler_shutdown.clone();
+        tokio::spawn(async move {
+            sbo_daemon::submit_queue::run_scheduler(
+                queue,
+                submitter,
+                sbo_daemon::submit_queue::SchedulerConfig::default(),
+                shutdown,
+            )
+            .await;
+        })
+    };
+
     // Start HTTP server for web auth
     let state_for_http = Arc::clone(&state);
     let http_handle = tokio::spawn(async move {
@@ -1311,6 +1346,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
     // Start sync engine
     let state_for_sync = Arc::clone(&state);
     let pending_for_sync = state.read().await.pending.clone();
+    let submit_queue_for_sync = state.read().await.submit_queue.clone();
     let trust_gate_for_sync = state.read().await.trust_gate.clone();
     let verbose_for_sync = verbose.clone();
     let debug_for_sync = debug.clone();
@@ -1668,7 +1704,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                 status.latest_block,
                 &mut last_checkpoint_block,
                 &mut writes_since_checkpoint,
-                &turbo,
+                &submit_queue_for_sync,
                 checkpoint_key.as_ref(),
                 &mut prev_checkpoint,
                 unix_now(),
@@ -1681,7 +1717,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
             attest_if_due(
                 &state_for_sync,
                 &attest_config,
-                &turbo,
+                &submit_queue_for_sync,
                 attest_key.as_ref(),
                 &mut attested,
                 unix_now(),
@@ -1703,9 +1739,13 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         std::fs::remove_file(&config.daemon.socket_path)?;
     }
 
+    // Ask the DA scheduler to exit cleanly at its next await point (drops any
+    // un-submitted/in-flight batch — clients re-submit on non-confirmation).
+    scheduler_shutdown.notify_waiters();
     ipc_handle.abort();
     http_handle.abort();
     sync_handle.abort();
+    scheduler_handle.abort();
 
     Ok(())
 }
@@ -1915,15 +1955,15 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 None => return Response::error(format!("No repo at path: {}", repo_path.display())),
             };
 
-            // TODO: Build proper SBO message with signing
-            // For now, just submit raw data
-            match state.turbo.submit_raw(&data).await {
-                Ok(result) => Response::ok(serde_json::json!({
-                    "submission_id": result.submission_id,
-                    "app_id": repo.uri.app_id,
-                })),
-                Err(e) => Response::error(e.to_string()),
-            }
+            // Route through the ordered finality-gated queue (bean sbo-hy4r) so
+            // node-emitted writes never reorder relative to /v1/submit content.
+            let app_id = repo.uri.app_id;
+            state.submit_queue.enqueue(data).await;
+            Response::ok(serde_json::json!({
+                "submission_id": serde_json::Value::Null,
+                "app_id": app_id,
+                "status": "queued",
+            }))
         }
 
         Request::GetObject { repo_path, path, id, with_proof } => {
@@ -2050,20 +2090,16 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 None => return Response::error(format!("No repo configured for URI: {}. Add with: sbo repo add {} <path>", uri, uri)),
             };
 
-            // Submit via TurboDA
-            match state_read.turbo.submit_raw(&data).await {
-                Ok(result) => {
-                    // Return submitted status - verification happens asynchronously via sync thread
-                    // User can check status with 'sbo id show'
-                    Response::ok(serde_json::json!({
-                        "status": "submitted",
-                        "uri": identity_uri,
-                        "submission_id": result.submission_id,
-                        "message": "Identity submitted to chain. Check verification with 'sbo id show'",
-                    }))
-                }
-                Err(e) => Response::error(format!("Submission failed: {}", e)),
-            }
+            // Enqueue for finality-gated batched DA submission (bean sbo-hy4r).
+            // Verification happens asynchronously via the sync thread; the user
+            // checks status with 'sbo id show'.
+            state_read.submit_queue.enqueue(data).await;
+            Response::ok(serde_json::json!({
+                "status": "queued",
+                "uri": identity_uri,
+                "submission_id": serde_json::Value::Null,
+                "message": "Identity queued for chain submission. Check verification with 'sbo id show'",
+            }))
         }
 
         Request::ListIdentities { uri } => {
@@ -2247,17 +2283,13 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 None => return Response::error(format!("No repo configured for URI: {}. Add with: sbo repo add {} <path>", uri, uri)),
             };
 
-            // Submit via TurboDA
-            match state_read.turbo.submit_raw(&data).await {
-                Ok(result) => {
-                    Response::ok(serde_json::json!({
-                        "status": "submitted",
-                        "uri": domain_uri,
-                        "submission_id": result.submission_id,
-                    }))
-                }
-                Err(e) => Response::error(format!("Submission failed: {}", e)),
-            }
+            // Enqueue for finality-gated batched DA submission (bean sbo-hy4r).
+            state_read.submit_queue.enqueue(data).await;
+            Response::ok(serde_json::json!({
+                "status": "queued",
+                "uri": domain_uri,
+                "submission_id": serde_json::Value::Null,
+            }))
         }
 
         Request::ListDomains { uri } => {

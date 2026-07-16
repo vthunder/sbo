@@ -99,7 +99,10 @@ impl TurboDaClient {
             crate::DaemonError::TurboDa("TurboDA API key not configured".to_string())
         })?;
 
-        let url = format!("{}/v1/submission/{}", self.config.endpoint, submission_id);
+        let url = format!(
+            "{}/v1/get_submission_info?submission_id={}",
+            self.config.endpoint, submission_id
+        );
 
         let resp = self
             .http_client
