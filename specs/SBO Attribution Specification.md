@@ -139,11 +139,16 @@ For an agent certificate, after §4 succeeds for the agent certificate itself:
    `principal.email`; its `iss` equals the certificate's `agent.parent` and the
    embedded `parent-cert`'s `principal.email`.
 9. **Delegator proof** — `parent-cert` verifies against its own
-   DNSSEC-proven provider key (§4 steps 2–6 applied to `parent-cert`), and the
-   warrant JWS verifies against `parent-cert`'s certified key.
+   DNSSEC-proven provider key (§4 steps 2–6 applied to `parent-cert`, **except
+   step 4's inclusion-time cert-window check — the `parent-cert` window is
+   governed by step 10's signing-time rule, not by `inclusion_time`; the
+   delegator's freshness at `inclusion_time` is supplied by the DNSSEC-proof
+   window, step 3**), and the warrant JWS verifies against `parent-cert`'s
+   certified key.
 10. **Windows** — `inclusion_time` within the warrant's `[iat, exp]`, and the
     warrant's `iat` within `parent-cert`'s `[iat, exp]` (signing-time
-    semantics).
+    semantics — a warrant outlives the short-lived identity cert it was signed
+    under, up to the warrant's own `exp`).
 11. **Audience** — `aud` identifies this database (authority match; `@firstBlock`
     / `?genesis` match if present).
 12. **Scopes** — the write's `Action` / `Path` / `Content-Schema` satisfy the

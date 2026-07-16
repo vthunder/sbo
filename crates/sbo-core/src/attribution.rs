@@ -277,10 +277,17 @@ pub fn verify_warrant_with_provider_key(
     }
 
     // Fully attribute the DELEGATOR under its own issuer's provider key — the
-    // same checks agent attribution runs (§4): the parent-cert certifies the
-    // delegator email, is signed by that issuer's key, and both the DNSSEC proof
-    // window and the cert window cover inclusion_time. The delegator's issuer may
-    // differ from the agent's (cross-issuer delegation).
+    // parent-cert certifies the delegator email and is signed by that issuer's
+    // key. The delegator's issuer may differ from the agent's (cross-issuer
+    // delegation). Freshness of the delegator's issuer key is gated by the
+    // DNSSEC-proof window at inclusion_time (below); the parent-cert itself is
+    // checked with SIGNING-TIME semantics only (Attribution Spec §4a step 10 /
+    // browserid-core `Warrant::verify_for`): the warrant's `iat` must fall in
+    // the parent-cert window (checked further down), but a 90-day warrant stays
+    // valid past the parent identity cert's own short (24h) expiry — so we do
+    // NOT re-check the parent-cert window against inclusion_time here. Doing so
+    // (the former CertWindowMismatch check) broke every agent write ~24h after
+    // the warrant was issued, contradicting the warrant's design lifetime.
     let parent = Certificate::parse(&claims.parent_cert)
         .map_err(|e| AttributionError::BadWarrant(format!("parent-cert: {e}")))?;
     if parent.email() != Some(parent_email) {
@@ -297,13 +304,6 @@ pub fn verify_warrant_with_provider_key(
     }
     let p = parent.claims();
     let p_iat = p.iat.unwrap_or(p.exp);
-    if inclusion_time < p_iat || inclusion_time > p.exp {
-        return Err(AttributionError::CertWindowMismatch {
-            time: inclusion_time,
-            iat: p_iat,
-            exp: p.exp,
-        });
-    }
     parent
         .verify(delegator_provider_key)
         .map_err(|_| AttributionError::WarrantSignatureInvalid)?;
@@ -998,6 +998,29 @@ mod tests {
         let far = Utc::now().timestamp() + 400 * 24 * 3600;
         let err = verify_warrant_with_provider_key(&warrant, &agent_cert, &provider.public_key(), 0, i64::MAX, far, &wa_anchors()).unwrap_err();
         assert!(matches!(err, AttributionError::WarrantWindowMismatch | AttributionError::CertWindowMismatch { .. }));
+    }
+
+    #[test]
+    fn warrant_survives_parent_cert_expiry() {
+        // A 30-day warrant signed while the (1-day) parent identity cert was
+        // valid must keep attributing AFTER that parent cert expires — the
+        // warrant carries its own lifetime (signing-time semantics, Attribution
+        // Spec §4a step 10 / browserid-core verify_for). Regression for the bug
+        // where re-checking the parent-cert window at inclusion_time broke every
+        // agent write ~24h after the warrant was issued. Delegator freshness is
+        // still gated by the DNSSEC-proof window (here 0..i64::MAX stands in).
+        let aud = "sbo+raw://avail:turing:506/";
+        let (provider, agent_cert, warrant, _pk) =
+            make_agent_setup(Some(vec!["action:post".into()]), aud);
+        // Two days out: past the 1-day parent cert exp, still within the 30-day
+        // warrant window and inside the (wide) evidence window.
+        let after_parent_expiry = Utc::now().timestamp() + 2 * 24 * 3600;
+        let wa = verify_warrant_with_provider_key(
+            &warrant, &agent_cert, &provider.public_key(),
+            0, i64::MAX, after_parent_expiry, &wa_anchors(),
+        )
+        .expect("warrant must remain valid past the parent cert's expiry");
+        assert_eq!(wa.delegator, "human@example.com");
     }
 
     #[test]
