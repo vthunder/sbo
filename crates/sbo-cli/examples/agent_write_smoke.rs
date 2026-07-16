@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let check = |label: &str, warrant: &str, action: &str, path: &str, owner: &str| {
         print!("\n[{label}]\n  action={action} path={path} owner={owner}\n  → ");
         let ev = match parse_auth_evidence(&evidence) { Ok(e) => e, Err(e) => { println!("REJECT (evidence: {e})"); return; } };
-        let wa = match verify_attribution_with_warrant(&signer_pub, &cert_str, warrant, &ev, now, &anchors) {
+        let wa = match verify_attribution_with_warrant(&signer_pub, &cert_str, warrant, &ev, None, now, &anchors) {
             Ok(wa) => wa,
             Err(e) => { println!("REJECT (attribution: {e})"); return; }
         };

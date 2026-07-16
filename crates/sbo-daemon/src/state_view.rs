@@ -23,16 +23,10 @@ use crate::pending::overlay_wins;
 /// The read surface validation depends on. Implemented by [`StateDb`]
 /// (confirmed-only) and [`Overlay`] (confirmed + pending).
 pub trait StateView {
-    /// Fetch the object at `(path, creator, id)`.
+    /// Fetch the object occupying the globally-unique `(path, id)` slot, if any.
+    /// `creator` is an immutable attribute of the returned object, not part of
+    /// the key, so this is a point lookup.
     fn get_object(
-        &self,
-        path: &Path,
-        creator: &Id,
-        id: &Id,
-    ) -> Result<Option<StoredObject>, DbError>;
-
-    /// Fetch the first object at `(path, id)`, regardless of creator.
-    fn get_first_object_at_path_id(
         &self,
         path: &Path,
         id: &Id,
@@ -56,18 +50,9 @@ impl StateView for StateDb {
     fn get_object(
         &self,
         path: &Path,
-        creator: &Id,
         id: &Id,
     ) -> Result<Option<StoredObject>, DbError> {
-        StateDb::get_object(self, path, creator, id)
-    }
-
-    fn get_first_object_at_path_id(
-        &self,
-        path: &Path,
-        id: &Id,
-    ) -> Result<Option<StoredObject>, DbError> {
-        StateDb::get_first_object_at_path_id(self, path, id)
+        StateDb::get_object(self, path, id)
     }
 
     fn resolve_policy(&self, path: &Path) -> Result<Option<Policy>, DbError> {
@@ -127,11 +112,25 @@ impl<'a> Overlay<'a> {
 }
 
 /// Pick the value that wins between a pending candidate and a confirmed value at
-/// the same `(path, id)`: the pending one if it overlays (LWW), else confirmed.
+/// the same globally-unique `(path, id)` slot.
+///
+/// Slot-occupancy (global `(path, id)` uniqueness) governs the merge:
+/// - If a **confirmed** object already occupies the slot with a **different
+///   creator**, a pending write there is an invalid create (a create into a slot
+///   occupied by a different creator's valid object) — it is **superseded**
+///   (dropped, not merged), per the create-race resolution rule. The confirmed
+///   occupant wins regardless of LWW/HLC.
+/// - Otherwise (same creator, i.e. an ordinary update) LWW decides: the pending
+///   value overlays when it wins the total order, else confirmed stands.
+/// - A pending-only write (empty slot) is the occupant.
 fn merge(pending: Option<&StoredObject>, confirmed: Option<StoredObject>) -> Option<StoredObject> {
     match (pending, confirmed) {
         (Some(p), Some(c)) => {
-            if overlay_wins(p, &c) {
+            if p.creator.as_str() != c.creator.as_str() {
+                // Slot already occupied by a different creator → pending create
+                // is invalid and superseded; the incumbent keeps the slot.
+                Some(c)
+            } else if overlay_wins(p, &c) {
                 Some(p.clone())
             } else {
                 Some(c)
@@ -146,25 +145,10 @@ impl<'a> StateView for Overlay<'a> {
     fn get_object(
         &self,
         path: &Path,
-        creator: &Id,
-        id: &Id,
-    ) -> Result<Option<StoredObject>, DbError> {
-        // The pending entry only participates when it was written by the same
-        // creator the caller is asking about (get_object is creator-keyed).
-        let pending = self
-            .pending_at(path, id)
-            .filter(|o| o.creator.as_str() == creator.as_str());
-        let confirmed = self.db.get_object(path, creator, id)?;
-        Ok(merge(pending, confirmed))
-    }
-
-    fn get_first_object_at_path_id(
-        &self,
-        path: &Path,
         id: &Id,
     ) -> Result<Option<StoredObject>, DbError> {
         let pending = self.pending_at(path, id);
-        let confirmed = self.db.get_first_object_at_path_id(path, id)?;
+        let confirmed = self.db.get_object(path, id)?;
         Ok(merge(pending, confirmed))
     }
 
@@ -242,7 +226,7 @@ mod tests {
 
         let overlay = Overlay::new(&db, vec![]);
         let got = overlay
-            .get_first_object_at_path_id(&confirmed.path, &confirmed.id)
+            .get_object(&confirmed.path, &confirmed.id)
             .unwrap()
             .unwrap();
         assert_eq!(got.object_hash, [1; 32]);
@@ -255,7 +239,7 @@ mod tests {
 
         let overlay = Overlay::new(&db, vec![pending.clone()]);
         let got = overlay
-            .get_first_object_at_path_id(&pending.path, &pending.id)
+            .get_object(&pending.path, &pending.id)
             .unwrap()
             .unwrap();
         assert_eq!(got.object_hash, [2; 32]);
@@ -271,27 +255,32 @@ mod tests {
 
         let overlay = Overlay::new(&db, vec![pending]);
         let got = overlay
-            .get_first_object_at_path_id(&confirmed.path, &confirmed.id)
+            .get_object(&confirmed.path, &confirmed.id)
             .unwrap()
             .unwrap();
         assert_eq!(got.object_hash, [2; 32], "pending should overlay confirmed");
     }
 
     #[test]
-    fn get_object_filters_pending_by_creator() {
+    fn pending_create_superseded_by_confirmed_different_creator() {
+        // Global (path, id) uniqueness + create-race: a slot occupied by a
+        // CONFIRMED object of one creator supersedes a PENDING create at the same
+        // slot by a DIFFERENT creator — even with a higher HLC — because a create
+        // into an occupied slot is invalid. The pending create is dropped, not
+        // merged, and the confirmed incumbent keeps the slot.
         let (_dir, db) = open_db();
-        // Pending write at the same (path, id) but by a different creator must
-        // not satisfy a creator-keyed get_object for `alice`.
-        let pending = obj("/c/x/", "p1", "bob@mingo.place", Some("20.0"), 2);
+        let confirmed = obj("/c/x/", "p1", "alice@mingo.place", Some("10.0"), 1);
+        db.put_object(&confirmed).unwrap();
+        // Bob's pending create carries a higher HLC but must NOT win the slot.
+        let pending = obj("/c/x/", "p1", "bob@mingo.place", Some("99.0"), 2);
         let overlay = Overlay::new(&db, vec![pending]);
 
-        let alice = Id::new("alice@mingo.place").unwrap();
-        let path = Path::parse("/c/x/").unwrap();
-        let id = Id::new("p1").unwrap();
-        assert!(overlay.get_object(&path, &alice, &id).unwrap().is_none());
-
-        let bob = Id::new("bob@mingo.place").unwrap();
-        assert!(overlay.get_object(&path, &bob, &id).unwrap().is_some());
+        let got = overlay
+            .get_object(&confirmed.path, &confirmed.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.object_hash, [1; 32], "incumbent creator must keep the slot");
+        assert_eq!(got.creator.as_str(), "alice@mingo.place");
     }
 
     #[test]
@@ -314,7 +303,7 @@ mod tests {
         let path = Path::parse("/c/x/").unwrap();
         let id = Id::new("p1").unwrap();
         assert!(overlay
-            .get_first_object_at_path_id(&path, &id)
+            .get_object(&path, &id)
             .unwrap()
             .is_none());
 
@@ -322,7 +311,7 @@ mod tests {
         // next read observes it before it ever reaches the pool or a block.
         overlay.stage(obj("/c/x/", "p1", "alice@mingo.place", Some("10.0"), 5));
         let got = overlay
-            .get_first_object_at_path_id(&path, &id)
+            .get_object(&path, &id)
             .unwrap()
             .unwrap();
         assert_eq!(got.object_hash, [5; 32]);

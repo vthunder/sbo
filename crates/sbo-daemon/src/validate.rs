@@ -99,7 +99,7 @@ fn load_trust_anchors(state: &dyn StateView) -> TrustAnchors {
     let brokers = (|| {
         let path = SboPath::parse(TRUST_BROKERS_PATH).ok()?;
         let id = Id::new(TRUST_BROKERS_ID).ok()?;
-        let obj = state.get_first_object_at_path_id(&path, &id).ok()??;
+        let obj = state.get_object(&path, &id).ok()??;
         serde_json::from_slice::<Vec<String>>(&obj.payload).ok()
     })()
     .unwrap_or_default();
@@ -114,7 +114,7 @@ fn name_lookup(state: &dyn StateView) -> impl Fn(&str) -> Option<NameRecord> + '
     move |name: &str| {
         let path = SboPath::parse("/sys/names/").ok()?;
         let id = Id::new(name).ok()?;
-        let obj = state.get_first_object_at_path_id(&path, &id).ok()??;
+        let obj = state.get_object(&path, &id).ok()??;
         match obj.content_schema.as_deref() {
             Some("identity.email.v1") => {
                 // Email-rooted: recurse on the stored Owner reference.
@@ -295,7 +295,7 @@ pub fn fetch_evidence_object(state: &dyn StateView, ref_path: &str) -> Option<Ve
     let (path_str, id_str) = ref_path.trim_end_matches('/').rsplit_once('/')?;
     let path = SboPath::parse(&format!("{path_str}/")).ok()?;
     let id = Id::new(id_str).ok()?;
-    let obj = state.get_first_object_at_path_id(&path, &id).ok()??;
+    let obj = state.get_object(&path, &id).ok()??;
     Some(obj.payload)
 }
 
@@ -360,22 +360,17 @@ fn attributed_email(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context
 /// **attributed email** (so an email author's writes share a stable creator
 /// across browserid key rotation, instead of fragmenting under each ephemeral
 /// key) → the signer's claimed name → truncated key hex.
-/// Locate the object a transfer/delete targets. Named by `(msg.path, msg.id)`;
-/// the creator is whatever is in state, not the signer. Prefers the signer's own
-/// object at that path+id (so a user transfers their own object unambiguously),
-/// else falls back to the sole object there (the admin-on-user's-object case).
-/// Both `validate_transfer` and the sync apply path use this so they agree on
-/// the exact `(path, creator, id)` leaf.
+/// Locate the object a transfer/delete targets — the single object occupying the
+/// globally-unique `(msg.path, msg.id)` slot (a point lookup). Its `creator` is
+/// an immutable attribute, invariant across the move, not the signer's. Both
+/// `validate_transfer` and the sync apply path use this so they agree on the
+/// exact `(path, id)` leaf.
 pub fn resolve_transfer_target(
     msg: &Message,
     state: &dyn StateView,
-    l2: &L2Context,
+    _l2: &L2Context,
 ) -> Result<Option<StoredObject>, sbo_core::error::DbError> {
-    let actor_creator = resolve_creator(msg, Some(state), l2);
-    if let Some(obj) = state.get_object(&msg.path, &actor_creator, &msg.id)? {
-        return Ok(Some(obj));
-    }
-    state.get_first_object_at_path_id(&msg.path, &msg.id)
+    state.get_object(&msg.path, &msg.id)
 }
 
 pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Id {
@@ -473,7 +468,7 @@ fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Resu
 /// resolution is a later refinement.
 fn collection_max_lag_ms(msg: &Message, state: &dyn StateView) -> i64 {
     let descriptor = state
-        .get_first_object_at_path_id(&msg.path, &Id::new(sbo_core::schema::COLLECTION_CONFIG_ID).unwrap())
+        .get_object(&msg.path, &Id::new(sbo_core::schema::COLLECTION_CONFIG_ID).unwrap())
         .ok()
         .flatten();
     if let Some(obj) = descriptor {
@@ -622,11 +617,12 @@ pub fn validate_message(
         }
     }
 
-    // 2.6. Creator integrity. The `Creator` reference determines the object's
-    // identity in state — its `(path, creator, id)` trie segment — independently
-    // of `Owner` (which gates the path). If a `Creator` is declared, the signer
-    // must control it, else a writer could file objects under another identity's
-    // creator segment. The owner gate above only covers `Creator` when no `Owner`
+    // 2.6. Creator integrity. `Creator` is the object's immutable author
+    // attribute (no longer part of the state-trie key — identity is `(path, id)`).
+    // It gates provenance and ownership defaulting independently of `Owner`. If a
+    // `Creator` is declared, the signer must control it, else a writer could file
+    // objects under another identity's `Creator`. The owner gate above only covers
+    // `Creator` when no `Owner`
     // is present (it is `Owner → else Creator → else signer`), so validate it
     // explicitly here whenever it is set. Applies to all actions.
     if let Some(creator) = &msg.creator {
@@ -707,7 +703,7 @@ fn check_root_policy_exists(state: &dyn StateView) -> RootPolicyCheck {
     // case and silently drop the daemon into genesis mode (no policy enforcement
     // at all). The object's existence is what gates genesis mode; its creator is
     // irrelevant to that question.
-    match state.get_first_object_at_path_id(&path, &id) {
+    match state.get_object(&path, &id) {
         Ok(Some(_)) => RootPolicyCheck::Exists,
         Ok(None) => RootPolicyCheck::DoesNotExist,
         Err(e) => RootPolicyCheck::Error(format!("DB error checking root policy: {}", e)),
@@ -721,8 +717,11 @@ fn validate_post(
     root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
-    // Special handling for name claims: enforce uniqueness by (path, id)
-    // Names under /sys/names/ and other name paths should only be claimed once
+    // Name-claim paths carry a dedicated authorization flow: the primary-domain
+    // anti-hijack on creation and controller-only (no policy override) updates. The
+    // *uniqueness* it used to enforce via a per-creator scan is now just the
+    // general `(path, id)` point lookup below — but the name-specific
+    // authorization is retained (Authorization Spec §Name-claim anti-hijack).
     if is_name_claim_path(&msg.path) {
         return validate_name_claim(msg, state, root_policy_exists, l2);
     }
@@ -730,9 +729,13 @@ fn validate_post(
     // Get the creator (use name resolution if available)
     let creator = resolve_creator(msg, Some(state), l2);
 
-    // Check if object already exists
-    // SECURITY: Fail closed - if we can't verify state, we must deny
-    let existing = match state.get_object(&msg.path, &creator, &msg.id) {
+    // Look up the object occupying the globally-unique `(path, id)` slot. Global
+    // uniqueness makes this a point lookup: an occupied slot means this write is
+    // an update to the incumbent (whatever its creator — a `create` into a slot
+    // held by a different creator lands on the update path and is rejected unless
+    // authorized), an empty slot means a create.
+    // SECURITY: Fail closed - if we can't verify state, we must deny.
+    let existing = match state.get_object(&msg.path, &msg.id) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::error!("State DB error checking object existence: {}", e);
@@ -744,11 +747,13 @@ fn validate_post(
     };
 
     if let Some(existing_obj) = existing {
-        // Object exists - this is an update. Authorize the signer against the
-        // object's *resolved controller* (its stored `owner_ref`), not the
-        // legacy signer-key `owner`: a direct key match for key-rooted owners,
-        // browserid attribution for email-rooted owners. The controller can
-        // always update their own object.
+        // Slot occupied - this is an update. Authorize the signer against the
+        // object's *resolved controller* (its stored `owner_ref`), not the legacy
+        // signer-key `owner`: a direct key match for key-rooted owners, browserid
+        // attribution for email-rooted owners. The controller can always update
+        // their own object; anyone else must be granted `update` by policy (which
+        // also covers the "create into a slot held by a different creator" case —
+        // it is an unauthorized update and is rejected).
         let owner_ref = stored_owner_ref(&existing_obj);
         if l2_authorize(msg, state, l2, owner_ref).is_ok() {
             tracing::debug!("Controller updating object {}:{}", msg.path, msg.id);
@@ -766,7 +771,7 @@ fn validate_post(
         // Allow any post since we're bootstrapping
         tracing::debug!("Allowing post without root policy (genesis mode)");
     } else {
-        // New object creation - must check policy
+        // New object creation into an empty slot - must check policy
         if let Err(reason) = check_policy(state, msg, ActionType::Create, None, l2) {
             return ValidationResult::Invalid {
                 stage: ValidationStage::Policy,
@@ -778,23 +783,26 @@ fn validate_post(
     ValidationResult::Valid { creator: creator.to_string() }
 }
 
-/// Check if a path is a name claim path (requires uniqueness by path/id)
+/// Whether `path` is a name-claim path (`/sys/names/…`), which carries the
+/// primary-domain anti-hijack authorization. Uniqueness itself is no longer
+/// special-cased here — it is the general `(path, id)` rule.
 fn is_name_claim_path(path: &SboPath) -> bool {
-    let path_str = path.to_string();
-    // /sys/names/ is for name claims
-    path_str.starts_with("/sys/names/")
+    path.to_string().starts_with("/sys/names/")
 }
 
-/// Validate a name claim (enforces uniqueness by path/id, not path/creator/id)
+/// Validate a name claim. Uniqueness is now the general `(path, id)` rule (a
+/// point lookup, no per-creator scan); what remains name-specific is the
+/// authorization: a new claim on a primary-domain repo must control the mapped
+/// email (anti-hijack), and an update is controller-only (no policy override).
 fn validate_name_claim(
     msg: &Message,
     state: &dyn StateView,
     root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
-    // Check if ANY object exists at this path/id (regardless of creator)
-    // SECURITY: Fail closed - if we can't verify state, we must deny
-    let existing = match state.get_first_object_at_path_id(&msg.path, &msg.id) {
+    // The object occupying this `(path, id)` slot, if any (a point lookup —
+    // globally unique). SECURITY: fail closed on a DB error.
+    let existing = match state.get_object(&msg.path, &msg.id) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::error!("State DB error checking name claim: {}", e);
@@ -805,7 +813,6 @@ fn validate_name_claim(
         }
     };
 
-    // The claimed name is the ID
     let claimed_name = msg.id.as_str().to_string();
 
     if let Some(existing_obj) = existing {
@@ -826,11 +833,11 @@ fn validate_name_claim(
         // New name claim. On a primary-domain repo a local name `<local>` governs
         // the identity `<local>@<domain>` (the sovereignty record), so claiming it
         // requires controlling that identity — otherwise a stranger (or a
-        // front-runner) could hijack it. The signer proves control via browserid
-        // attribution to the email (first claim) or the already-pinned key (key
-        // rotation), since `l2_authorize` resolves the email through any existing
-        // record. Off a primary-domain repo, or during genesis (no root policy
-        // yet), name claims remain first-come.
+        // front-runner) could hijack it. This anti-hijack layers ON TOP of the
+        // global first-valid-write-wins uniqueness rule: policy makes the slot
+        // claimable only by the rightful email; uniqueness makes the first valid
+        // claim final. Off a primary-domain repo, or during genesis (no root
+        // policy yet), name claims remain first-come.
         if root_policy_exists {
             if let Some(domain) = primary_domain(state) {
                 let email = format!("{}@{}", claimed_name, domain);
@@ -922,8 +929,10 @@ fn validate_transfer(
 
     // (B) DESTINATION — only when relocating (New-Path and/or New-ID). Both the
     // collision rule and the destination-path policy apply (SBO Specification.md
-    // §transfer). Creator is preserved by the move, so the collision check is
-    // "does an object already exist at the destination for THIS creator".
+    // §transfer). The collision check is now GLOBAL: the move is valid only if the
+    // destination `(New-Path, New-ID)` slot is occupied by NO valid object,
+    // regardless of creator (global `(path, id)` uniqueness). Creator is still
+    // preserved by the move — it is an immutable attribute, not part of the key.
     if new_path.is_some() || new_id.is_some() {
         let dest_path = new_path.clone().unwrap_or_else(|| msg.path.clone());
         let dest_id_str = new_id.clone().unwrap_or_else(|| msg.id.as_str().to_string());
@@ -936,13 +945,13 @@ fn validate_transfer(
                 };
             }
         };
-        match state.get_object(&dest_path, &creator, &dest_id) {
-            Ok(Some(_)) => {
+        match state.get_object(&dest_path, &dest_id) {
+            Ok(Some(occupant)) => {
                 return ValidationResult::Invalid {
                     stage: ValidationStage::State,
                     reason: format!(
-                        "Destination {}{} already exists for creator {}",
-                        dest_path, dest_id, creator
+                        "Destination {}{} already occupied (creator {})",
+                        dest_path, dest_id, occupant.creator
                     ),
                 };
             }
@@ -1306,8 +1315,22 @@ pub fn message_to_stored_object(
     let content_type = msg.content_type.as_ref()?;
 
     // Resolve the author's durable identity (attributed email for email-rooted
-    // writes, so the creator segment is stable across browserid key rotation).
-    let creator = resolve_creator(msg, state, l2);
+    // writes, so it is stable across browserid key rotation).
+    //
+    // `creator` is IMMUTABLE. On an UPDATE to an already-occupied `(path, id)`
+    // slot, preserve the incumbent object's creator: a *different* authorized
+    // signer (e.g. a self-authorizing `/sys/dnssec` refresh, whose policy grants
+    // update to all) changes the content/owner but never the creator. Only a
+    // fresh CREATE (empty slot) derives a new creator from the message. Beyond
+    // matching the spec's immutable-creator rule, this is what lets the pending
+    // overlay distinguish a *losing create* (different creator → dropped) from a
+    // *valid update* (creator preserved → same creator → LWW) — see
+    // `state_view::merge`. Recomputing creator per-write would flip the stored
+    // creator on a self-auth refresh and cause the overlay to drop it.
+    let creator = match state.and_then(|s| s.get_object(&msg.path, &msg.id).ok().flatten()) {
+        Some(existing) => existing.creator,
+        None => resolve_creator(msg, state, l2),
+    };
 
     // Legacy signer-key owner record (retained for objects/proofs that still
     // read it). Ownership checks key off `owner_ref` (the resolved controller).

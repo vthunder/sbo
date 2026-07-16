@@ -3,8 +3,9 @@
 title: 'Global (path,id) uniqueness: drop creator from trie key'
 status: in-progress
 type: feature
+priority: normal
 created_at: 2026-07-16T14:15:05Z
-updated_at: 2026-07-16T14:15:05Z
+updated_at: 2026-07-16T15:38:59Z
 ---
 
 Core SBO change: make (path,id) globally unique (first valid write wins, resolved by inclusion order); drop creator from the state-trie key (leaf [path…,id]) while keeping it as an immutable stored attribute + wire Creator header. Resolves the mingo-jyzt under-specified-resolution / grindable-first-creator-tiebreak problem and the /sys/dnssec fork.
@@ -18,9 +19,9 @@ Decided with dan (2026-07-16) after a deep design review:
 - Security: grindable squatting → front-runnable-only (the accepted /sys/names model). Personal/sys paths unaffected. Delete frees slot → recycling note.
 
 ## Plan
-- [ ] Proposal doc specs/proposals/global-path-id-uniqueness.md (in progress) — dan reviews before live specs edited
-- [ ] Apply coordinated edits to affected specs (State Commitment, Specification, URI, Identity, Community, Bridge, Content, Authorization; Attestation unchanged) — keep internally consistent
-- [ ] Implement in sbo: object_to_segments/encode_object_key drop creator; collapse scan helpers to point lookups; global transfer destination-collision; SBOQ segment construction + proof fixtures; retire is_name_claim_path + dnssec_hlc grind stopgap
+- [x] Proposal doc written + decisions resolved with dan (point-key; reorg/overlay normative paragraph; no delete cooldown; creator out of reference/URI grammar; freed-slot clarified)
+- [x] Applied to all 10 specs (commit 9809152); consistency swept (zero (path,creator,id)/[creator:]); fixed self-authorizing /sys/dnssec wording + renamed Creator-as-Path-Segment heading→Object-Identity-in-the-Trie w/ inbound anchors
+- [x] Implemented in sbo (workspace builds, 33 suites green, clippy clean, zkVM builds+tests pass — image-id unchanged). Reviewer caught + fixed a real bug: creator must be preserved on update (immutable) or the overlay drops valid self-auth /sys/dnssec refreshes; added regression test update_by_different_signer_preserves_immutable_creator. Reorg re-resolution is moot (daemon is forward-only today) — flagged for when reorg handling lands.
 - [ ] mingo: collision-safe live ids (app.js); verify genesis/seed/poster unaffected
-- [ ] Thorough tests (core change) incl. new: two-creators-one-slot rejected; transfer into occupied slot rejected; name-claim now general; dnssec single-slot refresh
+- [x] tests/global_uniqueness.rs: two-creators-rejected, transfer-into-occupied-rejected, delete-frees-slot, self-auth-single-slot, creator-immutable-on-update, proof round-trip; overlay supersession test in state_view.rs; name-claim general+anti-hijack via existing suites
 - [ ] Re-genesis mingo (trie-key change → state root changes) — decide after impl

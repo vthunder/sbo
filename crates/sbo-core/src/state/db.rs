@@ -59,15 +59,17 @@ impl StateDb {
         Ok(Self { db })
     }
 
-    /// Get an object by path and ID
+    /// Get the object occupying the `(path, id)` slot, if any.
+    ///
+    /// Object identity is globally unique on `(path, id)` (creator is an
+    /// immutable attribute, not part of the key), so this is a point lookup.
     pub fn get_object(
         &self,
         path: &crate::message::Path,
-        creator: &crate::message::Id,
         id: &crate::message::Id,
     ) -> Result<Option<StoredObject>, DbError> {
         let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
-        let key = encode_object_key(path, creator, id);
+        let key = encode_object_key(path, id);
 
         match self.db.get_cf(&cf, &key) {
             Ok(Some(bytes)) => {
@@ -83,7 +85,7 @@ impl StateDb {
     /// Store an object
     pub fn put_object(&self, obj: &StoredObject) -> Result<(), DbError> {
         let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
-        let key = encode_object_key(&obj.path, &obj.creator, &obj.id);
+        let key = encode_object_key(&obj.path, &obj.id);
         let value = serde_json::to_vec(obj)
             .map_err(|e| DbError::Serialization(e.to_string()))?;
 
@@ -91,91 +93,17 @@ impl StateDb {
             .map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
-    /// Delete an object
+    /// Delete the object occupying the `(path, id)` slot.
     pub fn delete_object(
         &self,
         path: &crate::message::Path,
-        creator: &crate::message::Id,
         id: &crate::message::Id,
     ) -> Result<(), DbError> {
         let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
-        let key = encode_object_key(path, creator, id);
+        let key = encode_object_key(path, id);
 
         self.db.delete_cf(&cf, &key)
             .map_err(|e| DbError::RocksDb(e.to_string()))
-    }
-
-    /// Check if any object exists at a given path and id (regardless of creator)
-    /// This is used for enforcing uniqueness on name claims
-    pub fn object_exists_at_path_id(
-        &self,
-        path: &crate::message::Path,
-        id: &crate::message::Id,
-    ) -> Result<bool, DbError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
-
-        // Prefix is "path\x1f" to find all objects at this path. The delimiter
-        // is the ASCII Unit Separator (0x1F), matching `encode_object_key`.
-        let prefix = format!("{}\x1f", path);
-        let suffix = format!("\x1f{}", id);
-
-        let iter = self.db.prefix_iterator_cf(&cf, prefix.as_bytes());
-        for item in iter {
-            match item {
-                Ok((key, _value)) => {
-                    // Check if the key ends with our ID
-                    let key_str = String::from_utf8_lossy(&key);
-                    if key_str.ends_with(&suffix) {
-                        return Ok(true);
-                    }
-                    // Stop if we've moved past our prefix
-                    if !key_str.starts_with(&prefix) {
-                        break;
-                    }
-                }
-                Err(e) => return Err(DbError::RocksDb(e.to_string())),
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Get the first object at a given path and id (regardless of creator)
-    /// Returns the StoredObject if found
-    pub fn get_first_object_at_path_id(
-        &self,
-        path: &crate::message::Path,
-        id: &crate::message::Id,
-    ) -> Result<Option<StoredObject>, DbError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
-
-        // Delimiter is the ASCII Unit Separator (0x1F), matching `encode_object_key`.
-        let prefix = format!("{}\x1f", path);
-        let suffix = format!("\x1f{}", id);
-
-        let iter = self.db.prefix_iterator_cf(&cf, prefix.as_bytes());
-        for item in iter {
-            match item {
-                Ok((key, value)) => {
-                    let key_str = String::from_utf8_lossy(&key);
-                    // Stop once we've walked past this path's range — otherwise a
-                    // key from a LATER path that happens to end with the same
-                    // `\x1f<id>` suffix would be wrongly returned (prefix_iterator
-                    // yields keys >= prefix, not only prefix-matching ones).
-                    if !key_str.starts_with(&prefix) {
-                        break;
-                    }
-                    if key_str.ends_with(&suffix) {
-                        let obj: StoredObject = serde_json::from_slice(&value)
-                            .map_err(|e| DbError::Serialization(e.to_string()))?;
-                        return Ok(Some(obj));
-                    }
-                }
-                Err(e) => return Err(DbError::RocksDb(e.to_string())),
-            }
-        }
-
-        Ok(None)
     }
 
     /// Collect all stored objects whose encoded key begins with `path_prefix`
@@ -450,18 +378,18 @@ impl StateDb {
 
     // ========== Trie State Root ==========
 
-    /// Convert an object's path, creator, and id to trie path segments
-    /// E.g., path="/sys/names/", creator="user123", id="alice" -> ["sys", "names", "user123", "alice"]
+    /// Convert an object's path and id to trie path segments.
+    /// E.g., path="/sys/names/", id="alice" -> ["sys", "names", "alice"].
+    /// `creator` is an immutable object attribute, not a trie segment: identity
+    /// is globally unique on `(path, id)`.
     pub fn object_to_segments(
         path: &crate::message::Path,
-        creator: &crate::message::Id,
         id: &crate::message::Id,
     ) -> Vec<String> {
         let mut segments: Vec<String> = path.segments()
             .iter()
             .map(|id| id.as_str().to_string())
             .collect();
-        segments.push(creator.as_str().to_string());
         segments.push(id.as_str().to_string());
         segments
     }
@@ -491,7 +419,7 @@ impl StateDb {
                     let obj: StoredObject = serde_json::from_slice(&value)
                         .map_err(|e| DbError::Serialization(e.to_string()))?;
 
-                    let segments = Self::object_to_segments(&obj.path, &obj.creator, &obj.id);
+                    let segments = Self::object_to_segments(&obj.path, &obj.id);
                     objects.push((segments, obj.object_hash));
                 }
                 Err(e) => return Err(DbError::RocksDb(e.to_string())),
@@ -516,11 +444,10 @@ impl StateDb {
     pub fn generate_trie_proof(
         &self,
         path: &crate::message::Path,
-        creator: &crate::message::Id,
         id: &crate::message::Id,
     ) -> Result<Option<sbo_crypto::TrieProof>, DbError> {
         // Get the object first to verify it exists
-        if self.get_object(path, creator, id)?.is_none() {
+        if self.get_object(path, id)?.is_none() {
             return Ok(None);
         }
 
@@ -532,28 +459,28 @@ impl StateDb {
         }
 
         // Generate proof for target object
-        let target_segments = Self::object_to_segments(path, creator, id);
+        let target_segments = Self::object_to_segments(path, id);
         match trie.generate_proof(&target_segments) {
             Ok(proof) => Ok(Some(proof)),
             Err(_) => Ok(None),
         }
     }
 
-    /// Generate a trie proof for an object by path and id, auto-detecting creator
-    /// Returns (creator, TrieProof) or None if object doesn't exist
+    /// Generate a trie proof for the object occupying `(path, id)`.
+    /// Returns `(creator, TrieProof)` (creator is the occupant's immutable
+    /// attribute, carried on the SBOQ `Creator` header) or `None` if the slot is
+    /// empty. This is now a point lookup — there is no creator to auto-detect.
     pub fn generate_trie_proof_auto(
         &self,
         path: &crate::message::Path,
         id: &crate::message::Id,
     ) -> Result<Option<(crate::message::Id, sbo_crypto::TrieProof)>, DbError> {
-        // Find the object (auto-detects creator)
-        let obj = match self.get_first_object_at_path_id(path, id)? {
+        let obj = match self.get_object(path, id)? {
             Some(o) => o,
             None => return Ok(None),
         };
 
-        // Now generate the proof using the found creator
-        match self.generate_trie_proof(path, &obj.creator, id)? {
+        match self.generate_trie_proof(path, id)? {
             Some(proof) => Ok(Some((obj.creator, proof))),
             None => Ok(None),
         }
@@ -562,10 +489,9 @@ impl StateDb {
 
 fn encode_object_key(
     path: &crate::message::Path,
-    creator: &crate::message::Id,
     id: &crate::message::Id,
 ) -> Vec<u8> {
     // Delimiter is ASCII Unit Separator (0x1F): outside the Id/Path charset
     // (which now includes '@' and '/'), so keys stay unambiguous.
-    format!("{}\x1f{}\x1f{}", path, creator, id).into_bytes()
+    format!("{}\x1f{}", path, id).into_bytes()
 }

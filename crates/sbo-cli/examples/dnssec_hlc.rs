@@ -29,17 +29,12 @@ async fn main() -> anyhow::Result<()> {
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let hlc = format!("{now_ms}.0");
 
-    // Grind a signing key whose pubkey (hence creator segment `e_<first16hex>`)
-    // sorts lexicographically first, so `get_first_object_at_path_id` returns
-    // THIS proof rather than a stale earlier fork. Stopgap for mingo-jyzt.
-    let key = loop {
-        let k = SigningKey::generate();
-        let pk = k.public_key().to_string(); // "ed25519:<hex>"
-        if pk.starts_with("ed25519:00") {
-            eprintln!("  ground creator key: {pk}");
-            break k;
-        }
-    };
+    // A fresh throwaway key signs this self-authorizing (key-rooted) write.
+    // (Historical note: this used to grind a low-sorting pubkey to win the
+    // lexicographic-first-creator tiebreak on `/sys/dnssec/<domain>`. Under global
+    // `(path, id)` uniqueness there is no creator tiebreak and no fork to work
+    // around — the first valid writer owns the slot — so the grind is retired.)
+    let key = SigningKey::generate();
     let mut msg = Message {
         action: Action::Post,
         path: Path::parse("/sys/dnssec/").unwrap(),

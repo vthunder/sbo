@@ -311,7 +311,7 @@ fn read_object_view(
         .map_err(|e| ApiError::bad_request(format!("Invalid id: {e}")))?;
 
     let confirmed = db
-        .get_first_object_at_path_id(&path, &id)
+        .get_object(&path, &id)
         .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?;
 
     // Proof requests only ever serve confirmed objects — the overlay has no
@@ -360,7 +360,7 @@ fn read_object_raw(
         .map_err(|e| ApiError::bad_request(format!("Invalid id: {e}")))?;
 
     let confirmed = db
-        .get_first_object_at_path_id(&path, &id)
+        .get_object(&path, &id)
         .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?;
 
     let pool = pending.read().unwrap();
@@ -875,7 +875,7 @@ async fn attest_if_due(
             Ok(i) => i,
             Err(_) => continue,
         };
-        if state_db.object_exists_at_path_id(&att_path, &att_id).unwrap_or(false) {
+        if state_db.get_object(&att_path, &att_id).map(|o| o.is_some()).unwrap_or(false) {
             attested.insert(block);
             continue;
         }

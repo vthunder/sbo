@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::lc::LcManager;
 use crate::repo::{Repo, RepoManager};
 use crate::rpc::RpcClient;
-use crate::validate::{validate_message, message_to_stored_object, resolve_creator, ValidationResult};
+use crate::validate::{validate_message, message_to_stored_object, ValidationResult};
 use sbo_core::state::StateDb;
 use sbo_core::{StateTransitionWitness, ObjectWitness, SparseTrie};
 use sha2::{Sha256, Digest};
@@ -972,9 +972,8 @@ impl SyncEngine {
             }
             Err(e) => return Err(crate::DaemonError::Repo(format!("state read failed: {}", e))),
         };
-        let creator = existing.creator.clone();
 
-        let src_segs = StateDb::object_to_segments(&msg.path, &creator, &msg.id);
+        let src_segs = StateDb::object_to_segments(&msg.path, &msg.id);
         let src_file = Self::object_file_path(repo, &msg.path, msg.id.as_str());
         let src_is_name = msg.path.to_string().starts_with("/sys/names/");
 
@@ -994,7 +993,7 @@ impl SyncEngine {
                 old_object_hash: existing.object_hash,
             });
             state_db
-                .delete_object(&msg.path, &creator, &msg.id)
+                .delete_object(&msg.path, &msg.id)
                 .map_err(|e| crate::DaemonError::Repo(format!("delete_object failed: {}", e)))?;
             let _ = std::fs::remove_file(&src_file);
             if src_is_name {
@@ -1023,7 +1022,7 @@ impl SyncEngine {
             moved.owner_ref = Some(no.clone());
         }
 
-        let dest_segs = StateDb::object_to_segments(&dest_path, &creator, &dest_id);
+        let dest_segs = StateDb::object_to_segments(&dest_path, &dest_id);
         touched.deletes.push(TouchedDelete {
             path_segments: src_segs,
             old_object_hash: existing.object_hash,
@@ -1034,7 +1033,7 @@ impl SyncEngine {
         });
 
         state_db
-            .delete_object(&msg.path, &creator, &msg.id)
+            .delete_object(&msg.path, &msg.id)
             .map_err(|e| crate::DaemonError::Repo(format!("delete_object failed: {}", e)))?;
         state_db
             .put_object(&moved)
@@ -1112,14 +1111,11 @@ impl SyncEngine {
         // Check if object exists and track the touch operation
         let uri = repo.uri.to_string();
         if let Some(state_db) = self.state_dbs.get(&uri) {
-            // Get the creator ID using the same resolution as message_to_stored_object
-            // This ensures witness path segments match what gets stored in the database
-            let creator = resolve_creator(msg, Some(state_db.as_ref()), l2);
-
-            // Build path segments for witness tracking
-            let path_segments = StateDb::object_to_segments(&msg.path, &creator, &msg.id);
-            // Use get_first_object_at_path_id to find existing object regardless of creator
-            let existing = state_db.get_first_object_at_path_id(&msg.path, &msg.id).ok().flatten();
+            // Build path segments for witness tracking. Identity is globally unique
+            // on `(path, id)` — creator is an object attribute, not a trie segment.
+            let path_segments = StateDb::object_to_segments(&msg.path, &msg.id);
+            // Point lookup for the object occupying this slot, if any.
+            let existing = state_db.get_object(&msg.path, &msg.id).ok().flatten();
 
             // Last-writer-wins by HLC (Content Spec §Conflict Resolution): an
             // HLC-bearing write that loses the total order against the current

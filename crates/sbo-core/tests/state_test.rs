@@ -29,7 +29,6 @@ fn test_store_and_retrieve_object() {
 
     let retrieved = db.get_object(
         &Path::parse("/test/").unwrap(),
-        &Id::new("alice").unwrap(),
         &Id::new("hello").unwrap(),
     ).unwrap();
 

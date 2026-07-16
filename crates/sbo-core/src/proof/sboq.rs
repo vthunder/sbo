@@ -429,7 +429,7 @@ mod tests {
     fn test_sboq_roundtrip() {
         let proof = TrieProof {
             state_root: [1u8; 32],
-            path_segments: vec!["sys".to_string(), "names".to_string(), "user1".to_string(), "alice".to_string()],
+            path_segments: vec!["sys".to_string(), "names".to_string(), "alice".to_string()],
             object_hash: Some([2u8; 32]),
             proof: vec![
                 TrieProofStep {
@@ -443,14 +443,6 @@ mod tests {
                 TrieProofStep {
                     segment: Some("names".to_string()),
                     siblings: BTreeMap::new(),
-                },
-                TrieProofStep {
-                    segment: Some("user1".to_string()),
-                    siblings: {
-                        let mut m = BTreeMap::new();
-                        m.insert("user2".to_string(), [4u8; 32]);
-                        m
-                    },
                 },
                 TrieProofStep {
                     segment: Some("alice".to_string()),
@@ -486,7 +478,7 @@ mod tests {
         assert_eq!(parsed.block, 12345);
         assert_eq!(parsed.state_root, [1u8; 32]);
         assert_eq!(parsed.object_hash, Some([2u8; 32]));
-        assert_eq!(parsed.trie_proof.proof.len(), 4);
+        assert_eq!(parsed.trie_proof.proof.len(), 3);
         assert!(parsed.object.is_none());
     }
 
@@ -496,7 +488,7 @@ mod tests {
 
         let proof = TrieProof {
             state_root: [1u8; 32],
-            path_segments: vec!["sys".to_string(), "names".to_string(), "user1".to_string(), "alice".to_string()],
+            path_segments: vec!["sys".to_string(), "names".to_string(), "alice".to_string()],
             object_hash: Some([2u8; 32]),
             proof: vec![
                 TrieProofStep {
@@ -505,10 +497,6 @@ mod tests {
                 },
                 TrieProofStep {
                     segment: Some("names".to_string()),
-                    siblings: BTreeMap::new(),
-                },
-                TrieProofStep {
-                    segment: Some("user1".to_string()),
                     siblings: BTreeMap::new(),
                 },
                 TrieProofStep {
@@ -543,7 +531,7 @@ mod tests {
     fn test_sboq_nonexistence() {
         let proof = TrieProof {
             state_root: [1u8; 32],
-            path_segments: vec!["sys".to_string(), "names".to_string(), "user1".to_string(), "nonexistent".to_string()],
+            path_segments: vec!["sys".to_string(), "names".to_string(), "nonexistent".to_string()],
             object_hash: None,
             proof: vec![
                 TrieProofStep {
@@ -552,10 +540,6 @@ mod tests {
                 },
                 TrieProofStep {
                     segment: Some("names".to_string()),
-                    siblings: BTreeMap::new(),
-                },
-                TrieProofStep {
-                    segment: Some("user1".to_string()),
                     siblings: BTreeMap::new(),
                 },
                 TrieProofStep {

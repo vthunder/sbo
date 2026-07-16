@@ -106,7 +106,7 @@ pub fn compute_snapshot_root(objects: &[StoredObject]) -> [u8; 32] {
     }
     let entries: Vec<(Vec<String>, [u8; 32])> = objects
         .iter()
-        .map(|o| (StateDb::object_to_segments(&o.path, &o.creator, &o.id), o.object_hash))
+        .map(|o| (StateDb::object_to_segments(&o.path, &o.id), o.object_hash))
         .collect();
     sbo_core::compute_trie_root(&entries)
 }
