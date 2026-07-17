@@ -5,7 +5,7 @@ status: todo
 type: epic
 priority: high
 created_at: 2026-07-16T23:32:54Z
-updated_at: 2026-07-17T00:28:20Z
+updated_at: 2026-07-17T06:31:38Z
 ---
 
 Design converged with dan (2026-07-16/17). Replaces winner-take-all shadowing with a delegation model that spans strict-hierarchy → revocable → sovereign from one mechanism set. Fixes the sbo-vos1 capture bug as a side effect. Greenfield (no live users) — free to change validation semantics + regenesis.
@@ -73,3 +73,7 @@ Break into child beans (P1 install-gate, P2 pinning + history, P3 constraint cla
 - mingo composition (mingo-qjkf): DONE + LIVE as MANAGED (unpinned) communities. Pinned/chartered boards (with reserved-takedown contract) await P2-P4 merge + user-created boards (mingo-gj9r).
 
 Epic left OPEN pending P2-P4 review/merge and the pinned-boards rollout.
+
+## P2-P4 MERGED to main (2026-07-17)
+
+Merge commit 65901c0; full workspace suite green (360 passed, 0 failed). The delegation model (P1 govern + P2 pinning/history + P3 constraint clause + P4 no-pin) is now all on sbo main. Deployed daemon (mingo) still pinned to P1 rev 4b28d8e for the managed-community regenesis; bump SBO_REV to pick up P2-P4 when moving to pinned/chartered boards.
