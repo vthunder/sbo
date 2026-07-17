@@ -1405,6 +1405,65 @@ mod dnssec_repro_tests {
         }
     }
 
+    // A `by`-qualified attested role must resolve even when the issuer's
+    // attestations live under a `/u/<issuer>/attestations/` namespace (mingo's
+    // layout) rather than the bare `/<issuer>/attestations/`. Before the fix,
+    // attested_subject_matches prefix-scanned `/<by>/attestations/` and silently
+    // missed these — breaking every moderator role and every `not_attested{by}`
+    // ban. Now it schema-scans and filters by resolved issuer, so layout is
+    // irrelevant. (Regression for the mingo-n268 moderator-delete live failure.)
+    #[test]
+    fn by_qualified_attested_resolves_under_u_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+
+        let issuer = SigningKey::generate().public_key().to_string();
+        let subject = SigningKey::generate().public_key().to_string();
+
+        // The moderator attestation, stored under /u/<issuer>/attestations/ (NOT
+        // the bare /<issuer>/ the old prefix scan assumed).
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "subject": subject,
+            "type": "role:moderator:cooks",
+            "value": "moderator",
+            "issued_at": 1,
+            "expires": serde_json::Value::Null,
+            "issuer": issuer,
+        })).unwrap();
+        db.put_object(&StoredObject {
+            path: SboPath::parse(&format!("/u/{issuer}/attestations/{subject}/")).unwrap(),
+            id: Id::new("role:moderator:cooks").unwrap(),
+            creator: Id::new(&issuer).unwrap(),
+            owner: Id::new(&issuer).unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ContentHash::sha256(&payload),
+            payload,
+            policy_ref: None,
+            content_schema: Some("attestation.v1".to_string()),
+            owner_ref: Some(issuer.clone()),
+            block_number: 2,
+            object_hash: [4u8; 32],
+            hlc: Some("2.0".to_string()),
+            prev: None,
+        }).unwrap();
+
+        let l2 = L2Context::for_block(Some(1_000), &db);
+        let requester = resolve_controller(&subject, &name_lookup(&db), DEFAULT_HOP_LIMIT, None);
+        let source = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(issuer.clone()) };
+        assert!(
+            attested_subject_matches(&db, &l2, &requester, &source),
+            "by-qualified moderator attestation under /u/ must resolve"
+        );
+
+        // A different issuer must NOT match (the per-candidate issuer filter still bites).
+        let other = SigningKey::generate().public_key().to_string();
+        let wrong = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(other) };
+        assert!(
+            !attested_subject_matches(&db, &l2, &requester, &wrong),
+            "an attestation by a different issuer must not satisfy the role"
+        );
+    }
+
     // ===== P2/P3/P4 policy-delegation primitives =====
 
     use sbo_core::policy::PolicyPin;
@@ -2044,10 +2103,16 @@ fn evaluate_policy_for(
 /// `source.by` (when given), and the attestation is in force at the block's
 /// inclusion time.
 ///
-/// When `by` is given we prefix-scan that issuer's namespace
-/// (`/<by>/attestations/`); otherwise we scan all `attestation.v1` objects (any
-/// issuer, including a self-attestation). All inputs are on-chain and
-/// inclusion-time-pinned, so the decision is deterministic on replay.
+/// We enumerate `attestation.v1` objects by SCHEMA (layout-independent) and, when
+/// `by` is given, confirm each candidate's issuer resolves to `by` per-object
+/// below. Correctness never depended on WHERE the attestation is stored — the
+/// issuer is the object's authenticated controller (`owner_ref`), not its path —
+/// so we must not narrow by a hardcoded path prefix: a `/<by>/attestations/`
+/// prefix scan silently misses issuers whose namespace is laid out differently
+/// (e.g. mingo stores them under `/u/<issuer>/attestations/`, which broke every
+/// `by`-qualified role — moderators — and every `not_attested{by}` ban). All
+/// inputs are on-chain and inclusion-time-pinned, so the decision is
+/// deterministic on replay.
 fn attested_subject_matches(
     state: &dyn StateView,
     l2: &L2Context,
@@ -2057,14 +2122,9 @@ fn attested_subject_matches(
     let lookup = name_lookup(state);
     let pd = primary_domain(state);
     let t = l2.inclusion_time.unwrap_or(0);
-    let candidates = match &source.by {
-        Some(by) => state
-            .list_objects_by_path_prefix(&format!("/{by}/attestations/"))
-            .unwrap_or_default(),
-        None => state
-            .list_objects_by_schema("attestation.v1")
-            .unwrap_or_default(),
-    };
+    let candidates = state
+        .list_objects_by_schema("attestation.v1")
+        .unwrap_or_default();
     candidates.into_iter().any(|obj| {
         if obj.content_schema.as_deref() != Some("attestation.v1") {
             return false;
