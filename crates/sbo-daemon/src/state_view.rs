@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use sbo_core::error::DbError;
 use sbo_core::message::{Id, Path};
 use sbo_core::policy::Policy;
-use sbo_core::state::{StateDb, StoredObject};
+use sbo_core::state::{PolicyEntry, StateDb, StoredObject};
 
 use crate::pending::overlay_wins;
 
@@ -34,6 +34,13 @@ pub trait StateView {
 
     /// Resolve the effective policy governing `path` (nearest ancestor, then root).
     fn resolve_policy(&self, path: &Path) -> Result<Option<Policy>, DbError>;
+
+    /// Resolve the effective policy ENTRY (policy + on-chain content-hash), for
+    /// pin validation + pin-aware govern resolution (P2).
+    fn resolve_policy_entry(&self, path: &Path) -> Result<Option<PolicyEntry>, DbError>;
+
+    /// Fetch a retained historical policy version by content-hash (P2).
+    fn get_policy_version(&self, content_hash: &str) -> Result<Option<Policy>, DbError>;
 
     /// All objects whose path begins with `path_prefix`.
     fn list_objects_by_path_prefix(&self, path_prefix: &str)
@@ -57,6 +64,14 @@ impl StateView for StateDb {
 
     fn resolve_policy(&self, path: &Path) -> Result<Option<Policy>, DbError> {
         StateDb::resolve_policy(self, path)
+    }
+
+    fn resolve_policy_entry(&self, path: &Path) -> Result<Option<PolicyEntry>, DbError> {
+        StateDb::resolve_policy_entry(self, path)
+    }
+
+    fn get_policy_version(&self, content_hash: &str) -> Result<Option<Policy>, DbError> {
+        StateDb::get_policy_version(self, content_hash)
     }
 
     fn list_objects_by_path_prefix(
@@ -156,6 +171,16 @@ impl<'a> StateView for Overlay<'a> {
         // Policies live in a dedicated column family, not the object mempool, so
         // there is nothing pending to overlay — delegate to confirmed state.
         self.db.resolve_policy(path)
+    }
+
+    fn resolve_policy_entry(&self, path: &Path) -> Result<Option<PolicyEntry>, DbError> {
+        // Policies (and their versions) live in dedicated CFs, not the object
+        // mempool — nothing pending to overlay.
+        self.db.resolve_policy_entry(path)
+    }
+
+    fn get_policy_version(&self, content_hash: &str) -> Result<Option<Policy>, DbError> {
+        self.db.get_policy_version(content_hash)
     }
 
     fn list_objects_by_path_prefix(

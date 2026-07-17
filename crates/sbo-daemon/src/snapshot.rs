@@ -12,10 +12,24 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use sbo_core::policy::Policy;
 use sbo_core::state::{StateDb, StoredObject};
 
 /// Snapshot wire format id (bump on incompatible changes).
-pub const FORMAT: &str = "sbo-snapshot/json+gzip/1";
+pub const FORMAT: &str = "sbo-snapshot/json+gzip/2";
+
+/// The decompressed snapshot payload: the confirmed object set plus every
+/// still-pinned historical policy version (P2, cf mingo-cy17). The object set
+/// alone reconstructs the trie state root; the pinned versions are auxiliary
+/// (verified by content-hash on load) and let a fast-synced node authorize
+/// writes under a pinned child policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotPayload {
+    pub objects: Vec<StoredObject>,
+    /// Retained historical policy versions as `(content_hash, policy)`.
+    #[serde(default)]
+    pub policy_versions: Vec<(String, Policy)>,
+}
 
 /// Metadata sidecar written next to each snapshot file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,10 +68,15 @@ pub fn write_snapshot(
     block: u64,
     state_root: &str,
     objects: &[StoredObject],
+    policy_versions: &[(String, Policy)],
     now: i64,
 ) -> Result<SnapshotMeta> {
     std::fs::create_dir_all(dir)?;
-    let json = serde_json::to_vec(objects)?;
+    let payload = SnapshotPayload {
+        objects: objects.to_vec(),
+        policy_versions: policy_versions.to_vec(),
+    };
+    let json = serde_json::to_vec(&payload)?;
     let uncompressed_bytes = json.len() as u64;
 
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -87,13 +106,29 @@ pub fn write_snapshot(
     Ok(meta)
 }
 
-/// Read + decompress a snapshot file into its object set.
-pub fn read_snapshot_objects(path: &Path) -> Result<Vec<StoredObject>> {
+/// Read + decompress a snapshot file into its full payload.
+pub fn read_snapshot_payload(path: &Path) -> Result<SnapshotPayload> {
     let gz = std::fs::read(path)?;
-    let mut dec = flate2::read::GzDecoder::new(&gz[..]);
+    decode_snapshot_payload(&gz)
+}
+
+/// Decode gzip-compressed snapshot bytes into a [`SnapshotPayload`], tolerating
+/// the legacy format/1 where the payload was a bare `Vec<StoredObject>`.
+pub fn decode_snapshot_payload(gz: &[u8]) -> Result<SnapshotPayload> {
+    let mut dec = flate2::read::GzDecoder::new(gz);
     let mut json = Vec::new();
     dec.read_to_end(&mut json)?;
-    Ok(serde_json::from_slice(&json)?)
+    if let Ok(payload) = serde_json::from_slice::<SnapshotPayload>(&json) {
+        return Ok(payload);
+    }
+    // Legacy format/1: a bare object array.
+    let objects: Vec<StoredObject> = serde_json::from_slice(&json)?;
+    Ok(SnapshotPayload { objects, policy_versions: Vec::new() })
+}
+
+/// Read + decompress a snapshot file into its object set (convenience).
+pub fn read_snapshot_objects(path: &Path) -> Result<Vec<StoredObject>> {
+    Ok(read_snapshot_payload(path)?.objects)
 }
 
 /// Compute the state root a set of snapshot objects reconstructs to — the client's
@@ -174,7 +209,7 @@ mod tests {
         let objects = db.list_objects_by_path_prefix("/").unwrap();
 
         let snap_dir = dir.path().join("snapshots");
-        let meta = write_snapshot(&snap_dir, 10, &hex::encode(db_root), &objects, 0).unwrap();
+        let meta = write_snapshot(&snap_dir, 10, &hex::encode(db_root), &objects, &[], 0).unwrap();
         assert_eq!(meta.object_count, objects.len());
 
         // Read back and recompute the root from the snapshot alone.

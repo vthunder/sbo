@@ -92,7 +92,7 @@ pub fn evaluate(
 /// requests `Create`/`Update`/`Delete`/`Transfer` (it maps a `post` envelope to
 /// `create` or `update` by object existence), so the `post`⇒{create,update}
 /// expansion is what makes community `can: ["post"]` grants work.
-fn action_covered_by(granted: ActionType, requested: ActionType) -> bool {
+pub fn action_covered_by(granted: ActionType, requested: ActionType) -> bool {
     // `govern` is meta-authority: only an explicit `govern` grant covers it.
     // Crucially `*` does NOT — otherwise `to: admin can:[*]` (and any broad
     // wildcard grant) would silently confer the power to install policies, which
