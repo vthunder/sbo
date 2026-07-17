@@ -5,7 +5,7 @@ status: todo
 type: epic
 priority: high
 created_at: 2026-07-16T23:32:54Z
-updated_at: 2026-07-17T06:31:38Z
+updated_at: 2026-07-17T09:28:31Z
 ---
 
 Design converged with dan (2026-07-16/17). Replaces winner-take-all shadowing with a delegation model that spans strict-hierarchy → revocable → sovereign from one mechanism set. Fixes the sbo-vos1 capture bug as a side effect. Greenfield (no live users) — free to change validation semantics + regenesis.
@@ -77,3 +77,7 @@ Epic left OPEN pending P2-P4 review/merge and the pinned-boards rollout.
 ## P2-P4 MERGED to main (2026-07-17)
 
 Merge commit 65901c0; full workspace suite green (360 passed, 0 failed). The delegation model (P1 govern + P2 pinning/history + P3 constraint clause + P4 no-pin) is now all on sbo main. Deployed daemon (mingo) still pinned to P1 rev 4b28d8e for the managed-community regenesis; bump SBO_REV to pick up P2-P4 when moving to pinned/chartered boards.
+
+## P2-P4 VALIDATED LIVE (2026-07-17)
+
+mingo live-test S9-S13 all PASS against the production daemon (SBO_REV b6ac8ba): S9 pinning immunity (pinned child governable after ancestor revokes authority; unpinned sibling denied), S10 creation-pin-must-be-latest, S11 forward-only re-pin, S12 descendant-constraint (over-broad grant + missing mandated restriction rejected), S13 forbid_pinning. Each denial carried the exact expected daemon reason. The full delegation model (P1+P2+P3+P4) is now merged, deployed, and live-verified end-to-end.
