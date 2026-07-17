@@ -5,7 +5,7 @@ status: todo
 type: epic
 priority: high
 created_at: 2026-07-16T23:32:54Z
-updated_at: 2026-07-16T23:32:54Z
+updated_at: 2026-07-17T00:28:20Z
 ---
 
 Design converged with dan (2026-07-16/17). Replaces winner-take-all shadowing with a delegation model that spans strict-hierarchy → revocable → sovereign from one mechanism set. Fixes the sbo-vos1 capture bug as a side effect. Greenfield (no live users) — free to change validation semantics + regenesis.
@@ -65,3 +65,11 @@ Sovereignty is not a mode; it is the terms of a delegation, and the terms are fr
 - P4 ceiling byte-exact freezing of reserved grants.
 
 Break into child beans (P1 install-gate, P2 pinning + history, P3 constraint clause, P4 no-pin restriction, mingo regenesis) when moving to implementation.
+
+## Build status (2026-07-17)
+
+- P1 (sbo-whfw): DONE, merged to main (4b28d8e), LIVE via regenesis v5. Closes sbo-vos1.
+- P2/P3/P4 (sbo-723r/vqzj/sbo-yxm5): DONE on branch `p234-policy-delegation` in worktree ~/src/sbo-p234, full workspace tests green, NOT pushed. Additive optional fields on policy.v2 (backward-compatible); pin references on-chain content_hash; policy_versions CF + refcount GC; snapshot format json+gzip/2 carrying pinned versions; descendant-constraint clause (direct-children); no-pin flag. NEEDS: dan review + push/merge. Also fixes a latent gap (fast-synced node policies CF was never populated).
+- mingo composition (mingo-qjkf): DONE + LIVE as MANAGED (unpinned) communities. Pinned/chartered boards (with reserved-takedown contract) await P2-P4 merge + user-created boards (mingo-gj9r).
+
+Epic left OPEN pending P2-P4 review/merge and the pinned-boards rollout.

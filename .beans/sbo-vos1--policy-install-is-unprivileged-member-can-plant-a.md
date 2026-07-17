@@ -1,11 +1,11 @@
 ---
 # sbo-vos1
 title: 'Policy install is unprivileged: member can plant a shadowing policy and capture a subtree'
-status: todo
+status: completed
 type: bug
 priority: high
 created_at: 2026-07-16T21:55:38Z
-updated_at: 2026-07-16T23:33:01Z
+updated_at: 2026-07-17T00:27:32Z
 blocked_by:
     - sbo-orvt
 ---
@@ -42,3 +42,6 @@ Gate policy installation: a `policy.v2` write must be authorized by the PARENT p
 ## Resolution path (2026-07-17)
 
 Superseded by the full delegation design in sbo-orvt (do NOT ship a standalone minimal patch — greenfield, no live users, so we fix it properly). The capture bug is closed by P1 there: `govern` becomes a distinct capability not implied by `create`/`post`/`*`, and a policy object is governed by its PARENT policy rather than itself. Members holding only `create` can no longer install a shadowing policy, and self-governing lock-in is gone. Blocked-by sbo-orvt.
+
+## RESOLVED LIVE (2026-07-17)
+Fixed by P1 (sbo-whfw, rev 4b28d8e) and deployed via regenesis v5 (mingo-qjkf) @ block 3623864. The live community policies grant members create+owner-update with NO govern, and `*` no longer confers govern, so the plant-a-shadowing-policy capture is dead on the live chain. Verified by daemon integration test member_create_grant_cannot_install_shadowing_policy.
