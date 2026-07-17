@@ -767,7 +767,10 @@ async fn checkpoint_if_due(
         }
     };
 
-    match sbo_daemon::snapshot::write_snapshot(&snap_dir, head, &hex::encode(root), &objects, now) {
+    // Carry still-pinned historical policy versions so a fast-synced node can
+    // authorize writes under a pinned child policy (P2, cf mingo-cy17).
+    let policy_versions = state_db.list_policy_versions().unwrap_or_default();
+    match sbo_daemon::snapshot::write_snapshot(&snap_dir, head, &hex::encode(root), &objects, &policy_versions, now) {
         Ok(meta) => {
             tracing::info!(
                 "checkpoint @ block {}: snapshot {} objects, {} -> {} bytes (gz), root {}…",

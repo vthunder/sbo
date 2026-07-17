@@ -18,6 +18,24 @@ const CF_NAMES: &str = "names";
 const CF_META: &str = "meta";
 const CF_STATE_ROOTS: &str = "state_roots";
 const CF_PROOFS: &str = "proofs";
+/// P2 — retained historical policy versions, keyed by content-hash
+/// (`"sha256:<hex>"`). A version lives here as long as some live policy PINS it;
+/// GC'd when its pin refcount reaches zero. Serves pin-aware govern resolution.
+const CF_POLICY_VERSIONS: &str = "policy_versions";
+/// P2 — pin refcounts, keyed by content-hash → little-endian u64.
+const CF_POLICY_PINREFS: &str = "policy_pinrefs";
+
+/// A policy indexed in the `policies` CF: the parsed policy plus the on-chain
+/// content-hash and block of the version it came from. The content-hash is what
+/// a child policy PINS (P2) and what creation-pin validation compares against.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PolicyEntry {
+    pub policy: Policy,
+    /// The on-chain content-hash (`"sha256:<hex>"`) of this policy version.
+    pub content_hash: String,
+    /// Block the version was applied at (locator hint for pins).
+    pub block: u64,
+}
 
 /// A verified proof stored in the database
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -51,6 +69,8 @@ impl StateDb {
             rocksdb::ColumnFamilyDescriptor::new(CF_META, rocksdb::Options::default()),
             rocksdb::ColumnFamilyDescriptor::new(CF_STATE_ROOTS, rocksdb::Options::default()),
             rocksdb::ColumnFamilyDescriptor::new(CF_PROOFS, rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(CF_POLICY_VERSIONS, rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(CF_POLICY_PINREFS, rocksdb::Options::default()),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
@@ -144,44 +164,148 @@ impl StateDb {
         Ok(out)
     }
 
-    /// Store a policy at a path
-    /// The policy applies to the given path and all descendants
+    /// Store a policy at a path (test/bootstrap convenience — computes a
+    /// placeholder content-hash from the serialized policy). Real applies use
+    /// [`put_policy_at`] with the on-chain content-hash + block so that pins
+    /// (P2) resolve deterministically.
     pub fn put_policy(&self, path: &crate::message::Path, policy: &Policy) -> Result<(), DbError> {
+        let bytes = serde_json::to_vec(policy).map_err(|e| DbError::Serialization(e.to_string()))?;
+        let content_hash = crate::crypto::ContentHash::sha256(&bytes).to_string();
+        self.put_policy_at(path, policy, &content_hash, 0)
+    }
+
+    /// Index a policy version at a path with its on-chain content-hash + block.
+    /// This is the [`PolicyEntry`] the resolver returns; the `content_hash` is
+    /// what a child policy PINS (P2).
+    pub fn put_policy_at(
+        &self,
+        path: &crate::message::Path,
+        policy: &Policy,
+        content_hash: &str,
+        block: u64,
+    ) -> Result<(), DbError> {
         let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
         let key = path.to_string();
-        let value = serde_json::to_vec(policy)
+        let entry = PolicyEntry {
+            policy: policy.clone(),
+            content_hash: content_hash.to_string(),
+            block,
+        };
+        let value = serde_json::to_vec(&entry)
             .map_err(|e| DbError::Serialization(e.to_string()))?;
 
         self.db.put_cf(&cf, key.as_bytes(), &value)
             .map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
-    /// Resolve policy by walking up the path hierarchy
-    /// Falls back to root policy at /sys/policies/ if no path-specific policy found
+    /// Resolve policy by walking up the path hierarchy (see [`resolve_policy_entry`]).
     pub fn resolve_policy(&self, path: &crate::message::Path) -> Result<Option<Policy>, DbError> {
+        Ok(self.resolve_policy_entry(path)?.map(|e| e.policy))
+    }
+
+    /// Resolve the applicable [`PolicyEntry`] (policy + content-hash + block) by
+    /// walking up the path hierarchy, falling back to the root policy at
+    /// `/sys/policies/`. Returns the NEAREST ancestor policy (latest version) —
+    /// pin-aware historical substitution is applied by the caller (the daemon)
+    /// via [`get_policy_version`].
+    pub fn resolve_policy_entry(&self, path: &crate::message::Path) -> Result<Option<PolicyEntry>, DbError> {
         let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
 
-        // First, walk up the path hierarchy for path-specific policies
+        // Walk up the path hierarchy for path-specific policies.
         for ancestor in path.ancestors() {
             let key = ancestor.to_string();
             if let Some(bytes) = self.db.get_cf(&cf, key.as_bytes())
                 .map_err(|e| DbError::RocksDb(e.to_string()))? {
-                let policy: Policy = serde_json::from_slice(&bytes)
-                    .map_err(|e| DbError::Serialization(e.to_string()))?;
-                return Ok(Some(policy));
+                return Ok(Some(decode_policy_entry(&bytes)?));
             }
         }
 
-        // Fall back to root policy at /sys/policies/
-        // This is where the genesis root policy is stored
+        // Fall back to the root policy at /sys/policies/ (genesis root policy).
         if let Some(bytes) = self.db.get_cf(&cf, b"/sys/policies/")
             .map_err(|e| DbError::RocksDb(e.to_string()))? {
-            let policy: Policy = serde_json::from_slice(&bytes)
-                .map_err(|e| DbError::Serialization(e.to_string()))?;
-            return Ok(Some(policy));
+            return Ok(Some(decode_policy_entry(&bytes)?));
         }
 
         Ok(None)
+    }
+
+    // ========== P2: policy-version history store + pin refcounts ==========
+
+    /// Store a retained historical policy version keyed by its content-hash.
+    pub fn put_policy_version(&self, content_hash: &str, policy: &Policy) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_VERSIONS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let value = serde_json::to_vec(policy).map_err(|e| DbError::Serialization(e.to_string()))?;
+        self.db.put_cf(&cf, content_hash.as_bytes(), &value)
+            .map_err(|e| DbError::RocksDb(e.to_string()))
+    }
+
+    /// Fetch a retained historical policy version by content-hash.
+    pub fn get_policy_version(&self, content_hash: &str) -> Result<Option<Policy>, DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_VERSIONS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        match self.db.get_cf(&cf, content_hash.as_bytes()) {
+            Ok(Some(bytes)) => Ok(Some(serde_json::from_slice(&bytes).map_err(|e| DbError::Serialization(e.to_string()))?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(DbError::RocksDb(e.to_string())),
+        }
+    }
+
+    fn delete_policy_version(&self, content_hash: &str) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_VERSIONS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        self.db.delete_cf(&cf, content_hash.as_bytes()).map_err(|e| DbError::RocksDb(e.to_string()))
+    }
+
+    fn get_pin_ref(&self, content_hash: &str) -> Result<u64, DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_PINREFS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        match self.db.get_cf(&cf, content_hash.as_bytes()) {
+            Ok(Some(b)) => Ok(u64::from_le_bytes(b.as_slice().try_into().unwrap_or([0; 8]))),
+            Ok(None) => Ok(0),
+            Err(e) => Err(DbError::RocksDb(e.to_string())),
+        }
+    }
+
+    fn set_pin_ref(&self, content_hash: &str, count: u64) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_PINREFS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        self.db.put_cf(&cf, content_hash.as_bytes(), &count.to_le_bytes())
+            .map_err(|e| DbError::RocksDb(e.to_string()))
+    }
+
+    /// Increment the pin refcount for `content_hash`, storing `version` under it
+    /// if this is the first pin (so the retained version is available for
+    /// pin-aware govern resolution).
+    pub fn pin_incref(&self, content_hash: &str, version: &Policy) -> Result<(), DbError> {
+        let count = self.get_pin_ref(content_hash)?;
+        if count == 0 {
+            self.put_policy_version(content_hash, version)?;
+        }
+        self.set_pin_ref(content_hash, count + 1)
+    }
+
+    /// Decrement the pin refcount for `content_hash`; GC the retained version
+    /// when it reaches zero.
+    pub fn pin_decref(&self, content_hash: &str) -> Result<(), DbError> {
+        let count = self.get_pin_ref(content_hash)?;
+        if count <= 1 {
+            self.set_pin_ref(content_hash, 0)?;
+            self.delete_policy_version(content_hash)?;
+        } else {
+            self.set_pin_ref(content_hash, count - 1)?;
+        }
+        Ok(())
+    }
+
+    /// All retained historical policy versions `(content_hash, policy)` — used to
+    /// carry still-pinned versions in a state snapshot (P2, cf mingo-cy17).
+    pub fn list_policy_versions(&self) -> Result<Vec<(String, Policy)>, DbError> {
+        let cf = self.db.cf_handle(CF_POLICY_VERSIONS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let mut out = Vec::new();
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.map_err(|e| DbError::RocksDb(e.to_string()))?;
+            let hash = String::from_utf8(key.to_vec()).map_err(|e| DbError::Serialization(e.to_string()))?;
+            let policy: Policy = serde_json::from_slice(&value).map_err(|e| DbError::Serialization(e.to_string()))?;
+            out.push((hash, policy));
+        }
+        Ok(out)
     }
 
     /// Get the last processed block number
@@ -485,6 +609,20 @@ impl StateDb {
             None => Ok(None),
         }
     }
+}
+
+/// Decode a `policies` CF value into a [`PolicyEntry`], tolerating the legacy
+/// encoding where the value was a bare `Policy` (no content-hash/block wrapper).
+/// A legacy entry resolves as unpinned/tracking with a placeholder hash — which
+/// is exactly the pre-P2 behavior — so an old DB keeps working until reindexed.
+fn decode_policy_entry(bytes: &[u8]) -> Result<PolicyEntry, DbError> {
+    if let Ok(entry) = serde_json::from_slice::<PolicyEntry>(bytes) {
+        return Ok(entry);
+    }
+    let policy: Policy = serde_json::from_slice(bytes)
+        .map_err(|e| DbError::Serialization(e.to_string()))?;
+    let content_hash = crate::crypto::ContentHash::sha256(bytes).to_string();
+    Ok(PolicyEntry { policy, content_hash, block: 0 })
 }
 
 fn encode_object_key(

@@ -771,6 +771,13 @@ fn validate_post(
                 stage: ValidationStage::Policy,
                 reason: format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason),
             };
+        } else if let Err(reason) = check_policy_delegation(state, msg) {
+            // P2/P3/P4 delegation terms: version pin rules, descendant-constraint
+            // template, and the no-pin restriction.
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!("Policy write violates delegation constraints on {}: {}", msg.path, reason),
+            };
         }
         return ValidationResult::Valid { creator: creator.to_string() };
     }
@@ -1397,6 +1404,332 @@ mod dnssec_repro_tests {
             ValidationResult::Valid { .. } => panic!("stranger wrote a community policy without govern"),
         }
     }
+
+    // ===== P2/P3/P4 policy-delegation primitives =====
+
+    use sbo_core::policy::PolicyPin;
+
+    /// Index a `policy.v2` into state the way the sync apply path does: write the
+    /// object, index the versioned policy entry (with the on-chain content-hash),
+    /// and run the pin refcount/version bookkeeping. Returns the content-hash.
+    fn index_policy(
+        db: &StateDb,
+        path: &str,
+        id: &str,
+        creator: &str,
+        policy: &Policy,
+        block: u64,
+    ) -> String {
+        let sbo_path = SboPath::parse(path).unwrap();
+        let sid = Id::new(id).unwrap();
+        let payload = serde_json::to_vec(policy).unwrap();
+        let ch = ContentHash::sha256(&payload);
+        let ch_str = ch.to_string();
+        let old_pin = db
+            .get_object(&sbo_path, &sid)
+            .ok()
+            .flatten()
+            .and_then(|o| serde_json::from_slice::<Policy>(&o.payload).ok())
+            .and_then(|p| p.pin);
+        db.put_object(&StoredObject {
+            path: sbo_path.clone(),
+            id: sid,
+            creator: Id::new(creator).unwrap(),
+            owner: Id::new(creator).unwrap(),
+            content_type: "application/json".to_string(),
+            content_hash: ch.clone(),
+            payload,
+            policy_ref: None,
+            content_schema: Some("policy.v2".to_string()),
+            owner_ref: Some(creator.to_string()),
+            block_number: block,
+            object_hash: [block as u8; 32],
+            hlc: Some(format!("{block}.0")),
+            prev: None,
+        })
+        .unwrap();
+        db.put_policy_at(&sbo_path, policy, &ch_str, block).unwrap();
+        let new_pin = policy.pin.clone();
+        if new_pin != old_pin {
+            if let Some(pin) = &new_pin {
+                if let Ok(Some(entry)) =
+                    db.resolve_policy_entry(&SboPath::parse(&pin.ancestor).unwrap())
+                {
+                    db.pin_incref(&pin.hash, &entry.policy).unwrap();
+                }
+            }
+            if let Some(pin) = &old_pin {
+                db.pin_decref(&pin.hash).unwrap();
+            }
+        }
+        ch_str
+    }
+
+    /// A root policy granting `board_key` govern on `/communities/cooks/**`, sys
+    /// admin govern on `/**`, and owner-all. `extra` optionally splices in a
+    /// descendant_constraint or drops the board grant (via a prebuilt json).
+    fn root_policy(board_key: &str, board_can_govern: bool) -> Policy {
+        let mut grants = serde_json::json!([
+            { "to": "owner", "can": ["*"], "on": "/**" }
+        ]);
+        if board_can_govern {
+            grants.as_array_mut().unwrap().push(serde_json::json!(
+                { "to": { "key": board_key }, "can": ["govern"], "on": "/communities/cooks/**" }
+            ));
+        }
+        serde_json::from_value(serde_json::json!({ "grants": grants })).unwrap()
+    }
+
+    fn community_policy(pin: Option<PolicyPin>) -> Policy {
+        let mut p: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{ "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" }]
+        }))
+        .unwrap();
+        p.pin = pin;
+        p
+    }
+
+    // Install the root policy OBJECT + index so root_policy_present() is true.
+    fn install_root(db: &StateDb, policy: &Policy, block: u64) -> String {
+        index_policy(db, "/sys/policies/", "root", "sys@mingo.place", policy, block)
+    }
+
+    // P2 — creation pin MUST equal the current latest ancestor version.
+    #[test]
+    fn p2_creation_pin_must_be_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let board = SigningKey::generate();
+        let root_hash = install_root(&db, &root_policy(&board.public_key().to_string(), true), 1);
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+
+        // Correct pin (== latest root) → accepted.
+        let good = community_policy(Some(PolicyPin {
+            ancestor: "/sys/policies/".into(),
+            hash: root_hash.clone(),
+            block: Some(1),
+        }));
+        let msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&good).unwrap());
+        assert!(
+            matches!(validate_message(&msg, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "pin equal to latest ancestor must be accepted"
+        );
+
+        // Wrong/stale pin hash → rejected at Policy stage.
+        let bad = community_policy(Some(PolicyPin {
+            ancestor: "/sys/policies/".into(),
+            hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            block: Some(1),
+        }));
+        let bad_msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&bad).unwrap());
+        match validate_message(&bad_msg, &db, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, reason } => {
+                assert_eq!(stage, ValidationStage::Policy, "{reason}");
+                assert!(reason.contains("latest ancestor") || reason.contains("forward-only"), "{reason}");
+            }
+            ValidationResult::Valid { .. } => panic!("a pin not equal to latest ancestor must be rejected"),
+        }
+    }
+
+    // P2 — a PINNED child is immune to a later ancestor amendment that revokes the
+    // board's govern; an UNPINNED (tracking) child is not.
+    #[test]
+    fn p2_pinned_child_immune_to_ancestor_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let board = SigningKey::generate();
+        let bk = board.public_key().to_string();
+
+        // Root V1 grants board govern; community pins root@V1.
+        let root_v1 = root_policy(&bk, true);
+        let root_v1_hash = install_root(&db, &root_v1, 1);
+        let pin = PolicyPin { ancestor: "/sys/policies/".into(), hash: root_v1_hash.clone(), block: Some(1) };
+        let comm = community_policy(Some(pin.clone()));
+        // Board creates the pinned community policy (validate then persist).
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+        let create = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm).unwrap());
+        assert!(matches!(validate_message(&create, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }));
+        index_policy(&db, "/communities/cooks/", "root", "board", &comm, 2);
+
+        // Root amended to V2, REVOKING the board's govern grant.
+        let root_v2 = root_policy(&bk, false);
+        install_root(&db, &root_v2, 3);
+
+        // The board updates the community policy again, KEEPING pin@V1. Immune:
+        // governance resolves against the pinned V1 (which still grants board govern).
+        let comm2 = community_policy(Some(pin.clone()));
+        let update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm2).unwrap());
+        assert!(
+            matches!(validate_message(&update, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "a pinned child must stay governable under its pinned ancestor version"
+        );
+
+        // Control: an UNPINNED community tracks latest V2 → board govern is gone → denied.
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = StateDb::open(dir2.path()).unwrap();
+        install_root(&db2, &root_policy(&bk, true), 1);
+        let unpinned = community_policy(None);
+        index_policy(&db2, "/communities/cooks/", "root", "board", &unpinned, 2);
+        install_root(&db2, &root_policy(&bk, false), 3); // revoke board govern
+        let l2b = L2Context::for_block(Some(1_700_000_000), &db2);
+        let track_update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&unpinned).unwrap());
+        match validate_message(&track_update, &db2, std::path::Path::new("/tmp"), &l2b) {
+            ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
+            ValidationResult::Valid { .. } => panic!("an unpinned child must lose govern when the ancestor revokes it"),
+        }
+    }
+
+    // P2 — a snapshot round-trip carries the pinned historical version, so a
+    // fast-synced node authorizes a write under the pinned child.
+    #[test]
+    fn p2_snapshot_roundtrip_authorizes_pinned_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let board = SigningKey::generate();
+        let bk = board.public_key().to_string();
+
+        let root_v1_hash = install_root(&db, &root_policy(&bk, true), 1);
+        let pin = PolicyPin { ancestor: "/sys/policies/".into(), hash: root_v1_hash, block: Some(1) };
+        let comm = community_policy(Some(pin));
+        index_policy(&db, "/communities/cooks/", "root", "board", &comm, 2);
+        install_root(&db, &root_policy(&bk, false), 3); // root moves on; V1 retained by pin
+
+        // Build a snapshot payload from the source DB and load it into a fresh DB.
+        let objects = db.list_objects_by_path_prefix("/").unwrap();
+        let policy_versions = db.list_policy_versions().unwrap();
+        assert!(!policy_versions.is_empty(), "the pinned V1 must be retained for the snapshot");
+        let payload = crate::snapshot::SnapshotPayload { objects: objects.clone(), policy_versions };
+        let root = crate::snapshot::compute_snapshot_root(&objects);
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = StateDb::open(dir2.path()).unwrap();
+        crate::bootstrap::verify_and_load_payload(&db2, &payload, root).unwrap();
+
+        // On the fast-synced node the board updates the pinned community policy → authorized.
+        let comm2 = community_policy(comm.pin.clone());
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db2);
+        let update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm2).unwrap());
+        assert!(
+            matches!(validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "fast-synced node must authorize a write under a pinned child using the snapshotted version"
+        );
+    }
+
+    // P3 — a child grant exceeding the parent's descendant-constraint template is
+    // rejected; direct-children-only (a grandchild is not bound by the grandparent).
+    #[test]
+    fn p3_descendant_constraint_direct_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let board = SigningKey::generate();
+        let bk = board.public_key().to_string();
+
+        // Root grants board govern broadly + a descendant-constraint template that
+        // only allows child `create` grants under spaces/**.
+        let mut root: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [
+                { "to": "owner", "can": ["*"], "on": "/**" },
+                { "to": { "key": bk }, "can": ["govern"], "on": "/communities/**" }
+            ],
+            "descendant_constraint": {
+                "allowed_grants": [{ "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" }]
+            }
+        }))
+        .unwrap();
+        root.pin = None;
+        install_root(&db, &root, 1);
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+
+        // A community that grants `*` (over-broad) → rejected.
+        let over: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{ "to": "*", "can": ["*"], "on": "/communities/cooks/spaces/**" }]
+        }))
+        .unwrap();
+        let over_msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&over).unwrap());
+        match validate_message(&over_msg, &db, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, reason } => {
+                assert_eq!(stage, ValidationStage::Policy, "{reason}");
+                assert!(reason.contains("template") || reason.contains("descendant"), "{reason}");
+            }
+            ValidationResult::Valid { .. } => panic!("an over-broad child grant must be rejected"),
+        }
+
+        // A conforming community (create only) → accepted, then persisted.
+        let ok = community_policy(None);
+        let ok_msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&ok).unwrap());
+        assert!(matches!(validate_message(&ok_msg, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }));
+        index_policy(&db, "/communities/cooks/", "root", "board", &ok, 2);
+
+        // Direct-only: a GRANDCHILD policy (under the community, whose own policy has
+        // NO descendant_constraint) is NOT bound by the ROOT's clause. The community
+        // grants create there and delegates govern to the board (add a govern grant).
+        let mut comm_deleg: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [
+                { "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" },
+                { "to": { "key": bk }, "can": ["govern"], "on": "/communities/cooks/spaces/**" }
+            ]
+        }))
+        .unwrap();
+        comm_deleg.pin = None;
+        index_policy(&db, "/communities/cooks/", "root", "board", &comm_deleg, 3);
+        // The grandchild grants `*` — root's clause does NOT reach it (its parent,
+        // the community policy, has no constraint), so it is admitted.
+        let grand: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{ "to": "*", "can": ["*"], "on": "/communities/cooks/spaces/general/**" }]
+        }))
+        .unwrap();
+        let grand_msg = policy_write_msg(&board, "/communities/cooks/spaces/general/", serde_json::to_value(&grand).unwrap());
+        assert!(
+            matches!(validate_message(&grand_msg, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "a grandchild must be constrained only by its DIRECT parent, not the grandparent"
+        );
+    }
+
+    // P4 — a parent that forbids pinning rejects a pinned child; a tracking child passes.
+    #[test]
+    fn p4_no_pin_restriction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let board = SigningKey::generate();
+        let bk = board.public_key().to_string();
+
+        let root: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [
+                { "to": "owner", "can": ["*"], "on": "/**" },
+                { "to": { "key": bk }, "can": ["govern"], "on": "/communities/**" }
+            ],
+            "descendant_constraint": {
+                "allowed_grants": [{ "to": "*", "can": ["create"], "on": "/communities/cooks/spaces/**" }],
+                "forbid_pinning": true
+            }
+        }))
+        .unwrap();
+        let root_hash = install_root(&db, &root, 1);
+        let l2 = L2Context::for_block(Some(1_700_000_000), &db);
+
+        // A pinned child under a forbid_pinning parent → rejected.
+        let pinned = community_policy(Some(PolicyPin {
+            ancestor: "/sys/policies/".into(),
+            hash: root_hash,
+            block: Some(1),
+        }));
+        let pinned_msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&pinned).unwrap());
+        match validate_message(&pinned_msg, &db, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, reason } => {
+                assert_eq!(stage, ValidationStage::Policy, "{reason}");
+                assert!(reason.contains("forbids pinning"), "{reason}");
+            }
+            ValidationResult::Valid { .. } => panic!("a pinned child under forbid_pinning must be rejected"),
+        }
+
+        // A tracking (unpinned) child → accepted.
+        let tracking = community_policy(None);
+        let track_msg = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&tracking).unwrap());
+        assert!(
+            matches!(validate_message(&track_msg, &db, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
+            "a tracking child under forbid_pinning must be accepted"
+        );
+    }
 }
 
 /// Check if an action is allowed by policy
@@ -1461,8 +1794,129 @@ fn is_policy_object(obj: &StoredObject) -> bool {
 /// let you rewrite/relocate it without `govern`, else first-writer-owns would
 /// re-introduce self-governing capture.
 fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), String> {
+    // Pin-aware (P2): a pinned policy's governance resolves against the version
+    // its EXISTING object pinned, so a later ancestor amendment cannot reach in
+    // (the sovereignty property). Unpinned/create → the current latest parent.
+    let (governing, _latest_hash) = governing_parent_policy(state, msg)?;
+    evaluate_policy_for(state, msg, &governing, &msg.path, ActionType::Govern, None, l2)
+}
+
+/// The parent policy the govern/constraint checks evaluate against for a write to
+/// the policy object at `msg.path`, plus the current-latest ancestor
+/// content-hash (for P2 pin validation).
+///
+/// Governance is frozen by the EXISTING object's pin: if the policy currently at
+/// `msg.path` pins a historical ancestor version, that version governs (who may
+/// amend/delete it) — immune to later ancestor amendment. Absent a pin (or on a
+/// create into an empty slot), the current latest parent governs (tracking /
+/// eminent-domain regime).
+fn governing_parent_policy(
+    state: &dyn StateView,
+    msg: &Message,
+) -> Result<(sbo_core::policy::Policy, String), String> {
     let parent = parent_container_path(&msg.path);
-    check_policy_resolving_at(state, msg, &parent, &msg.path, ActionType::Govern, None, l2)
+    let parent_entry = match state.resolve_policy_entry(&parent) {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err("No applicable parent policy found".to_string()),
+        Err(e) => return Err(format!("Error resolving parent policy: {e}")),
+    };
+    let latest_hash = parent_entry.content_hash.clone();
+
+    let old_pin = state
+        .get_object(&msg.path, &msg.id)
+        .ok()
+        .flatten()
+        .and_then(|o| policy_pin_of_object(&o));
+
+    let governing = match old_pin {
+        Some(pin) => state
+            .get_policy_version(&pin.hash)
+            .ok()
+            .flatten()
+            .unwrap_or(parent_entry.policy),
+        None => parent_entry.policy,
+    };
+    Ok((governing, latest_hash))
+}
+
+/// Parse the [`PolicyPin`] a stored policy object carries, if any.
+fn policy_pin_of_object(obj: &StoredObject) -> Option<sbo_core::policy::PolicyPin> {
+    if !is_policy_object(obj) {
+        return None;
+    }
+    serde_json::from_slice::<sbo_core::policy::Policy>(&obj.payload)
+        .ok()
+        .and_then(|p| p.pin)
+}
+
+/// Validate the delegation terms of a policy write (P2 pin rules, P3 descendant
+/// constraint, P4 no-pin restriction). Called after [`require_govern`] for a
+/// `policy.v2` create/update. `Err(reason)` rejects the write.
+fn check_policy_delegation(
+    state: &dyn StateView,
+    msg: &Message,
+) -> Result<(), String> {
+    let payload = msg.payload.as_deref().ok_or("policy write has no payload")?;
+    let new_policy: sbo_core::policy::Policy =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid policy payload: {e}"))?;
+
+    let old_pin = state
+        .get_object(&msg.path, &msg.id)
+        .ok()
+        .flatten()
+        .and_then(|o| policy_pin_of_object(&o));
+
+    // The current latest DIRECT parent policy + its content-hash.
+    let parent = parent_container_path(&msg.path);
+    let parent_entry = match state.resolve_policy_entry(&parent) {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err("No applicable parent policy found".to_string()),
+        Err(e) => return Err(format!("Error resolving parent policy: {e}")),
+    };
+
+    let new_pin = new_policy.pin.clone();
+    let keeping = new_pin.is_some() && new_pin == old_pin;
+
+    // P4 — a parent that forbids pinning rejects any pinned child (evaluated
+    // against the CURRENT parent: it is the ancestor's live retightening lever).
+    if new_pin.is_some() {
+        if let Some(c) = &parent_entry.policy.descendant_constraint {
+            if c.forbid_pinning {
+                return Err("parent policy forbids pinning (P4): child must track the latest ancestor".to_string());
+            }
+        }
+    }
+
+    // P2 — pin must equal the current latest ancestor version, UNLESS the child
+    // is keeping its existing pin verbatim (frozen). This makes creation-pin ==
+    // latest and update either keep-or-advance-forward-to-current (never
+    // backward, since the only non-keep value accepted is the current latest).
+    if let Some(pin) = &new_pin {
+        if !keeping && pin.hash != parent_entry.content_hash {
+            return Err(format!(
+                "policy pin {} must equal the current latest ancestor version {} (or keep the existing pin) — forward-only",
+                pin.hash, parent_entry.content_hash
+            ));
+        }
+    }
+
+    // The parent version whose descendant-constraint template applies: the pinned
+    // version when the child is keeping a frozen pin, else the current latest.
+    let governing_parent = if keeping {
+        new_pin
+            .as_ref()
+            .and_then(|p| state.get_policy_version(&p.hash).ok().flatten())
+            .unwrap_or(parent_entry.policy)
+    } else {
+        parent_entry.policy
+    };
+
+    // P3 — the child must satisfy the parent's descendant-constraint template.
+    if let Some(c) = &governing_parent.descendant_constraint {
+        sbo_core::policy::check_descendant_constraint(&new_policy, c)?;
+    }
+
+    Ok(())
 }
 
 /// Core policy check: resolve the applicable policy at `resolve_at` (walking up
@@ -1480,7 +1934,6 @@ fn check_policy_resolving_at(
     owner: Option<&str>,
     l2: &L2Context,
 ) -> Result<(), String> {
-    let target = match_target;
     // Resolve the applicable policy by walking up the path hierarchy
     let policy = match state.resolve_policy(resolve_at) {
         Ok(Some(p)) => p,
@@ -1494,7 +1947,24 @@ fn check_policy_resolving_at(
             return Err(format!("Error resolving policy: {}", e));
         }
     };
+    evaluate_policy_for(state, msg, &policy, match_target, action, owner, l2)
+}
 
+/// Evaluate an already-resolved `policy` for `action` on `match_target`. Split
+/// out of [`check_policy_resolving_at`] so a caller that has determined the
+/// governing policy directly (e.g. the pin-aware govern check, which substitutes
+/// a pinned historical ancestor version) can evaluate against it.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_policy_for(
+    state: &dyn StateView,
+    msg: &Message,
+    policy: &sbo_core::policy::Policy,
+    match_target: &sbo_core::message::Path,
+    action: ActionType,
+    owner: Option<&str>,
+    l2: &L2Context,
+) -> Result<(), String> {
+    let target = match_target;
     // Resolve the actor's identity (name if available, otherwise key-based)
     let actor = resolve_creator(msg, Some(state), l2);
     let target_path = target.to_string();
@@ -1545,7 +2015,7 @@ fn check_policy_resolving_at(
     let pd = primary_domain(state);
 
     // Evaluate the policy
-    match evaluate(&policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
+    match evaluate(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",

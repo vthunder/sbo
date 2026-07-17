@@ -1,11 +1,11 @@
 ---
 # sbo-723r
 title: 'P2: policy version-pinning (content-hash) + bounded policy-history retention'
-status: todo
+status: completed
 type: feature
 priority: normal
 created_at: 2026-07-16T23:40:18Z
-updated_at: 2026-07-16T23:40:25Z
+updated_at: 2026-07-17T00:23:01Z
 parent: sbo-orvt
 blocked_by:
     - sbo-whfw
@@ -27,3 +27,8 @@ Part of sbo-orvt. Opt-in frozen sovereignty + consent-based upgrade.
 - [ ] policy-version history store + refcount-by-pin GC
 - [ ] snapshot format: carry still-pinned historical versions
 - [ ] tests: pinned child immune to ancestor change; forward-only; fast-sync authorizes under pin
+
+
+
+## Resolution (done, commit db14faf)
+policy.v2 kept backward-compatible via an optional `pin` field. Policies CF value is now a PolicyEntry (policy + on-chain content-hash + block); historical versions live in a new policy_versions CF, refcounted by pin (policy_pinrefs CF), GC'd on zero. require_govern resolves a pinned child's governance against its pinned ancestor version. Creation pin==latest; update keep-or-forward (backward rejected). Snapshot bumped to json+gzip/2 (SnapshotPayload) carrying still-pinned versions; verify_and_load rebuilds the derived policy index + versions + refcounts. Design decision: no policy.v3 bump — additive optional fields on policy.v2, and the pin references the on-chain content_hash (not a re-serialized Policy, whose HashMap roles would be non-deterministic).

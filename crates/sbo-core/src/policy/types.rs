@@ -18,6 +18,58 @@ pub struct Policy {
 
     #[serde(default)]
     pub restrictions: Vec<Restriction>,
+
+    /// P2 — version pin. When present, this policy freezes its delegation terms
+    /// to a specific historical version of its ancestor policy: the ancestor's
+    /// governance (who may amend THIS policy) resolves against the pinned
+    /// version, so later ancestor amendments cannot reach in (the sovereignty
+    /// property). Absent ⇒ the policy TRACKS its latest ancestor (revocable /
+    /// eminent-domain regime). Optional + skipped when absent, so an unpinned
+    /// `policy.v2` document is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<PolicyPin>,
+
+    /// P3/P4 — descendant-policy constraint clause. A ceiling/template this
+    /// policy imposes on its DIRECT child policies. Absent ⇒ no constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descendant_constraint: Option<DescendantConstraint>,
+}
+
+/// P2 — a version pin: the specific historical ancestor-policy version this
+/// policy agreed to. The `hash` (the ancestor policy object's on-chain
+/// content-hash, `"sha256:<hex>"`) is authoritative and reorg-safe; `block` is a
+/// locator hint only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyPin {
+    /// Fully-qualified container path of the pinned ancestor policy
+    /// (e.g. `"/sys/policies/"`).
+    pub ancestor: String,
+    /// The pinned ancestor policy object's content-hash (`"sha256:<hex>"`).
+    pub hash: String,
+    /// Block number of the pinned version — a locator HINT only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<u64>,
+}
+
+/// P3/P4 — descendant-policy constraint clause: what a parent policy allows and
+/// mandates for its DIRECT child policies (each level re-delegates its own
+/// template downward, keeping every check local).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DescendantConstraint {
+    /// The grants a direct child policy MAY make. Every child grant must be
+    /// covered by one of these (subset-of-template). An empty list forbids the
+    /// child from granting anything.
+    #[serde(default)]
+    pub allowed_grants: Vec<Grant>,
+
+    /// Restrictions every direct child policy MUST carry (present verbatim).
+    #[serde(default)]
+    pub mandated_restrictions: Vec<Restriction>,
+
+    /// P4 — forbid direct children from pinning, forcing them to always track
+    /// the latest ancestor version (strict top-down / unix-fs regime).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forbid_pinning: bool,
 }
 
 /// Grant: who can do what on which paths

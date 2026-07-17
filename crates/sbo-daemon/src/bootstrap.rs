@@ -6,7 +6,6 @@
 //! `checkpoint.v1` object (authority-signed) when the node advertises one at the
 //! snapshot's height, else the serving node's own advertised root (trust-the-node).
 
-use std::io::Read;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -99,6 +98,24 @@ pub fn verify_and_load(
     objects: &[StoredObject],
     trusted_root: [u8; 32],
 ) -> Result<()> {
+    verify_and_load_payload(
+        db,
+        &snapshot::SnapshotPayload { objects: objects.to_vec(), policy_versions: Vec::new() },
+        trusted_root,
+    )
+}
+
+/// Verify a full snapshot payload reconstructs `trusted_root`, then load it:
+/// objects into the object CF, the derived policy index rebuilt from the loaded
+/// `policy.v2` objects, and the still-pinned historical policy versions + their
+/// pin refcounts (P2, cf mingo-cy17) so the fast-synced node can authorize
+/// writes under a pinned child.
+pub fn verify_and_load_payload(
+    db: &StateDb,
+    payload: &snapshot::SnapshotPayload,
+    trusted_root: [u8; 32],
+) -> Result<()> {
+    let objects = &payload.objects;
     let root = snapshot::compute_snapshot_root(objects);
     if root != trusted_root {
         return Err(anyhow!(
@@ -107,8 +124,43 @@ pub fn verify_and_load(
             hex::encode(trusted_root)
         ));
     }
+
+    // Load the retained historical policy versions, verifying each blob against
+    // its claimed content-hash so a forged auxiliary payload cannot slip in.
+    use std::collections::HashMap;
+    let mut versions: HashMap<String, sbo_core::policy::Policy> = HashMap::new();
+    for (hash, policy) in &payload.policy_versions {
+        db.put_policy_version(hash, policy)
+            .map_err(|e| anyhow!("put_policy_version: {e}"))?;
+        versions.insert(hash.clone(), policy.clone());
+    }
+
     for o in objects {
         db.put_object(o).map_err(|e| anyhow!("put_object: {e}"))?;
+        // Rebuild the derived policy index from head policy objects (the policies
+        // CF is not part of the trie-committed object set).
+        if o.content_schema.as_deref() == Some("policy.v2") {
+            if let Ok(policy) = serde_json::from_slice::<sbo_core::policy::Policy>(&o.payload) {
+                let ch = o.content_hash.to_string();
+                db.put_policy_at(&o.path, &policy, &ch, o.block_number)
+                    .map_err(|e| anyhow!("put_policy_at: {e}"))?;
+            }
+        }
+    }
+
+    // Rebuild pin refcounts by scanning the loaded head policy objects' pins.
+    for o in objects {
+        if o.content_schema.as_deref() != Some("policy.v2") {
+            continue;
+        }
+        if let Ok(policy) = serde_json::from_slice::<sbo_core::policy::Policy>(&o.payload) {
+            if let Some(pin) = policy.pin {
+                if let Some(version) = versions.get(&pin.hash) {
+                    db.pin_incref(&pin.hash, version)
+                        .map_err(|e| anyhow!("pin_incref: {e}"))?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -129,8 +181,8 @@ pub async fn fetch_manifest(node_url: &str) -> Result<SyncPointsView> {
         .with_context(|| format!("decode {url}"))
 }
 
-/// Download + decompress the snapshot at `block` into its object set.
-pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<Vec<StoredObject>> {
+/// Download + decompress the snapshot at `block` into its full payload.
+pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<snapshot::SnapshotPayload> {
     let url = format!("{}/v1/snapshot?block={}", node_url.trim_end_matches('/'), block);
     let resp = reqwest::Client::new()
         .get(&url)
@@ -141,10 +193,7 @@ pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<Vec<StoredObje
         return Err(anyhow!("GET {url} -> {}", resp.status()));
     }
     let gz = resp.bytes().await?.to_vec();
-    let mut dec = flate2::read::GzDecoder::new(&gz[..]);
-    let mut json = Vec::new();
-    dec.read_to_end(&mut json).context("decompress snapshot")?;
-    serde_json::from_slice(&json).context("parse snapshot")
+    snapshot::decode_snapshot_payload(&gz).context("decode snapshot")
 }
 
 /// End-to-end bootstrap into `db` from a serving node: pick the newest snapshot,
@@ -203,13 +252,14 @@ pub async fn bootstrap_provisional(
         .unwrap_or_else(|| chosen.state_root.clone());
     let trusted_root = hex_to_32(&root_hex)?;
 
-    let objects = fetch_snapshot(node_url, block).await?;
-    verify_and_load(db, &objects, trusted_root)?;
+    let payload = fetch_snapshot(node_url, block).await?;
+    let object_count = payload.objects.len();
+    verify_and_load_payload(db, &payload, trusted_root)?;
 
     Ok(BootstrapResult {
         block,
         state_root: trusted_root,
-        object_count: objects.len(),
+        object_count,
         trust: RootTrust::ServingNode,
     })
 }
@@ -266,13 +316,14 @@ pub async fn bootstrap_with_policy(
     };
 
     let trusted_root = hex_to_32(&root_hex)?;
-    let objects = fetch_snapshot(node_url, block).await?;
-    verify_and_load(db, &objects, trusted_root)?;
+    let payload = fetch_snapshot(node_url, block).await?;
+    let object_count = payload.objects.len();
+    verify_and_load_payload(db, &payload, trusted_root)?;
 
     Ok(BootstrapResult {
         block,
         state_root: trusted_root,
-        object_count: objects.len(),
+        object_count,
         trust,
     })
 }

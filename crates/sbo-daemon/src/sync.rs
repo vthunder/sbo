@@ -1178,6 +1178,17 @@ impl SyncEngine {
                 pool.reconcile_applied(&stored_obj);
             }
             if let Some(db) = state_db {
+                // Capture the OLD policy's pin BEFORE overwriting the object, so
+                // the pin-refcount bookkeeping below can release a replaced pin
+                // (P2 history retention).
+                let old_pin: Option<sbo_core::policy::PolicyPin> = if msg.content_schema.as_deref() == Some("policy.v2") {
+                    db.get_object(&msg.path, &msg.id).ok().flatten()
+                        .and_then(|o| serde_json::from_slice::<sbo_core::policy::Policy>(&o.payload).ok())
+                        .and_then(|p| p.pin)
+                } else {
+                    None
+                };
+
                 if let Err(e) = db.put_object(&stored_obj) {
                     tracing::warn!("Failed to update state DB: {}", e);
                 }
@@ -1198,10 +1209,40 @@ impl SyncEngine {
                     if let Some(ref payload) = msg.payload {
                         match serde_json::from_slice::<sbo_core::policy::Policy>(payload) {
                             Ok(policy) => {
-                                if let Err(e) = db.put_policy(&msg.path, &policy) {
+                                // Index the version with its on-chain content-hash
+                                // so child pins (P2) resolve deterministically.
+                                let content_hash = msg.content_hash.as_ref()
+                                    .map(|h| h.to_string())
+                                    .unwrap_or_else(|| sbo_core::crypto::ContentHash::sha256(payload).to_string());
+                                if let Err(e) = db.put_policy_at(&msg.path, &policy, &content_hash, block_number) {
                                     tracing::warn!("Failed to index policy at {}: {}", msg.path, e);
                                 } else {
                                     tracing::info!("Indexed policy at {}", msg.path);
+                                }
+                                // P2 pin refcount bookkeeping: retain the pinned
+                                // ancestor version while some live policy pins it,
+                                // GC when unreferenced.
+                                let new_pin = policy.pin.clone();
+                                if new_pin != old_pin {
+                                    if let Some(pin) = &new_pin {
+                                        // The pinned version is the current latest
+                                        // ancestor (validation enforced this) — read
+                                        // it from the policies index to retain it.
+                                        if let Ok(Some(entry)) = db.resolve_policy_entry(
+                                            &sbo_core::message::Path::parse(&pin.ancestor).unwrap_or_else(|_| msg.path.clone())
+                                        ) {
+                                            if let Err(e) = db.pin_incref(&pin.hash, &entry.policy) {
+                                                tracing::warn!("pin_incref failed: {}", e);
+                                            }
+                                        } else if let Err(e) = db.pin_incref(&pin.hash, &policy) {
+                                            tracing::warn!("pin_incref fallback failed: {}", e);
+                                        }
+                                    }
+                                    if let Some(pin) = &old_pin {
+                                        if let Err(e) = db.pin_decref(&pin.hash) {
+                                            tracing::warn!("pin_decref failed: {}", e);
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
