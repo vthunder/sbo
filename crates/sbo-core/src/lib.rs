@@ -24,6 +24,7 @@ pub mod dns;
 pub mod uri;
 pub mod jwt;
 pub mod attribution;
+pub mod device_attribution;
 pub mod resolve;
 pub mod authorize;
 pub mod hlc;

@@ -13,7 +13,9 @@ path = "src/main.rs"
 sbo-core.workspace = true
 sbo-crypto.workspace = true
 sbo-capture = { path = "../sbo-capture" }
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "4fdfa86" }
+# DEV: temporary path dep (see sbo-core/Cargo.toml). REVERT to a pushed git rev
+# once browserid-ng main is pushed.
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "b2e4f82" }
 sbo-avail.workspace = true
 sbo-daemon.workspace = true
 sbo-rpc.workspace = true

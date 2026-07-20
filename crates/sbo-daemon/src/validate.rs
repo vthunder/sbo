@@ -3,10 +3,10 @@
 //! Validates SBO messages before they are applied to the repo.
 
 use sbo_core::authorize::{
-    agent_effective_email, authorize_message, authorize_owner, encode_auth_evidence_inline,
-    message_attribution, parse_auth_evidence, AuthzOutcome,
+    audience_identifies_db, authorize_owner, authorized_write_email, encode_auth_evidence_inline,
+    message_attribution, presentation_audience, presentation_issuer, AuthzOutcome,
 };
-use sbo_core::attribution::{self, TrustAnchors};
+use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
 use sbo_core::policy::{evaluate, ActionType, AttestedSource, PolicyResult};
@@ -152,106 +152,56 @@ pub fn primary_domain(state: &dyn StateView) -> Option<String> {
     Some(first.id.as_str().to_string())
 }
 
-/// The **effective author** of an agent write (Authorization Spec §On-behalf
-/// writes): the **delegator** when the warrant carries `as:<delegator>`, else
-/// the agent's own identity. `Err` if the warrant/scopes don't verify for THIS
-/// write.
+/// The device-model attribution's **effective author** for a message that
+/// carries a presentation (`Auth-Cert`) that authorizes THIS write: the warrant
+/// identifier (a user or an agent, per the presentation's subject). Returns
+/// `None` when the signer is unattributed — no presentation, verification fails,
+/// the presentation's audience does not identify this database, the block time
+/// is unknown, or the warrant's scopes do not permit this action/path/schema.
 ///
-/// The spec requires owner-authorization, `Creator` integrity, name-claim
-/// checks, AND "the same on-chain policy the delegator faces" to all evaluate
-/// against this effective author. So `l2_authorize` (owner) and
-/// `attributed_email` (policy actor / `$email` / attestation subject) both
-/// resolve it here — they must never disagree on who the write acts as.
-fn resolve_agent_effective(
-    msg: &Message,
-    state: &dyn StateView,
-    l2: &L2Context,
-) -> Result<String, String> {
-    let signer = msg.signing_key.to_string();
-    let cert = msg
-        .auth_cert
-        .as_deref()
-        .ok_or_else(|| "agent write missing Auth-Cert".to_string())?;
-    let warrant = msg
-        .auth_warrant
-        .as_deref()
-        .ok_or(attribution::AttributionError::MissingWarrant.to_string())?;
-    let ev = resolve_evidence(msg, state)
-        .ok_or_else(|| "agent write missing Auth-Evidence".to_string())?;
-    let ev_bytes = parse_auth_evidence(&ev)?;
-    let db = l2
-        .db
-        .as_ref()
-        .ok_or_else(|| "agent write cannot be validated without database identity".to_string())?;
-    let inclusion_time = l2.inclusion_time.unwrap_or(0);
-    // Cross-issuer warrant: resolve the delegator issuer's on-chain /sys/dnssec
-    // proof (same-issuer warrants ignore it — the agent proof covers both).
-    let deleg_ev_bytes = attribution::warrant_delegator_issuer(warrant)
-        .and_then(|iss| fetch_evidence_object(state, &format!("/sys/dnssec/{iss}")));
-    let wa = attribution::verify_attribution_with_warrant(
-        &signer,
-        cert,
-        warrant,
-        &ev_bytes,
-        deleg_ev_bytes.as_deref(),
+/// This is the single attribution path (device-cert model): it feeds both owner
+/// authorization (`l2_authorize`) and the policy actor / `$email` var /
+/// attestation subject (`attributed_email`), so they never disagree on who the
+/// write acts as.
+fn device_effective_email(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Option<String> {
+    let presentation = msg.auth_cert.as_deref()?;
+    let evidence = resolve_evidence(msg, state)?;
+    let db = l2.db.as_ref()?;
+    // The presentation's warrant audience must identify THIS database; the exact
+    // audience string is what the verifier enforces the assertion + warrant bind
+    // to (bare authority survives a regenesis; a pinned one confines it).
+    let aud = presentation_audience(presentation)?;
+    if !audience_identifies_db(&aud, &db.uri, db.genesis.as_deref()) {
+        return None;
+    }
+    // An unknown block time cannot satisfy any DNSSEC/cert window → fail closed.
+    let inclusion_time = l2.inclusion_time?;
+    let attr = message_attribution(
+        &msg.signing_key.to_string(),
+        Some(presentation),
+        Some(&evidence),
+        &aud,
         inclusion_time,
         &l2.anchors,
-    )
-    .map_err(|e| e.to_string())?;
-    // on_behalf_allowed defaults to true (spec: honored absent a repo opt-out).
-    agent_effective_email(
-        &wa,
-        &db.uri,
-        db.genesis.as_deref(),
+    )?;
+    authorized_write_email(
+        &attr,
         msg.action.name(),
         &msg.path.to_string(),
         msg.content_schema.as_deref(),
-        true,
     )
+    .ok()
 }
 
 fn l2_authorize(msg: &Message, state: &dyn StateView, l2: &L2Context, owner_ref: &str) -> Result<(), String> {
     let signer = msg.signing_key.to_string();
     let lookup = name_lookup(state);
     let pd = primary_domain(state);
-    // Resolve referenced / conventional evidence to inline bytes the pure
-    // verifier can consume (the pure path can't reach state).
-    let evidence = resolve_evidence(msg, state);
-    // An unknown block time cannot satisfy any cert/RRSig window, so email-rooted
-    // owners fail closed; key-rooted owners are time-independent.
-    let inclusion_time = l2.inclusion_time.unwrap_or(0);
-
-    // Agent write (browserid-ng v0.4): a typed agent certificate, or any
-    // presence of an Auth-Warrant. The agent certificate is inert without a
-    // warrant, so verify the warrant, confine it to this database, enforce
-    // scopes, and resolve the effective author (agent, or delegator under
-    // `as:`). Fail closed on any missing piece.
-    let cert_is_agent = msg
-        .auth_cert
-        .as_deref()
-        .map(sbo_core::authorize::auth_cert_is_agent)
-        .unwrap_or(false);
-    if cert_is_agent || msg.auth_warrant.is_some() {
-        // The write acts as its effective author (delegator under `as:`, else
-        // the agent). Owner-authorization evaluates against that identity.
-        let effective = resolve_agent_effective(msg, state, l2)?;
-        return match authorize_owner(owner_ref, &signer, Some(&effective), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) {
-            AuthzOutcome::Authorized => Ok(()),
-            AuthzOutcome::Unauthorized(reason) => Err(reason),
-        };
-    }
-
-    match authorize_message(
-        owner_ref,
-        &signer,
-        msg.auth_cert.as_deref(),
-        evidence.as_deref(),
-        inclusion_time,
-        &l2.anchors,
-        &lookup,
-        DEFAULT_HOP_LIMIT,
-        pd.as_deref(),
-    ) {
+    // The attributed email is the device-model effective author (or None for a
+    // key-rooted owner authorized by direct signature, which needs no
+    // attribution).
+    let email = device_effective_email(msg, state, l2);
+    match authorize_owner(owner_ref, &signer, email.as_deref(), &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) {
         AuthzOutcome::Authorized => Ok(()),
         AuthzOutcome::Unauthorized(reason) => Err(reason),
     }
@@ -279,8 +229,9 @@ pub fn resolve_evidence(msg: &Message, state: &dyn StateView) -> Option<String> 
         }
         Some(_) => None, // unrecognized form
         None => {
-            // Absent evidence: try the conventional /sys/dnssec/<issuer> object.
-            let issuer = sbo_core::authorize::cert_issuer(msg.auth_cert.as_deref()?)?;
+            // Absent evidence: try the conventional /sys/dnssec/<issuer> object,
+            // where <issuer> is the presentation's access-cert issuer.
+            let issuer = presentation_issuer(msg.auth_cert.as_deref()?)?;
             let bytes = fetch_evidence_object(state, &format!("/sys/dnssec/{issuer}"))?;
             Some(encode_auth_evidence_inline(&bytes))
         }
@@ -327,35 +278,12 @@ const POLICY_SCHEMA: &str = "policy.v2";
 /// signer carries no valid attribution. Deterministic given the message and
 /// chain state — the same inclusion-time-pinned check the L2 gate uses.
 fn attributed_email(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Option<String> {
-    // On-behalf agent write (Authorization Spec §On-behalf writes): the write's
-    // attributed identity is its **effective author** — the delegator when the
-    // warrant carries `as:<delegator>`, else the agent. This is the identity the
-    // policy actor, `$email`/`$user` vars, and attestation-role matching must
-    // all evaluate against, so an on-behalf write faces "the same on-chain
-    // policy the delegator faces". Resolving the effective author needs state
-    // (evidence + database identity); the pure path (no state) can't attribute
-    // an agent write and returns None (fails closed).
-    let cert_is_agent = msg
-        .auth_cert
-        .as_deref()
-        .map(sbo_core::authorize::auth_cert_is_agent)
-        .unwrap_or(false);
-    if cert_is_agent || msg.auth_warrant.is_some() {
-        return state.and_then(|s| resolve_agent_effective(msg, s, l2).ok());
-    }
-
-    let signer = msg.signing_key.to_string();
-    // Evidence resolution (ref:/dnssec) needs state; inline works without it.
-    let evidence = state.and_then(|db| resolve_evidence(msg, db));
-    let inclusion_time = l2.inclusion_time.unwrap_or(0);
-    message_attribution(
-        &signer,
-        msg.auth_cert.as_deref(),
-        evidence.as_deref(),
-        inclusion_time,
-        &l2.anchors,
-    )
-    .map(|a| a.email)
+    // The write's attributed identity is its device-model effective author — the
+    // warrant identifier the presentation certifies. This is the identity the
+    // policy actor, `$email`/`$user` vars, and attestation-role matching must all
+    // evaluate against. Resolving it needs state (evidence + database identity);
+    // the pure path (no state) can't attribute and returns None (fails closed).
+    state.and_then(|s| device_effective_email(msg, s, l2))
 }
 
 /// Resolve the creator ID for a message — the durable identity of its author.

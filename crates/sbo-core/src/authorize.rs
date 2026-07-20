@@ -5,8 +5,9 @@
 //!
 //! 1. [`resolve::resolve_controller`] resolves an object's `Owner` reference to
 //!    a [`Controller`] (a key, an email, or unresolvable).
-//! 2. [`attribution::verify_attribution`] decides which email (if any) the
-//!    signing key speaks for at the write's DA inclusion time.
+//! 2. [`message_attribution`] verifies the write's device-model presentation
+//!    (`crate::device_attribution`) and decides which email (if any) the signing
+//!    key speaks for at the write's DA inclusion time.
 //! 3. [`resolve::is_authorized`] combines the two: a key-rooted owner needs a
 //!    direct signature match; an email-rooted owner needs the signer to be
 //!    attributed to that email.
@@ -22,15 +23,18 @@
 //! The pure decision — [`authorize_owner`] — takes an already-computed
 //! `attributed_email` and a name-lookup closure, so it is fully unit-testable
 //! offline. The attribution glue — [`message_attribution`] — wraps
-//! [`attribution::verify_attribution`], whose DNSSEC half cannot be exercised
-//! with a synthetic offline proof (the IANA root is hardcoded); that path is
-//! covered by attribution.rs's `#[ignore]`d live test.
+//! [`crate::device_attribution::verify_device_attribution`], whose DNSSEC half
+//! cannot be exercised with a synthetic offline proof (the IANA root is
+//! hardcoded); that path is covered by the device-attribution unit tests
+//! (provider key supplied directly) plus an `#[ignore]`d live test.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
-use crate::attribution::{self, Attribution, TrustAnchors, WarrantAttribution};
+use crate::attribution::TrustAnchors;
+use crate::device_attribution::{verify_device_attribution, DeviceAttribution};
 use crate::uri::SboRawUri;
 use crate::resolve::{is_authorized, resolve_controller, Controller, NameRecord};
+use browserid_core::device::AccessPresentation;
 
 /// The outcome of an L2 owner-authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +60,7 @@ impl AuthzOutcome {
 /// - `ref:<sbo-ref>` — a reference to a self-authenticating `dnssec.v1`
 ///   object. Resolving it requires state access this pure function does not
 ///   have, so it returns `Err` here; the caller may resolve the ref and call
-///   [`attribution::verify_attribution`] directly with the fetched bytes.
+///   [`message_attribution`] directly with the fetched bytes.
 ///
 /// A bare value with no recognized prefix is rejected.
 pub fn parse_auth_evidence(value: &str) -> Result<Vec<u8>, String> {
@@ -79,41 +83,53 @@ pub fn encode_auth_evidence_inline(proof: &[u8]) -> String {
     format!("inline:{}", URL_SAFE_NO_PAD.encode(proof))
 }
 
-/// Parse the issuer domain (`iss`) from a browserid `Auth-Cert`, without
-/// verifying its signature. Used to locate conventional `/sys/dnssec/<issuer>`
-/// evidence when `Auth-Evidence` is absent (Authorization Spec line 140).
-/// Returns `None` if the cert is unparseable.
-pub fn cert_issuer(auth_cert: &str) -> Option<String> {
-    browserid_core::Certificate::parse(auth_cert)
+/// Parse the issuer domain (`iss`) from a device-model presentation's access
+/// cert, without verifying its signature. Used to locate conventional
+/// `/sys/dnssec/<issuer>` evidence when `Auth-Evidence` is absent (Authorization
+/// Spec line 140). Returns `None` if the presentation is unparseable.
+pub fn presentation_issuer(presentation: &str) -> Option<String> {
+    AccessPresentation::parse(presentation)
         .ok()
-        .map(|c| c.issuer().to_string())
+        .map(|p| p.access_cert.claims().iss.clone())
 }
 
-/// Whether an `Auth-Cert` is a typed browserid **agent** certificate (and thus
-/// requires an accompanying warrant). Unparseable ⇒ `false`.
-pub fn auth_cert_is_agent(auth_cert: &str) -> bool {
-    browserid_core::Certificate::parse(auth_cert)
-        .map(|c| c.is_agent())
-        .unwrap_or(false)
+/// The audience the presentation's warrant (and assertion) is bound to — an
+/// `sbo+raw://…` reference. Read without verifying signatures; the caller checks
+/// it identifies this database (via [`audience_identifies_db`]) and then passes
+/// it as the `expected_audience` the presentation verifier enforces. `None` if
+/// the presentation is unparseable.
+pub fn presentation_audience(presentation: &str) -> Option<String> {
+    AccessPresentation::parse(presentation)
+        .ok()
+        .map(|p| p.warrant.claims().audience.clone())
 }
 
-/// Compute the [`Attribution`] for a message's signing key, if it carries a
-/// valid `Auth-Cert` + `Auth-Evidence` pair verifying at `inclusion_time`.
+/// Compute the [`DeviceAttribution`] for a message's signing key, if it carries
+/// a valid device-model presentation (`Auth-Cert`) + `Auth-Evidence` pair that
+/// verifies at `inclusion_time` for `expected_audience`.
 ///
 /// Returns `None` when attribution is absent, malformed, or fails verification
-/// — i.e. the signer is simply unattributed. (The reason is not surfaced; a
-/// caller wanting the error should call [`attribution::verify_attribution`].)
+/// — i.e. the signer is simply unattributed.
 pub fn message_attribution(
     signer_key: &str,
-    auth_cert: Option<&str>,
+    presentation: Option<&str>,
     auth_evidence: Option<&str>,
+    expected_audience: &str,
     inclusion_time: i64,
     anchors: &TrustAnchors,
-) -> Option<Attribution> {
-    let cert = auth_cert?;
+) -> Option<DeviceAttribution> {
+    let pres = presentation?;
     let evidence_str = auth_evidence?;
     let evidence = parse_auth_evidence(evidence_str).ok()?;
-    attribution::verify_attribution(signer_key, cert, &evidence, inclusion_time, anchors).ok()
+    verify_device_attribution(
+        signer_key,
+        pres,
+        &evidence,
+        expected_audience,
+        inclusion_time,
+        anchors,
+    )
+    .ok()
 }
 
 /// Decide whether a write signed by `signer_key`, with optional
@@ -154,29 +170,6 @@ where
         Controller::Unresolved => format!("owner '{owner_ref}' could not be resolved"),
     };
     AuthzOutcome::Unauthorized(reason)
-}
-
-/// Convenience: compute the message's attribution and authorize it against
-/// `owner_ref` in one call. The daemon uses this on replay.
-#[allow(clippy::too_many_arguments)]
-pub fn authorize_message<F>(
-    owner_ref: &str,
-    signer_key: &str,
-    auth_cert: Option<&str>,
-    auth_evidence: Option<&str>,
-    inclusion_time: i64,
-    anchors: &TrustAnchors,
-    lookup: &F,
-    hop_limit: u32,
-    primary_domain: Option<&str>,
-) -> AuthzOutcome
-where
-    F: Fn(&str) -> Option<NameRecord>,
-{
-    let attribution =
-        message_attribution(signer_key, auth_cert, auth_evidence, inclusion_time, anchors);
-    let email = attribution.as_ref().map(|a| a.email.as_str());
-    authorize_owner(owner_ref, signer_key, email, lookup, hop_limit, primary_domain)
 }
 
 /// Whether a warrant audience string identifies the database `db` (with genesis
@@ -282,68 +275,27 @@ pub fn scopes_authorize(
     true
 }
 
-/// Resolve the **effective author** of an agent write from its warrant scopes.
-/// Default (no `as:`) is the agent itself. An `as:<delegator>` scope makes the
-/// effective author the delegator — but only if it names exactly the delegator
-/// and the warrant also carries at least one `path:` scope (guardrail: no
-/// unrestricted act-as-you). Returns `Err(reason)` if the `as:` scope is
-/// malformed, names a non-delegator, is duplicated, or lacks a path scope.
-pub fn warrant_effective_email(
-    scopes: &[String],
-    agent_email: &str,
-    delegator: &str,
-) -> Result<String, String> {
-    let as_targets: Vec<&str> = scopes
-        .iter()
-        .filter_map(|s| scope_parts(s))
-        .filter(|(d, _)| *d == "as")
-        .map(|(_, v)| v)
-        .collect();
-    match as_targets.as_slice() {
-        [] => Ok(agent_email.to_string()),
-        [target] => {
-            if *target != delegator {
-                return Err(format!(
-                    "on-behalf scope 'as:{target}' does not name the delegator '{delegator}'"
-                ));
-            }
-            let has_path = scopes.iter().any(|s| matches!(scope_parts(s), Some(("path", _))));
-            if !has_path {
-                return Err("on-behalf ('as:') warrant must also carry a 'path:' scope".into());
-            }
-            Ok(delegator.to_string())
-        }
-        _ => Err("warrant carries more than one 'as:' scope".into()),
-    }
-}
-
-/// The effective attributed email for an agent write, or `Err(reason)`: verifies
-/// the warrant binds to `wa` (already crypto-verified by attribution), that its
-/// audience identifies this database, that its scopes permit this write, and
-/// resolves agent-vs-delegator authorship. `on_behalf_allowed` is the
-/// repository's policy toggle (guardrail 2); pass `true` unless the repo opts
-/// out of on-behalf writes.
-#[allow(clippy::too_many_arguments)]
-pub fn agent_effective_email(
-    wa: &WarrantAttribution,
-    db: &SboRawUri,
-    db_genesis: Option<&str>,
+/// The attributed author of a device-model write, or `Err(reason)`: the write's
+/// presentation is already crypto-verified into `attr` (identity, subject,
+/// scopes, all bound to the presentation's audience). This enforces the
+/// remaining SBO-layer authorization: that the warrant's scopes permit THIS
+/// write's action/path/schema. On success returns the warrant identifier
+/// (`attr.email`) — the identity the write speaks for (a user or an agent,
+/// per `attr.subject`).
+///
+/// Audience-identifies-database is checked by the caller *before* verification
+/// (it must pass the DB-matching audience as the presentation's
+/// `expected_audience`), so it is not re-checked here.
+pub fn authorized_write_email(
+    attr: &DeviceAttribution,
     action: &str,
     path: &str,
     content_schema: Option<&str>,
-    on_behalf_allowed: bool,
 ) -> Result<String, String> {
-    if !audience_identifies_db(&wa.audience, db, db_genesis) {
-        return Err(format!("warrant audience '{}' does not identify this database", wa.audience));
-    }
-    if !scopes_authorize(&wa.scopes, action, path, content_schema) {
+    if !scopes_authorize(&attr.scopes, action, path, content_schema) {
         return Err("warrant scopes do not authorize this write".into());
     }
-    let email = warrant_effective_email(&wa.scopes, &wa.agent_email, &wa.delegator)?;
-    if email == wa.delegator && email != wa.agent_email && !on_behalf_allowed {
-        return Err("this repository does not honor on-behalf ('as:') warrants".into());
-    }
-    Ok(email)
+    Ok(attr.email.clone())
 }
 
 #[cfg(test)]
@@ -481,31 +433,20 @@ mod tests {
     }
 
     #[test]
-    fn cert_issuer_parses_iss_without_verification() {
-        use browserid_core::{Certificate, KeyPair};
-        let provider = KeyPair::generate();
-        let user = KeyPair::generate();
-        let cert = Certificate::create(
-            "id.sandmill.org",
-            "alice@sandmill.org",
-            &user.public_key(),
-            chrono::Duration::seconds(3600),
-            &provider,
-        )
-        .unwrap();
-        assert_eq!(cert_issuer(cert.encoded()).as_deref(), Some("id.sandmill.org"));
-        assert_eq!(cert_issuer("not-a-cert"), None);
+    fn presentation_issuer_and_audience_none_on_garbage() {
+        assert_eq!(presentation_issuer("not-a-presentation"), None);
+        assert_eq!(presentation_audience("not-a-presentation"), None);
     }
 
     #[test]
-    fn message_attribution_none_without_cert() {
+    fn message_attribution_none_without_presentation() {
         let anchors = TrustAnchors::default();
-        assert!(message_attribution("k", None, Some("inline:AAAA"), 0, &anchors).is_none());
-        assert!(message_attribution("k", Some("cert"), None, 0, &anchors).is_none());
+        let aud = "sbo+raw://avail:turing:506/";
+        assert!(message_attribution("k", None, Some("inline:AAAA"), aud, 0, &anchors).is_none());
+        assert!(message_attribution("k", Some("pres"), None, aud, 0, &anchors).is_none());
     }
 
-    // ---- agent warrant helpers ----
-    use crate::attribution::WarrantAttribution;
+    // ---- device-warrant helpers ----
     use crate::uri::SboRawUri;
 
     fn db() -> SboRawUri { SboRawUri::parse("sbo+raw://avail:turing:506@3567386/").unwrap() }
@@ -549,46 +490,53 @@ mod tests {
         assert!(scopes_authorize(&["as:human@example.com".to_string(), "path:/u/**".to_string()], "post", "/u/a", None));
     }
 
-    #[test]
-    fn effective_email_agent_vs_delegator() {
-        // Default: the agent.
-        assert_eq!(warrant_effective_email(&[], "bot@x", "human@x").unwrap(), "bot@x");
-        // On-behalf with a path scope: the delegator.
-        let sc = vec!["as:human@x".to_string(), "path:/u/human/**".to_string()];
-        assert_eq!(warrant_effective_email(&sc, "bot@x", "human@x").unwrap(), "human@x");
-        // `as:` naming a non-delegator, or without a path scope, or duplicated → error.
-        assert!(warrant_effective_email(&["as:mallory@x".to_string(), "path:/**".to_string()], "bot@x", "human@x").is_err());
-        assert!(warrant_effective_email(&["as:human@x".to_string()], "bot@x", "human@x").is_err());
-        assert!(warrant_effective_email(&["as:human@x".to_string(), "as:human@x".to_string(), "path:/**".to_string()], "bot@x", "human@x").is_err());
+    // `db()` retained above for symmetry with the audience test; the device
+    // presentation itself is exercised end-to-end in
+    // `device_attribution::tests` and the daemon `l2_authorization` suite. Here
+    // we only check the SBO-layer scope enforcement on an already-verified
+    // attribution.
+    fn attr_with(scopes: Vec<String>, email: &str) -> DeviceAttribution {
+        use browserid_core::device::{Subject, VerifiedAccess};
+        DeviceAttribution {
+            email: email.to_string(),
+            subject: Subject::User,
+            key: "ed25519:00".to_string(),
+            scopes: scopes.clone(),
+            issuer: "example.com".to_string(),
+            valid_from: 0,
+            valid_until: i64::MAX,
+            verified: VerifiedAccess {
+                email: email.to_string(),
+                subject: Subject::User,
+                scopes,
+                issuer: "example.com".to_string(),
+                access_status: None,
+                config_status: None,
+                warrant_status: None,
+            },
+        }
     }
 
     #[test]
-    fn agent_effective_email_integration() {
-        let db = db();
-        let wa = WarrantAttribution {
-            agent_email: "attestor@browserid.me".into(),
-            delegator: "human@example.com".into(),
-            audience: "sbo+raw://avail:turing:506/".into(),
-            scopes: vec!["action:post".into(), "path:/attestor/*".into()],
-        };
-        // Authorized as the agent.
-        assert_eq!(
-            agent_effective_email(&wa, &db, None, "post", "/attestor/note", None, true).unwrap(),
-            "attestor@browserid.me"
+    fn authorized_write_email_enforces_scopes() {
+        let attr = attr_with(
+            vec!["action:post".into(), "path:/attestor/*".into()],
+            "attestor@example.com",
         );
-        // Wrong audience / out-of-scope path → Err.
-        let mut wrong = wa.clone();
-        wrong.audience = "sbo+raw://avail:turing:999/".into();
-        assert!(agent_effective_email(&wrong, &db, None, "post", "/attestor/note", None, true).is_err());
-        assert!(agent_effective_email(&wa, &db, None, "post", "/elsewhere", None, true).is_err());
+        // In-scope → returns the warrant identifier.
+        assert_eq!(
+            authorized_write_email(&attr, "post", "/attestor/note", None).unwrap(),
+            "attestor@example.com"
+        );
+        // Out-of-scope action / path → Err.
+        assert!(authorized_write_email(&attr, "delete", "/attestor/note", None).is_err());
+        assert!(authorized_write_email(&attr, "post", "/elsewhere", None).is_err());
 
-        // On-behalf, honored vs repo opt-out.
-        let ob = WarrantAttribution {
-            scopes: vec!["as:human@example.com".into(), "path:/u/human/**".into()],
-            ..wa.clone()
-        };
-        assert_eq!(agent_effective_email(&ob, &db, None, "post", "/u/human/draft", None, true).unwrap(), "human@example.com");
-        assert!(agent_effective_email(&ob, &db, None, "post", "/u/human/draft", None, false).is_err());
+        // Empty scopes are unconstrained (plain user write).
+        let user = attr_with(vec![], "alice@example.com");
+        assert_eq!(
+            authorized_write_email(&user, "post", "/anything", None).unwrap(),
+            "alice@example.com"
+        );
     }
-
 }

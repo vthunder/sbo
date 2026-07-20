@@ -21,7 +21,10 @@ base64 = "0.22"
 dirs = "5"
 hickory-resolver = "0.24"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "e572cda" }
+# DEV: temporary path dep — the device-cert model lives only on browserid-ng
+# LOCAL main (unpushed). REVERT to a pushed git rev once main is pushed:
+#   browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "<sha>" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "b2e4f82" }
 dnssec-prover = "0.6.8"
 
 [dev-dependencies]
