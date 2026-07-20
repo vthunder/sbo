@@ -25,7 +25,7 @@
 //!    [`AccessPresentation::verify`], resolving the (single) IdP key from the
 //!    DNSSEC-proven provider key. `verify` enforces
 //!    `config_cert.iss == access_cert.iss` (privilege-escalation fix), all four
-//!    signatures, expiries, and the `(identity, subject, audience)` join. Since
+//!    signatures, expiries, and the `(identity, holder∈matcher, audience)` join. Since
 //!    the resolver only ever returns the DNSSEC-proven key, the config cert
 //!    issuer binding is transitively bound to the DNSSEC-proven provider.
 //! 6. Bind the SBO signing key: the access cert's certified `access-key` MUST
@@ -42,20 +42,21 @@
 //! object expiries remain wall-clock inside `verify`; that is acceptable for the
 //! capture/verify roundtrip and flagged here for the later coordinated cleanup.
 
-use browserid_core::device::{AccessPresentation, Subject, VerifiedAccess};
+use browserid_core::device::{AccessPresentation, Holder, VerifiedAccess};
 
 use crate::attribution::{extract_provider_key, AttributionError, TrustAnchors};
 
 /// A successful device-model attribution: the SBO `key` speaks for `email`
-/// (as `subject`), the warrant grants `scopes` for the write's audience, valid
+/// (via the opaque `holder`), the warrant grants `scopes` for the write's audience, valid
 /// within `[valid_from, valid_until]` (inclusive, UNIX seconds — the
 /// intersection of the DNSSEC proof window and the access cert window).
 #[derive(Debug, Clone)]
 pub struct DeviceAttribution {
     /// The email the access cert certifies (the warrant identifier).
     pub email: String,
-    /// Whether this acts for a user or an agent.
-    pub subject: Subject,
+    /// Which of the user's holders is acting (opaque, broker-assigned). Advisory
+    /// — authorization keys off `email`/owner, not this.
+    pub holder: Holder,
     /// The SBO Public-Key string (base64url) — equals the access cert's key.
     pub key: String,
     /// The warrant's granted scopes (`<dimension>:<value>`; caller enforces).
@@ -183,7 +184,7 @@ pub fn verify_device_attribution_with_provider_key(
 
     Ok(DeviceAttribution {
         email,
-        subject: ac.subject,
+        holder: ac.holder.clone(),
         key: cert_key,
         scopes: verified.scopes.clone(),
         issuer: iss,

@@ -5,7 +5,7 @@
 
 use super::*;
 use browserid_core::device::{
-    AccessCert, AccessPresentation, DeviceCert, Purpose, Subject, Warrant,
+    AccessCert, AccessPresentation, DeviceCert, Holder, HolderMatcher, Purpose, Warrant,
 };
 use browserid_core::{Assertion, KeyPair};
 use chrono::Duration;
@@ -26,7 +26,7 @@ fn fixture() -> (AccessPresentation, KeyPair, KeyPair) {
     let access_cert = AccessCert::create(
         IDP_DOMAIN,
         EMAIL,
-        Subject::User,
+        Holder::new("svc.sbo").unwrap(),
         &access_key.public_key(),
         Duration::hours(24),
         &idp,
@@ -37,7 +37,7 @@ fn fixture() -> (AccessPresentation, KeyPair, KeyPair) {
         IDP_DOMAIN,
         &config_key.public_key(),
         Purpose::Authorization,
-        Subject::User,
+        Holder::new("svc.sbo").unwrap(),
         vec![EMAIL.to_string()],
         Duration::days(90),
         &idp,
@@ -46,7 +46,7 @@ fn fixture() -> (AccessPresentation, KeyPair, KeyPair) {
     .unwrap();
     let warrant = Warrant::create(
         EMAIL,
-        Subject::User,
+        HolderMatcher::new("svc.sbo").unwrap(),
         AUDIENCE,
         vec!["dim:val".to_string()],
         Duration::days(90),
@@ -92,7 +92,7 @@ fn device_attribution_roundtrip_ok() {
 
     assert_eq!(attr.email, EMAIL);
     assert_eq!(attr.key, access_key.public_key().to_base64());
-    assert_eq!(attr.subject, Subject::User);
+    assert_eq!(attr.holder.as_str(), "svc.sbo");
     assert_eq!(attr.scopes, vec!["dim:val".to_string()]);
     assert_eq!(attr.issuer, IDP_DOMAIN);
 }

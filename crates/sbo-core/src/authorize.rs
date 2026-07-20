@@ -496,10 +496,10 @@ mod tests {
     // we only check the SBO-layer scope enforcement on an already-verified
     // attribution.
     fn attr_with(scopes: Vec<String>, email: &str) -> DeviceAttribution {
-        use browserid_core::device::{Subject, VerifiedAccess};
+        use browserid_core::device::{Holder, VerifiedAccess};
         DeviceAttribution {
             email: email.to_string(),
-            subject: Subject::User,
+            holder: Holder::new("svc.sbo").unwrap(),
             key: "ed25519:00".to_string(),
             scopes: scopes.clone(),
             issuer: "example.com".to_string(),
@@ -507,7 +507,7 @@ mod tests {
             valid_until: i64::MAX,
             verified: VerifiedAccess {
                 email: email.to_string(),
-                subject: Subject::User,
+                holder: Holder::new("svc.sbo").unwrap(),
                 scopes,
                 issuer: "example.com".to_string(),
                 access_status: None,

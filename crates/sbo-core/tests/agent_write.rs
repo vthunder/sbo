@@ -7,7 +7,7 @@
 //! grammar, and the attributed identity.)
 
 use browserid_core::device::{
-    AccessCert, AccessPresentation, DeviceCert, Purpose, Subject, Warrant,
+    AccessCert, AccessPresentation, DeviceCert, Holder, HolderMatcher, Purpose, Warrant,
 };
 use browserid_core::{Assertion, KeyPair};
 use chrono::{Duration, Utc};
@@ -37,24 +37,26 @@ struct Artifacts {
 
 /// The device-cert ceremony, in code: the IdP certifies the identity's access
 /// key and its config (authorization) cert; the config key signs a warrant for
-/// `aud` with `scopes`; the access key signs the assertion. Subject decides
-/// user-vs-agent.
-fn artifacts(scopes: Vec<String>, aud: &str, subject: Subject) -> Artifacts {
+/// `aud` with `scopes`; the access key signs the assertion. `holder` is the
+/// opaque broker-assigned id the certs carry; the warrant grants that exact
+/// holder (`<id>` isolation). Authorization keys off `email` + scopes, not the
+/// holder — passing it just makes a well-formed presentation.
+fn artifacts(scopes: Vec<String>, aud: &str, holder: &str) -> Artifacts {
     let idp = KeyPair::generate(); // stands in for the IdP's signing key
     let access = KeyPair::generate();
     let config = KeyPair::generate();
 
     let access_cert = AccessCert::create(
-        IDP, IDENTITY, subject, &access.public_key(), Duration::hours(24), &idp, None,
+        IDP, IDENTITY, Holder::new(holder).unwrap(), &access.public_key(), Duration::hours(24), &idp, None,
     )
     .unwrap();
     let config_cert = DeviceCert::create(
-        IDP, &config.public_key(), Purpose::Authorization, subject,
+        IDP, &config.public_key(), Purpose::Authorization, Holder::new(holder).unwrap(),
         vec![IDENTITY.to_string()], Duration::days(90), &idp, None,
     )
     .unwrap();
     let warrant = Warrant::create(
-        IDENTITY, subject, aud, scopes, Duration::days(90), &config, None,
+        IDENTITY, HolderMatcher::new(holder).unwrap(), aud, scopes, Duration::days(90), &config, None,
     )
     .unwrap();
     let assertion = Assertion::create(aud, Duration::days(1), &access).unwrap();
@@ -136,7 +138,7 @@ fn warrant_backed_write_verifies_end_to_end_offline() {
     let a = artifacts(
         vec!["action:post".into(), "path:/attestor/**".into()],
         MINGO_AUD_BARE,
-        Subject::Agent,
+        "svc.agent",
     );
     let msg = device_write(&a, Action::Post, "/attestor/", None);
 
@@ -153,7 +155,7 @@ fn warrant_backed_write_verifies_end_to_end_offline() {
 
 #[test]
 fn warrant_for_a_different_chain_is_rejected() {
-    let a = artifacts(vec!["action:post".into()], "sbo+raw://avail:turing:999/", Subject::Agent);
+    let a = artifacts(vec!["action:post".into()], "sbo+raw://avail:turing:999/", "svc.agent");
     let msg = device_write(&a, Action::Post, "/attestor/", None);
     // Presentation is cryptographically fine, but its audience is a different app.
     assert!(verify(&a, &msg).is_err());
@@ -161,15 +163,15 @@ fn warrant_for_a_different_chain_is_rejected() {
 
 #[test]
 fn out_of_scope_write_is_rejected() {
-    let a = artifacts(vec!["path:/attestor/**".into()], MINGO_AUD_BARE, Subject::Agent);
+    let a = artifacts(vec!["path:/attestor/**".into()], MINGO_AUD_BARE, "svc.agent");
     let msg = device_write(&a, Action::Post, "/somewhere/", None);
     assert!(verify(&a, &msg).is_err());
 }
 
 #[test]
 fn plain_user_write_with_empty_scopes_is_unconstrained() {
-    // A Subject::User warrant with no scopes attributes to the user for any write.
-    let a = artifacts(vec![], MINGO_AUD_BARE, Subject::User);
+    // A warrant with no scopes attributes to the identity for any write.
+    let a = artifacts(vec![], MINGO_AUD_BARE, "br.main");
     let msg = device_write(&a, Action::Post, "/u/attestor/", None);
     let email = verify(&a, &msg).expect("empty scopes are unconstrained");
     assert_eq!(email, IDENTITY);
