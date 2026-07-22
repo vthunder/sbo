@@ -72,12 +72,15 @@ impl Id {
         }
 
         // Character check: RFC 3986 unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
-        // plus "@" for email-rooted identity references (e.g. alice@gmail.com) and
-        // ":" for namespaced identifiers — attestation type IDs (`role:moderator`)
-        // and algorithm-prefixed key references (`ed25519:…`). Both are safe since
-        // the state-key delimiter is the Unit Separator (0x1F), not ":".
+        // plus "@" for email-rooted identity references (e.g. alice@gmail.com),
+        // "+" for their RFC-subaddressed forms (agent identities like
+        // alice+bot@gmail.com — first-class owners under the browserid holder
+        // model), and ":" for namespaced identifiers — attestation type IDs
+        // (`role:moderator`) and algorithm-prefixed key references
+        // (`ed25519:…`). All are safe since the state-key delimiter is the
+        // Unit Separator (0x1F).
         for c in s.chars() {
-            if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | '@' | ':') {
+            if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | '@' | ':' | '+') {
                 return Err(crate::error::ParseError::InvalidIdentifier(
                     format!("Invalid character: {}", c)
                 ));
@@ -255,6 +258,16 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn id_accepts_subaddressed_email_owners() {
+        // Agent identities are +tag sub-addresses and first-class owners.
+        assert!(super::Id::new("alice+bot@gmail.com").is_ok());
+        assert!(super::Id::new("danmills+mingo@sandmill.org").is_ok());
+        // Still-invalid characters stay invalid.
+        assert!(super::Id::new("a b").is_err());
+        assert!(super::Id::new("a/b").is_err());
+    }
+
     use super::*;
 
     #[test]

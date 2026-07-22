@@ -28,6 +28,8 @@ SBO has two kinds of identity, distinguished by how control is proven:
 
 Email-rooted identities store **no durable key** on chain. Control is proven per message by attribution and may rotate across providers without changing the identity — there is no user key to lose, and recovery is the provider's responsibility (regain control of the email, regain the identity). Key-rooted identities are authorized by a direct signature from a key the holder must keep; they are the root of trust for a repository (see the [Genesis Specification](./SBO%20Genesis%20Specification.md)) and the basis for the future self-sovereign tier.
 
+**Subaddressed identities.** RFC-style subaddressing is a protocol rule: owning `user@domain` implies owning every `user+tag@domain` (downward only — a sub-address never implies its base or a sibling). Agent identities are `+tag` sub-addresses of their principal and are **first-class, distinct identities on chain**: a named agent owns its objects as `user+tag@domain`, and attribution binds to that exact identity — the warrant an agent presents must name it exactly, so a base-identity certificate alone authorizes nothing. This is what makes agent-authored content distinguishable from the principal's own while keeping the ownership relationship legible (strip the `+tag` to find the principal).
+
 User identities SHOULD be email-rooted (browserid-resolvable); key-rooted identities are the explicit exception, reserved for genesis roots and self-sovereign users. This is achievable even in a repository that has no domain of its own, because an email carries its own provider domain — `alice@gmail.com` is browserid-resolvable regardless of where the repository lives.
 
 ## Identity Tiers
