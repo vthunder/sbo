@@ -1084,24 +1084,7 @@ dependencies = [
 [[package]]
 name = "browserid-core"
 version = "0.1.0"
-source = "git+https://github.com/vthunder/browserid-ng?rev=b2e4f82#b2e4f82190eb3bb082eb81973f04b9e0548886de"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "flate2",
- "jsonwebtoken",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "browserid-core"
-version = "0.1.0"
-source = "git+https://github.com/vthunder/browserid-ng?rev=b8526f6#b8526f6c2d914fd5937bdaf91e9412c849cf567b"
+source = "git+https://github.com/vthunder/browserid-ng?rev=2582555#2582555a5a799f0c951d93d51b64f7f88678dab0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6016,7 +5999,7 @@ dependencies = [
 name = "sbo-capture"
 version = "0.1.0"
 dependencies = [
- "browserid-core 0.1.0 (git+https://github.com/vthunder/browserid-ng?rev=b2e4f82)",
+ "browserid-core",
  "chrono",
  "dnssec-prover",
  "reqwest 0.12.25",
@@ -6034,7 +6017,7 @@ dependencies = [
  "anyhow",
  "avail-rust-client",
  "base64 0.22.1",
- "browserid-core 0.1.0 (git+https://github.com/vthunder/browserid-ng?rev=b2e4f82)",
+ "browserid-core",
  "clap",
  "dirs 5.0.1",
  "ed25519-dalek",
@@ -6066,7 +6049,7 @@ name = "sbo-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "browserid-core 0.1.0 (git+https://github.com/vthunder/browserid-ng?rev=b8526f6)",
+ "browserid-core",
  "chrono",
  "dirs 5.0.1",
  "dnssec-prover",

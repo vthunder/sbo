@@ -46,6 +46,7 @@ fn fixture() -> (AccessPresentation, KeyPair, KeyPair) {
     .unwrap();
     let warrant = Warrant::create(
         EMAIL,
+        EMAIL,
         HolderMatcher::new("svc.sbo").unwrap(),
         AUDIENCE,
         vec!["dim:val".to_string()],
@@ -95,6 +96,67 @@ fn device_attribution_roundtrip_ok() {
     assert_eq!(attr.holder.as_str(), "svc.sbo");
     assert_eq!(attr.scopes, vec!["dim:val".to_string()]);
     assert_eq!(attr.issuer, IDP_DOMAIN);
+}
+
+/// A DELEGATED (model-A) bundle: a distinct grantee service acts on behalf of a
+/// grantor user, same issuer. The access cert certifies the grantee (the actor
+/// that signs); the config cert authorizes the GRANTOR (the attributed identity);
+/// the warrant delegates grantor → grantee.
+fn delegated_fixture() -> (AccessPresentation, KeyPair, KeyPair) {
+    const GRANTOR: &str = "dan@mingo.place";
+    const GRANTEE: &str = "mingo-poster@mingo.place";
+    const ISS: &str = "mingo.place";
+    let idp = KeyPair::generate();
+    let access_key = KeyPair::generate();
+    let config_key = KeyPair::generate();
+
+    // Access cert certifies the GRANTEE (the actor + SBO signing key).
+    let access_cert = AccessCert::create(
+        ISS, GRANTEE, Holder::new("svc.poster").unwrap(), &access_key.public_key(),
+        Duration::hours(24), &idp, None,
+    )
+    .unwrap();
+    // Config cert authorizes the GRANTOR (whom the write attributes to).
+    let config_cert = DeviceCert::create(
+        ISS, &config_key.public_key(), Purpose::Authorization, Holder::new("br.main").unwrap(),
+        vec![GRANTOR.to_string()], Duration::days(90), &idp, None,
+    )
+    .unwrap();
+    // Warrant delegates grantor → grantee, bound to the grantee's holder.
+    let warrant = Warrant::create(
+        GRANTOR, GRANTEE, HolderMatcher::new("svc.poster").unwrap(), AUDIENCE,
+        vec!["action:post".to_string()], Duration::days(90), &config_key, None,
+    )
+    .unwrap();
+    let assertion = Assertion::create(AUDIENCE, Duration::days(1), &access_key).unwrap();
+    let pres = AccessPresentation { access_cert, assertion, warrant, config_cert };
+    (pres, idp, access_key)
+}
+
+#[test]
+fn delegated_attribution_lands_on_grantor() {
+    let (pres, idp, access_key) = delegated_fixture();
+    let now = chrono::Utc::now().timestamp();
+    let attr = verify_device_attribution_with_provider_key(
+        &access_key.public_key().to_base64(),
+        pres,
+        &idp.public_key(),
+        now - 3600,
+        now + 3600,
+        AUDIENCE,
+        now,
+        &anchors(),
+    )
+    .expect("delegated bundle should attribute to the grantor");
+
+    // Attribution lands on the GRANTOR (effective author); the grantee is the
+    // actor of record (provenance). The holder is the grantee's.
+    assert_eq!(attr.email, "dan@mingo.place");
+    assert_eq!(attr.grantee, "mingo-poster@mingo.place");
+    assert_eq!(attr.holder.as_str(), "svc.poster");
+    assert_eq!(attr.issuer, "mingo.place");
+    assert_eq!(attr.grantee_issuer, "mingo.place");
+    assert_eq!(attr.scopes, vec!["action:post".to_string()]);
 }
 
 #[test]

@@ -113,18 +113,16 @@ pub fn presentation_audience(presentation: &str) -> Option<String> {
 pub fn message_attribution(
     signer_key: &str,
     presentation: Option<&str>,
-    auth_evidence: Option<&str>,
+    get_evidence: impl Fn(&str) -> Option<Vec<u8>>,
     expected_audience: &str,
     inclusion_time: i64,
     anchors: &TrustAnchors,
 ) -> Option<DeviceAttribution> {
     let pres = presentation?;
-    let evidence_str = auth_evidence?;
-    let evidence = parse_auth_evidence(evidence_str).ok()?;
     verify_device_attribution(
         signer_key,
         pres,
-        &evidence,
+        get_evidence,
         expected_audience,
         inclusion_time,
         anchors,
@@ -442,8 +440,8 @@ mod tests {
     fn message_attribution_none_without_presentation() {
         let anchors = TrustAnchors::default();
         let aud = "sbo+raw://avail:turing:506/";
-        assert!(message_attribution("k", None, Some("inline:AAAA"), aud, 0, &anchors).is_none());
-        assert!(message_attribution("k", Some("pres"), None, aud, 0, &anchors).is_none());
+        assert!(message_attribution("k", None, |_: &str| Some(vec![0u8]), aud, 0, &anchors).is_none());
+        assert!(message_attribution("k", Some("pres"), |_: &str| None::<Vec<u8>>, aud, 0, &anchors).is_none());
     }
 
     // ---- device-warrant helpers ----
@@ -499,17 +497,21 @@ mod tests {
         use browserid_core::device::{Holder, VerifiedAccess};
         DeviceAttribution {
             email: email.to_string(),
+            grantee: email.to_string(),
             holder: Holder::new("svc.sbo").unwrap(),
             key: "ed25519:00".to_string(),
             scopes: scopes.clone(),
             issuer: "example.com".to_string(),
+            grantee_issuer: "example.com".to_string(),
             valid_from: 0,
             valid_until: i64::MAX,
             verified: VerifiedAccess {
                 email: email.to_string(),
+                grantee: email.to_string(),
                 holder: Holder::new("svc.sbo").unwrap(),
                 scopes,
                 issuer: "example.com".to_string(),
+                grantee_issuer: "example.com".to_string(),
                 access_status: None,
                 config_status: None,
                 warrant_status: None,

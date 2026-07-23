@@ -52,17 +52,28 @@ use crate::attribution::{extract_provider_key, AttributionError, TrustAnchors};
 /// intersection of the DNSSEC proof window and the access cert window).
 #[derive(Debug, Clone)]
 pub struct DeviceAttribution {
-    /// The email the access cert certifies (the warrant identifier).
+    /// The EFFECTIVE author: the warrant grantor — whom the write is attributed
+    /// to and whose ownership it can satisfy. Equals the actor (`grantee`) for an
+    /// as-you grant; the delegating user for a delegated on-behalf grant.
     pub email: String,
-    /// Which of the user's holders is acting (opaque, broker-assigned). Advisory
-    /// — authorization keys off `email`/owner, not this.
+    /// The ACTOR of record: the warrant grantee == the access cert identity (the
+    /// identity that minted the access cert and signs the SBO envelope). Equals
+    /// `email` for as-you grants; a distinct service for delegated grants
+    /// (provenance).
+    pub grantee: String,
+    /// Which of the grantee's holders is acting (opaque, broker-assigned).
+    /// Advisory — authorization keys off `email`/owner, not this.
     pub holder: Holder,
     /// The SBO Public-Key string (base64url) — equals the access cert's key.
     pub key: String,
     /// The warrant's granted scopes (`<dimension>:<value>`; caller enforces).
     pub scopes: Vec<String>,
-    /// The issuing IdP/broker domain (`access_cert.iss == config_cert.iss`).
+    /// The IdP/broker domain that vouches for the ATTRIBUTED identity (`email`) —
+    /// the grantor's issuer (the config cert's `iss`).
     pub issuer: String,
+    /// The grantee/actor's issuer (the access cert's `iss`). Equals `issuer` for
+    /// an as-you grant; may differ for a cross-issuer delegated grant.
+    pub grantee_issuer: String,
     /// Start of the validity window (UNIX seconds, inclusive).
     pub valid_from: i64,
     /// End of the validity window (UNIX seconds, inclusive).
@@ -86,25 +97,36 @@ pub struct DeviceAttribution {
 pub fn verify_device_attribution(
     public_key: &str,
     presentation: &str,
-    auth_evidence: &[u8],
+    get_evidence: impl Fn(&str) -> Option<Vec<u8>>,
     expected_audience: &str,
     inclusion_time: i64,
     anchors: &TrustAnchors,
 ) -> Result<DeviceAttribution, AttributionError> {
-    // Parse the 4-object bundle so we know which issuer's TXT record to look for.
+    // Parse the 4-object bundle so we know which issuers' TXT records to look for.
     let pres = AccessPresentation::parse(presentation)
         .map_err(|e| AttributionError::BadCertificate(e.to_string()))?;
-    let iss = pres.access_cert.claims().iss.clone();
+    let ac_iss = pres.access_cert.claims().iss.clone();
+    let cc_iss = pres.config_cert.claims().iss.clone();
 
-    // DNSSEC: provider key + proof window for _browserid.<iss>.
-    let (provider_key, inception, expiration) = extract_provider_key(auth_evidence, &iss)?;
+    // Prove each DISTINCT issuer's provider key + RRSig window from its DNSSEC
+    // evidence: the grantee's issuer (the access cert) and — when a delegated
+    // grant crosses issuers — the grantor's issuer (the config cert). Both proofs
+    // are self-authenticating; anyone may post them on-chain ahead of the write.
+    let mut proven: Vec<(String, browserid_core::PublicKey, i64, i64)> = Vec::new();
+    for iss in [ac_iss.as_str(), cc_iss.as_str()] {
+        if proven.iter().any(|(i, ..)| i == iss) {
+            continue;
+        }
+        let evidence = get_evidence(iss)
+            .ok_or_else(|| AttributionError::MissingIssuerEvidence(iss.to_string()))?;
+        let (key, inception, expiration) = extract_provider_key(&evidence, iss)?;
+        proven.push((iss.to_string(), key, inception, expiration));
+    }
 
-    verify_device_attribution_with_provider_key(
+    verify_device_attribution_with_provider_keys(
         public_key,
         pres,
-        &provider_key,
-        inception,
-        expiration,
+        &proven,
         expected_audience,
         inclusion_time,
         anchors,
@@ -116,6 +138,9 @@ pub fn verify_device_attribution(
 /// legacy `verify_attribution_with_provider_key`) so the join logic is
 /// unit-testable without a real, unforgeable DNSSEC proof — the DNSSEC-dependent
 /// extraction is covered by an `#[ignore]`d live test.
+/// Same-issuer convenience wrapper (one DNSSEC-proven provider key covering both
+/// the access and config certs). Used by tests and as-you callers; delegates to
+/// the general multi-issuer core.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_device_attribution_with_provider_key(
     public_key: &str,
@@ -127,45 +152,84 @@ pub fn verify_device_attribution_with_provider_key(
     inclusion_time: i64,
     anchors: &TrustAnchors,
 ) -> Result<DeviceAttribution, AttributionError> {
+    let iss = pres.access_cert.claims().iss.clone();
+    let proven = vec![(iss, provider_key.clone(), inception, expiration)];
+    verify_device_attribution_with_provider_keys(
+        public_key,
+        pres,
+        &proven,
+        expected_audience,
+        inclusion_time,
+        anchors,
+    )
+}
+
+/// The offline core: everything after DNSSEC proofs have yielded a provider key +
+/// window for each distinct issuer in the presentation (`proven`, keyed by issuer
+/// domain). Resolves the grantee (access) and grantor (config) issuer keys
+/// independently — a delegated grant may cross issuers — and enforces the
+/// grantor/grantee authority and window bindings.
+pub fn verify_device_attribution_with_provider_keys(
+    public_key: &str,
+    pres: AccessPresentation,
+    proven: &[(String, browserid_core::PublicKey, i64, i64)],
+    expected_audience: &str,
+    inclusion_time: i64,
+    anchors: &TrustAnchors,
+) -> Result<DeviceAttribution, AttributionError> {
     let ac = pres.access_cert.claims();
-    let iss = ac.iss.clone();
-    let email = ac.identity.clone();
+    let grantee = ac.identity.clone();
+    let grantee_iss = ac.iss.clone();
+    let grantor = pres.warrant.claims().grantor.clone();
+    let grantor_iss = pres.config_cert.claims().iss.clone();
 
-    // inclusion_time must lie within the DNSSEC (RRSig) window.
-    if inclusion_time < inception || inclusion_time > expiration {
-        return Err(AttributionError::EvidenceWindowMismatch {
-            time: inclusion_time,
-            from: inception,
-            until: expiration,
-        });
+    // inclusion_time must lie within EVERY proof's DNSSEC (RRSig) window.
+    for (_iss, _key, inception, expiration) in proven {
+        if inclusion_time < *inception || inclusion_time > *expiration {
+            return Err(AttributionError::EvidenceWindowMismatch {
+                time: inclusion_time,
+                from: *inception,
+                until: *expiration,
+            });
+        }
     }
 
-    // 4. Authority: primary IdP (email domain == iss) or a pinned broker.
-    let domain = email.split('@').nth(1).unwrap_or("");
-    if domain != iss && !anchors.is_broker(&iss) {
-        return Err(AttributionError::IssuerNotAuthorized {
-            iss: iss.clone(),
-            domain: domain.to_string(),
-        });
-    }
+    // Authority (domain-binding) for BOTH identities: the attributed identity
+    // (grantor) must be served by the config cert's issuer, and the actor
+    // (grantee) by the access cert's issuer — or that issuer is a pinned broker.
+    // The grantor check is what makes the cross-issuer split safe: issuer X can
+    // only attribute to an identity in a domain it is authoritative for.
+    let check_authority = |identity: &str, iss: &str| -> Result<(), AttributionError> {
+        let domain = identity.split('@').nth(1).unwrap_or("");
+        if domain != iss && !anchors.is_broker(iss) {
+            return Err(AttributionError::IssuerNotAuthorized {
+                iss: iss.to_string(),
+                domain: domain.to_string(),
+            });
+        }
+        Ok(())
+    };
+    check_authority(&grantor, &grantor_iss)?;
+    check_authority(&grantee, &grantee_iss)?;
 
-    // 5. Crypto + structural join, resolving the single IdP key from the
-    //    DNSSEC-proven provider key. `verify` enforces config_cert.iss ==
-    //    access_cert.iss, so the config cert issuer binds transitively to the
-    //    DNSSEC-proven provider — a rogue-IdP config cert cannot be resolved.
+    // Crypto + structural join, resolving each cert's issuer key from the
+    // DNSSEC-proven set (access under its iss, config under ITS iss). Only proven
+    // issuers resolve, so a rogue-IdP cert cannot be verified.
     let verified = pres
         .verify(expected_audience, |q_iss| {
-            if q_iss == iss {
-                Ok(provider_key.clone())
-            } else {
-                Err(browserid_core::Error::InvalidCertificate(format!(
-                    "no DNSSEC-proven key for issuer '{q_iss}'"
-                )))
-            }
+            proven
+                .iter()
+                .find(|(i, ..)| i == q_iss)
+                .map(|(_, key, ..)| key.clone())
+                .ok_or_else(|| {
+                    browserid_core::Error::InvalidCertificate(format!(
+                        "no DNSSEC-proven key for issuer '{q_iss}'"
+                    ))
+                })
         })
         .map_err(|e| AttributionError::DevicePresentation(e.to_string()))?;
 
-    // 6. SBO signing-key binding: the envelope signer key == the access cert key.
+    // SBO signing-key binding: the envelope signer key == the access cert key.
     // SBO refers to keys as `ed25519:<hex>`; the access cert stores the key
     // base64url. Accept either encoding so the daemon (which passes the sbo form)
     // and base64 callers both verify. The canonical `key` we return is base64url.
@@ -175,19 +239,25 @@ pub fn verify_device_attribution_with_provider_key(
         return Err(AttributionError::KeyMismatch);
     }
 
-    // Window = intersection of the DNSSEC proof window and the access cert window.
-    let valid_from = inception.max(ac.iat);
-    let valid_until = expiration.min(ac.exp);
+    // Window = intersection of every proof window and the access cert window.
+    let mut valid_from = ac.iat;
+    let mut valid_until = ac.exp;
+    for (_iss, _key, inception, expiration) in proven {
+        valid_from = valid_from.max(*inception);
+        valid_until = valid_until.min(*expiration);
+    }
     if valid_from > valid_until {
         return Err(AttributionError::EmptyWindow);
     }
 
     Ok(DeviceAttribution {
-        email,
+        email: verified.email.clone(),
+        grantee,
         holder: ac.holder.clone(),
         key: cert_key,
         scopes: verified.scopes.clone(),
-        issuer: iss,
+        issuer: verified.issuer.clone(),
+        grantee_issuer: grantee_iss,
         valid_from,
         valid_until,
         verified,

@@ -9,7 +9,7 @@ description = "Client-side capture of browserid certificates + DNSSEC evidence (
 sbo-core.workspace = true
 # DEV: temporary path dep (see sbo-core/Cargo.toml). REVERT to a pushed git rev
 # once browserid-ng main is pushed.
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "b2e4f82" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "2582555" }
 dnssec-prover = { version = "0.6.8", features = ["tokio"] }
 reqwest = { version = "0.12", features = ["json", "cookies"] }
 serde.workspace = true

@@ -4,7 +4,8 @@
 
 use sbo_core::authorize::{
     audience_identifies_db, authorize_owner, authorized_write_email, encode_auth_evidence_inline,
-    message_attribution, presentation_audience, presentation_issuer, AuthzOutcome,
+    message_attribution, parse_auth_evidence, presentation_audience, presentation_issuer,
+    AuthzOutcome,
 };
 use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
@@ -165,7 +166,6 @@ pub fn primary_domain(state: &dyn StateView) -> Option<String> {
 /// write acts as.
 fn device_effective_email(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Option<String> {
     let presentation = msg.auth_cert.as_deref()?;
-    let evidence = resolve_evidence(msg, state)?;
     let db = l2.db.as_ref()?;
     // The presentation's warrant audience must identify THIS database; the exact
     // audience string is what the verifier enforces the assertion + warrant bind
@@ -176,10 +176,13 @@ fn device_effective_email(msg: &Message, state: &dyn StateView, l2: &L2Context) 
     }
     // An unknown block time cannot satisfy any DNSSEC/cert window → fail closed.
     let inclusion_time = l2.inclusion_time?;
+    // Per-issuer evidence: the attribution verifier proves the grantee's issuer
+    // (access cert) and — for a delegated grant that crosses issuers — the
+    // grantor's issuer (config cert), resolving each independently on-chain.
     let attr = message_attribution(
         &msg.signing_key.to_string(),
         Some(presentation),
-        Some(&evidence),
+        |iss| resolve_issuer_evidence(msg, state, iss),
         &aud,
         inclusion_time,
         &l2.anchors,
@@ -236,6 +239,29 @@ pub fn resolve_evidence(msg: &Message, state: &dyn StateView) -> Option<String> 
             Some(encode_auth_evidence_inline(&bytes))
         }
     }
+}
+
+/// Resolve the RFC 9102 DNSSEC proof BYTES for a specific `issuer`. A message
+/// carries at most one `Auth-Evidence` slot, which (when present) proves the
+/// presentation's OWN access-cert issuer; every other issuer — including the
+/// grantor's issuer in a cross-issuer delegated grant — resolves from the
+/// self-authenticating on-chain `/sys/dnssec/<issuer>` object. Absent proof →
+/// `None`, and the signer is then simply unattributed (fail-closed).
+pub fn resolve_issuer_evidence(msg: &Message, state: &dyn StateView, issuer: &str) -> Option<Vec<u8>> {
+    let access_iss = presentation_issuer(msg.auth_cert.as_deref()?);
+    if access_iss.as_deref() == Some(issuer) {
+        match msg.auth_evidence.as_deref() {
+            Some(inline) if inline.starts_with("inline:") => return parse_auth_evidence(inline).ok(),
+            Some(reference) if reference.starts_with("ref:") => {
+                let target = reference.trim_start_matches("ref:");
+                return fetch_evidence_object(state, target);
+            }
+            Some(_) => return None, // unrecognized form
+            None => {}
+        }
+    }
+    // Conventional on-chain proof object for this issuer.
+    fetch_evidence_object(state, &format!("/sys/dnssec/{issuer}"))
 }
 
 /// Fetch a referenced evidence object's payload (the RFC 9102 DNSSEC chain) by

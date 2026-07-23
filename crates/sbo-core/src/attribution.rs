@@ -142,6 +142,9 @@ pub enum AttributionError {
     /// issuer was supplied (needed to verify the parent certificate).
     #[error("cross-issuer warrant is missing DNSSEC evidence for the delegator's issuer")]
     MissingDelegatorEvidence,
+    /// No DNSSEC evidence could be resolved for this issuer (grantee or grantor).
+    #[error("missing DNSSEC evidence for issuer '{0}'")]
+    MissingIssuerEvidence(String),
     /// The issuer is neither the email's domain nor a pinned broker.
     #[error("issuer '{iss}' is not authorized for email domain '{domain}'")]
     IssuerNotAuthorized {

@@ -56,7 +56,7 @@ fn artifacts(scopes: Vec<String>, aud: &str, holder: &str) -> Artifacts {
     )
     .unwrap();
     let warrant = Warrant::create(
-        IDENTITY, HolderMatcher::new(holder).unwrap(), aud, scopes, Duration::days(90), &config, None,
+        IDENTITY, IDENTITY, HolderMatcher::new(holder).unwrap(), aud, scopes, Duration::days(90), &config, None,
     )
     .unwrap();
     let assertion = Assertion::create(aud, Duration::days(1), &access).unwrap();

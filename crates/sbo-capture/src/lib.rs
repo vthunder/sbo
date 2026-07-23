@@ -150,7 +150,7 @@ pub async fn capture_evidence(resolver: SocketAddr, domain: &str) -> Result<Vec<
 // ===========================================================================
 
 use browserid_core::device::{
-    AccessCert, AccessPresentation, AccessRequest, DeviceCert, Subject, Warrant,
+    AccessCert, AccessPresentation, AccessRequest, DeviceCert, HolderMatcher, Warrant,
 };
 use browserid_core::{Assertion, KeyPair};
 use chrono::Duration;
@@ -334,10 +334,13 @@ pub async fn capture_device_attribution(
 
     // Device-signed request to mint a cert for the fresh access key.
     let jti = format!("{:016x}", rand_u64());
+    // The device cert carries a broker-assigned holder; the access cert copies it
+    // (the mint must not change it) and the warrant matcher binds to it exactly.
+    let holder = device_cert.holder().clone();
     let access_request = AccessRequest::create(
         &issuer,
         email,
-        Subject::User,
+        holder.clone(),
         &access_key.public_key(),
         &jti,
         &device_key,
@@ -345,10 +348,15 @@ pub async fn capture_device_attribution(
     .map_err(|e| CaptureError::BadCertificate(e.to_string()))?;
     let access_cert = broker.access_mint(&device_cert, &access_request).await?;
 
-    // Client-signed warrant (config cert) + assertion (access key) → bundle.
+    // Client-signed warrant (config cert) + assertion (access key) → bundle. This
+    // is an as-you capture: grantor == grantee == the user's own identity, bound
+    // to the device's specific holder (`<id>` matcher).
+    let holder_matcher = HolderMatcher::new(holder.as_str())
+        .map_err(|e| CaptureError::BadCertificate(e.to_string()))?;
     let warrant = Warrant::create(
         email,
-        Subject::User,
+        email,
+        holder_matcher,
         audience,
         scopes,
         Duration::days(90),
@@ -531,7 +539,7 @@ mod tests {
         let attribution = sbo_core::device_attribution::verify_device_attribution(
             &captured.access_key.public_key().to_base64(),
             &captured.presentation,
-            &evidence,
+            |_iss| Some(evidence.clone()),
             &audience,
             now,
             &anchors,
