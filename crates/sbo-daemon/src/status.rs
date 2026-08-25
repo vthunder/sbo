@@ -27,6 +27,16 @@ use sbo_core::browserid_core::{PublicKey, StatusListToken, StatusRef};
 /// How long a fetched list or support-document key is served from cache.
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// How long a FAILED fetch is remembered (mirrors the broker verifier's
+/// negative cache, audit M4 follow-up): a blackholed status URI otherwise
+/// stalls every submit for the client timeout. Short, so a recovering
+/// authority is retried quickly; still fail-closed either way.
+const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+
+/// Bound on cached entries — status URIs arrive inside attacker-authored
+/// presentations at the submit gate.
+const MAX_ENTRIES: usize = 1024;
+
 struct CachedList {
     token: StatusListToken,
     fetched_at: Instant,
@@ -41,6 +51,8 @@ pub struct StatusChecker {
     client: reqwest::Client,
     lists: RwLock<HashMap<String, CachedList>>,
     keys: RwLock<HashMap<String, CachedKey>>,
+    /// uri → (failed_at, reason): the negative cache.
+    failures: RwLock<HashMap<String, (Instant, String)>>,
 }
 
 impl Default for StatusChecker {
@@ -58,6 +70,7 @@ impl StatusChecker {
                 .expect("reqwest client"),
             lists: RwLock::new(HashMap::new()),
             keys: RwLock::new(HashMap::new()),
+            failures: RwLock::new(HashMap::new()),
         }
     }
 
@@ -83,12 +96,39 @@ impl StatusChecker {
                 return Ok(c.token.clone());
             }
         }
-        let token = self.fetch_and_verify(uri).await?;
-        self.lists.write().unwrap().insert(
-            uri.to_string(),
-            CachedList { token: token.clone(), fetched_at: Instant::now() },
-        );
-        Ok(token)
+        // Recently failed → refuse instantly instead of re-stalling on the
+        // network (still fail-closed).
+        if let Some((at, reason)) = self.failures.read().unwrap().get(uri) {
+            if at.elapsed() < NEGATIVE_TTL {
+                return Err(format!("{reason} (cached failure)"));
+            }
+        }
+        match self.fetch_and_verify(uri).await {
+            Ok(token) => {
+                self.failures.write().unwrap().remove(uri);
+                let mut lists = self.lists.write().unwrap();
+                if lists.len() >= MAX_ENTRIES && !lists.contains_key(uri) {
+                    lists.retain(|_, c| c.fetched_at.elapsed() < CACHE_TTL);
+                }
+                if lists.len() < MAX_ENTRIES || lists.contains_key(uri) {
+                    lists.insert(
+                        uri.to_string(),
+                        CachedList { token: token.clone(), fetched_at: Instant::now() },
+                    );
+                }
+                Ok(token)
+            }
+            Err(e) => {
+                let mut neg = self.failures.write().unwrap();
+                if neg.len() >= MAX_ENTRIES && !neg.contains_key(uri) {
+                    neg.retain(|_, (at, _)| at.elapsed() < NEGATIVE_TTL);
+                }
+                if neg.len() < MAX_ENTRIES || neg.contains_key(uri) {
+                    neg.insert(uri.to_string(), (Instant::now(), e.clone()));
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn fetch_and_verify(&self, uri: &str) -> Result<StatusListToken, String> {
@@ -187,6 +227,19 @@ mod tests {
         )];
         let err = checker.check_all(&refs).await.unwrap_err();
         assert!(err.contains("fail-closed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn repeat_failure_is_served_from_the_negative_cache() {
+        let checker = StatusChecker::new();
+        let refs = vec![(
+            "warrant",
+            StatusRef { uri: "https://localhost:1/.well-known/browserid-status-neg".into(), idx: 1 },
+        )];
+        let first = checker.check_all(&refs).await.unwrap_err();
+        assert!(!first.contains("cached failure"), "{first}");
+        let second = checker.check_all(&refs).await.unwrap_err();
+        assert!(second.contains("cached failure"), "{second}");
     }
 
     #[tokio::test]
