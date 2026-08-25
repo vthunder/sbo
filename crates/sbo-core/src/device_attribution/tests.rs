@@ -87,6 +87,7 @@ fn device_attribution_roundtrip_ok() {
         expiration,
         AUDIENCE,
         now,
+        None,
         &anchors(),
     )
     .expect("valid bundle should attribute");
@@ -145,6 +146,7 @@ fn delegated_attribution_lands_on_grantor() {
         now + 3600,
         AUDIENCE,
         now,
+        None,
         &anchors(),
     )
     .expect("delegated bundle should attribute to the grantor");
@@ -173,6 +175,7 @@ fn wrong_sbo_key_is_rejected() {
         now + 3600,
         AUDIENCE,
         now,
+        None,
         &anchors(),
     )
     .unwrap_err();
@@ -194,6 +197,7 @@ fn rogue_provider_key_fails_signature() {
         now + 3600,
         AUDIENCE,
         now,
+        None,
         &anchors(),
     )
     .unwrap_err();
@@ -213,6 +217,7 @@ fn audience_mismatch_is_rejected() {
         now + 3600,
         "sbo+raw://avail:turing:999/", // wrong audience
         now,
+        None,
         &anchors(),
     )
     .unwrap_err();
@@ -232,6 +237,7 @@ fn inclusion_time_outside_dnssec_window_is_rejected() {
         now + 7200,
         AUDIENCE,
         now,
+        None,
         &anchors(),
     )
     .unwrap_err();
@@ -239,4 +245,52 @@ fn inclusion_time_outside_dnssec_window_is_rejected() {
         err,
         AttributionError::EvidenceWindowMismatch { .. }
     ));
+}
+
+#[test]
+fn replay_judges_expiries_at_the_authoring_instant() {
+    // Deterministic replay (module Window/clock note): a write whose 5-minute
+    // assertion was valid when AUTHORED must still attribute when a node
+    // replays the block later — and must not attribute at an instant past the
+    // assertion's life. Build a bundle whose assertion expired 1h ago.
+    let idp = KeyPair::generate();
+    let access_key = KeyPair::generate();
+    let config_key = KeyPair::generate();
+    let access_cert = AccessCert::create(
+        IDP_DOMAIN, EMAIL, Holder::new("svc.sbo").unwrap(),
+        &access_key.public_key(), Duration::hours(24), &idp, None,
+    ).unwrap();
+    let config_cert = DeviceCert::create(
+        IDP_DOMAIN, &config_key.public_key(), Purpose::Authorization,
+        Holder::new("svc.sbo").unwrap(), vec![EMAIL.to_string()],
+        Duration::days(90), &idp, None,
+    ).unwrap();
+    let warrant = Warrant::create(
+        EMAIL, EMAIL, HolderMatcher::new("svc.sbo").unwrap(), AUDIENCE,
+        vec![], Duration::days(90), &config_key, None,
+    ).unwrap();
+    let stale_assertion = Assertion::create(AUDIENCE, Duration::hours(-1), &access_key).unwrap();
+    let authored = stale_assertion.claims().exp - 60; // inside its life
+    let pres = AccessPresentation { access_cert, assertion: stale_assertion, warrant, config_cert };
+
+    let now = chrono::Utc::now().timestamp();
+    let call = |authored_at: Option<i64>| {
+        verify_device_attribution_with_provider_key(
+            &access_key.public_key().to_base64(),
+            AccessPresentation::parse(&pres.encode()).unwrap(),
+            &idp.public_key(),
+            now - 7200,
+            now + 7200,
+            AUDIENCE,
+            now, // inclusion: the block landed after the assertion expired
+            authored_at,
+            &anchors(),
+        )
+    };
+    // At the HLC-bounded authoring instant: attributes.
+    assert!(call(Some(authored)).is_ok());
+    // Without an authoring instant, expiries are judged at inclusion — the
+    // assertion is dead there, so attribution fails (deterministically, not
+    // because of anyone's wall clock).
+    assert!(call(None).is_err());
 }

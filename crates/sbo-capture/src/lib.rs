@@ -542,6 +542,7 @@ mod tests {
             |_iss| Some(evidence.clone()),
             &audience,
             now,
+            None,
             &anchors,
         )
         .expect("captured device attribution should verify");

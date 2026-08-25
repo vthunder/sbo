@@ -116,6 +116,7 @@ pub fn message_attribution(
     get_evidence: impl Fn(&str) -> Option<Vec<u8>>,
     expected_audience: &str,
     inclusion_time: i64,
+    authored_at: Option<i64>,
     anchors: &TrustAnchors,
 ) -> Option<DeviceAttribution> {
     let pres = presentation?;
@@ -125,6 +126,7 @@ pub fn message_attribution(
         get_evidence,
         expected_audience,
         inclusion_time,
+        authored_at,
         anchors,
     )
     .ok()
@@ -448,8 +450,8 @@ mod tests {
     fn message_attribution_none_without_presentation() {
         let anchors = TrustAnchors::default();
         let aud = "sbo+raw://avail:turing:506/";
-        assert!(message_attribution("k", None, |_: &str| Some(vec![0u8]), aud, 0, &anchors).is_none());
-        assert!(message_attribution("k", Some("pres"), |_: &str| None::<Vec<u8>>, aud, 0, &anchors).is_none());
+        assert!(message_attribution("k", None, |_: &str| Some(vec![0u8]), aud, 0, None, &anchors).is_none());
+        assert!(message_attribution("k", Some("pres"), |_: &str| None::<Vec<u8>>, aud, 0, None, &anchors).is_none());
     }
 
     // ---- device-warrant helpers ----

@@ -122,6 +122,7 @@ fn verify(a: &Artifacts, msg: &Message) -> Result<String, String> {
         i64::MAX,
         &aud,
         now,
+        None,
         &anchors(),
     )
     .map_err(|e| e.to_string())?;

@@ -34,13 +34,18 @@
 //!
 //! ## Window / clock note
 //!
-//! `AccessPresentation::verify` checks cert/assertion/warrant expiries against
-//! wall-clock `now` (browserid-core semantics), whereas SBO replay uses
-//! `inclusion_time`. This path additionally pins the DNSSEC window and the
-//! access-cert window to `inclusion_time` (steps 3 + the returned window), so
-//! the *provider-key freshness* is inclusion-time-deterministic. The short-lived
-//! object expiries remain wall-clock inside `verify`; that is acceptable for the
-//! capture/verify roundtrip and flagged here for the later coordinated cleanup.
+//! Verification is **replay-deterministic end to end**: the DNSSEC windows are
+//! pinned to `inclusion_time` (step 3), and the presentation's own expiries
+//! (cert/assertion/warrant) are evaluated via `verify_at` at the write's
+//! **authoring instant** — `authored_at` (the HLC-bounded claimed authoring
+//! time, in seconds) when the caller supplies one, else `inclusion_time`.
+//! This is what lets a node replaying a block years later agree with a node
+//! that validated it live: the 5-minute assertion is judged as of when the
+//! write was authored, not as of whoever's wall clock. Callers MUST only pass
+//! an `authored_at` already validated against the Content Spec ordering bound
+//! (`T_b − W ≤ authored ≤ T_b + ε`) — the daemon's HLC gate runs before
+//! attribution — so the instant cannot be back-dated beyond `W` to resurrect
+//! an expired credential.
 
 use browserid_core::device::{AccessPresentation, Holder, VerifiedAccess};
 
@@ -125,6 +130,7 @@ pub fn verify_device_attribution(
     get_evidence: impl Fn(&str) -> Option<Vec<u8>>,
     expected_audience: &str,
     inclusion_time: i64,
+    authored_at: Option<i64>,
     anchors: &TrustAnchors,
 ) -> Result<DeviceAttribution, AttributionError> {
     // Parse the 4-object bundle so we know which issuers' TXT records to look for.
@@ -154,6 +160,7 @@ pub fn verify_device_attribution(
         &proven,
         expected_audience,
         inclusion_time,
+        authored_at,
         anchors,
     )
 }
@@ -175,6 +182,7 @@ pub fn verify_device_attribution_with_provider_key(
     expiration: i64,
     expected_audience: &str,
     inclusion_time: i64,
+    authored_at: Option<i64>,
     anchors: &TrustAnchors,
 ) -> Result<DeviceAttribution, AttributionError> {
     let iss = pres.access_cert.claims().iss.clone();
@@ -185,6 +193,7 @@ pub fn verify_device_attribution_with_provider_key(
         &proven,
         expected_audience,
         inclusion_time,
+        authored_at,
         anchors,
     )
 }
@@ -200,6 +209,7 @@ pub fn verify_device_attribution_with_provider_keys(
     proven: &[(String, browserid_core::PublicKey, i64, i64)],
     expected_audience: &str,
     inclusion_time: i64,
+    authored_at: Option<i64>,
     anchors: &TrustAnchors,
 ) -> Result<DeviceAttribution, AttributionError> {
     let ac = pres.access_cert.claims();
@@ -240,8 +250,11 @@ pub fn verify_device_attribution_with_provider_keys(
     // Crypto + structural join, resolving each cert's issuer key from the
     // DNSSEC-proven set (access under its iss, config under ITS iss). Only proven
     // issuers resolve, so a rogue-IdP cert cannot be verified.
+    // Replay-deterministic clock (module docs): expiries as of the write's
+    // authoring instant, else its inclusion — never the wall clock.
+    let at = authored_at.unwrap_or(inclusion_time);
     let verified = pres
-        .verify(expected_audience, |q_iss| {
+        .verify_at(expected_audience, at, |q_iss| {
             proven
                 .iter()
                 .find(|(i, ..)| i == q_iss)

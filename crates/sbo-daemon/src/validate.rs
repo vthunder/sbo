@@ -176,6 +176,17 @@ fn device_effective_email(msg: &Message, state: &dyn StateView, l2: &L2Context) 
     }
     // An unknown block time cannot satisfy any DNSSEC/cert window → fail closed.
     let inclusion_time = l2.inclusion_time?;
+    // The write's HLC-bounded authoring instant (seconds): the ordering gate
+    // (stage 2.25) already enforced `T_b − W ≤ physical ≤ T_b + ε`, so this is
+    // deterministic and cannot be back-dated beyond W. Presentation expiries
+    // are judged at this instant (the 5-minute assertion was valid when the
+    // write was AUTHORED — replay must agree with live validation, not with
+    // whoever's wall clock). Absent an HLC: inclusion_time.
+    let authored_at = msg
+        .hlc
+        .as_deref()
+        .and_then(|h| sbo_core::hlc::Hlc::parse(h).ok())
+        .map(|h| h.physical / 1000);
     // Per-issuer evidence: the attribution verifier proves the grantee's issuer
     // (access cert) and — for a delegated grant that crosses issuers — the
     // grantor's issuer (config cert), resolving each independently on-chain.
@@ -185,6 +196,7 @@ fn device_effective_email(msg: &Message, state: &dyn StateView, l2: &L2Context) 
         |iss| resolve_issuer_evidence(msg, state, iss),
         &aud,
         inclusion_time,
+        authored_at,
         &l2.anchors,
     )?;
     authorized_write_email(

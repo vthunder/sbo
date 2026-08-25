@@ -1101,7 +1101,7 @@ dependencies = [
 [[package]]
 name = "browserid-core"
 version = "0.1.0"
-source = "git+https://github.com/vthunder/browserid-ng?rev=73d4625#73d46251ea6d35775371bc23b6cfce29e30697f5"
+source = "git+https://github.com/vthunder/browserid-ng?rev=b83cce1#b83cce110fbb41cd11640ceeb3496d33b4fa924f"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6067,7 +6067,7 @@ name = "sbo-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "browserid-core 0.1.0 (git+https://github.com/vthunder/browserid-ng?rev=73d4625)",
+ "browserid-core 0.1.0 (git+https://github.com/vthunder/browserid-ng?rev=b83cce1)",
  "chrono",
  "dirs 5.0.1",
  "dnssec-prover",
