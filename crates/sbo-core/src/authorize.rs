@@ -255,6 +255,14 @@ pub fn scopes_authorize(
             Some(("path", v)) => paths.push(v),
             Some(("schema", v)) => schemas.push(v),
             Some(("as", _)) => {} // identity selector — not a write constraint here
+            // browserid signing grants (spec §5): `sign:sbo:<action>` names
+            // what the user's wallet may be asked to sign — on this side it
+            // constrains the write's action, exactly like `action:<v>`. Any
+            // other `sign:` kind is not an SBO write authorization.
+            Some(("sign", v)) => match v.strip_prefix("sbo:") {
+                Some(act) => acts.push(act),
+                None => return false, // unrecognized sign: kind ⇒ fail closed
+            },
             _ => return false, // unrecognized dimension ⇒ fail closed
         }
     }
@@ -485,6 +493,14 @@ mod tests {
         assert!(!scopes_authorize(&sc, "post", "/x", None));
         // unknown dimension fails closed; `as:` recognized (non-constraining).
         assert!(!scopes_authorize(&["frobnicate:yes".to_string()], "post", "/x", None));
+        // browserid signing-grant scopes: `sign:sbo:<action>` constrains the
+        // action like `action:<v>`; other sign: kinds fail closed.
+        let sc = vec!["sign:sbo:post".to_string()];
+        assert!(scopes_authorize(&sc, "post", "/attestor/note", None));
+        assert!(!scopes_authorize(&sc, "delete", "/attestor/note", None));
+        let sc = vec!["sign:sbo:post".to_string(), "sign:sbo:delete".to_string()];
+        assert!(scopes_authorize(&sc, "delete", "/x", None));
+        assert!(!scopes_authorize(&["sign:ledger:entry".to_string()], "post", "/x", None));
         assert!(scopes_authorize(&["as:human@example.com".to_string(), "path:/u/**".to_string()], "post", "/u/a", None));
     }
 
@@ -509,7 +525,9 @@ mod tests {
                 email: email.to_string(),
                 grantee: email.to_string(),
                 holder: Holder::new("svc.sbo").unwrap(),
+                scope_entries: scopes.iter().cloned().map(Into::into).collect(),
                 scopes,
+                req_origin: None,
                 issuer: "example.com".to_string(),
                 grantee_issuer: "example.com".to_string(),
                 access_status: None,

@@ -137,6 +137,9 @@ struct DaemonState {
     /// node never reorders its own writes on-chain. Single-repo model → one
     /// global queue; a multi-repo daemon would key this per DA target.
     submit_queue: std::sync::Arc<sbo_daemon::submit_queue::SubmitQueue>,
+    /// Fail-closed revocation checks for submitted presentations (browserid
+    /// §6.3) — submission-gate only; replay stays deterministic (status.rs).
+    status_checker: std::sync::Arc<sbo_daemon::status::StatusChecker>,
 }
 
 impl DaemonState {
@@ -186,6 +189,7 @@ impl DaemonState {
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
             trust_gate,
             submit_queue: sbo_daemon::submit_queue::SubmitQueue::new(),
+            status_checker: std::sync::Arc::new(sbo_daemon::status::StatusChecker::new()),
         })
     }
 }
@@ -630,6 +634,17 @@ impl RepoApi for DaemonState {
                 ValidationResult::Valid { .. } => {}
                 ValidationResult::Invalid { stage, reason } => {
                     return Err(ApiError::bad_request(format!("{stage:?}: {reason}")));
+                }
+            }
+            // Fail-closed revocation gate (browserid §6.3): refuse a NEW write
+            // whose presentation carries a revoked — or uncheckable — status
+            // ref. Submission-time only: replay validation stays deterministic
+            // against inclusion time (see status.rs module docs).
+            if let Some(pres) = msg.auth_cert.as_deref() {
+                let refs = sbo_core::device_attribution::presentation_status_refs(pres)
+                    .unwrap_or_default();
+                if let Err(reason) = self.status_checker.check_all(&refs).await {
+                    return Err(ApiError::bad_request(format!("revocation: {reason}")));
                 }
             }
             let object_hash = sbo_core::sha256(&sbo_core::wire::serialize(msg));

@@ -84,6 +84,31 @@ pub struct DeviceAttribution {
     pub verified: VerifiedAccess,
 }
 
+/// The revocation status refs a presentation's chain objects carry, labeled
+/// (access cert → its IdP, config cert → its IdP, warrant → broker registry;
+/// spec §6.3). A parse-only projection — no verification — for callers that
+/// already verified the presentation and must run the fail-closed status
+/// checks at a NON-consensus enforcement point (the daemon's submit gate:
+/// replay validation is deterministic against inclusion time and must not
+/// consult live revocation state, so the checks run where wall-clock
+/// enforcement is sound). `None` if the presentation does not parse.
+pub fn presentation_status_refs(
+    presentation: &str,
+) -> Option<Vec<(&'static str, browserid_core::StatusRef)>> {
+    let pres = AccessPresentation::parse(presentation).ok()?;
+    let mut refs = Vec::new();
+    if let Some(r) = &pres.access_cert.claims().status {
+        refs.push(("access cert", r.clone()));
+    }
+    if let Some(r) = &pres.config_cert.claims().status {
+        refs.push(("config cert", r.clone()));
+    }
+    if let Some(r) = &pres.warrant.claims().status {
+        refs.push(("warrant", r.clone()));
+    }
+    Some(refs)
+}
+
 /// Verify a device-model attribution end-to-end, validating the DNSSEC proof
 /// offline against the hardcoded IANA root. See the module docs for the
 /// algorithm. `inclusion_time` is in UNIX seconds.

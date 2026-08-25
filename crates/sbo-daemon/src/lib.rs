@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod bootstrap;
 pub mod trust;
 pub mod state_view;
+pub mod status;
 pub mod prover;
 
 use thiserror::Error;

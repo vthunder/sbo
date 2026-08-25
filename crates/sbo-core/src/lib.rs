@@ -29,6 +29,11 @@ pub mod resolve;
 pub mod authorize;
 pub mod hlc;
 
+// Re-exported so downstream crates (the daemon's submit-gate status checks)
+// use the same browserid-core the attribution verifier is built against,
+// instead of pinning a second copy of the git dep.
+pub use browserid_core;
+
 mod genesis;
 #[cfg(feature = "storage")]
 mod indexer;
