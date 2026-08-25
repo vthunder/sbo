@@ -161,7 +161,7 @@ pub enum AttributionError {
 /// Validate the RFC 9102 proof offline and extract the provider Ed25519 key
 /// (from `_browserid.<iss>`) together with the proof's RRSig validity window
 /// `(inception, expiration)` in UNIX seconds.
-pub(crate) fn extract_provider_key(
+pub fn extract_provider_key(
     auth_evidence: &[u8],
     iss: &str,
 ) -> Result<(PublicKey, i64, i64), AttributionError> {

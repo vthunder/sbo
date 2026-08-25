@@ -11,18 +11,24 @@
 //! (deterministic replay).
 //!
 //! List authenticity: each status list is a signed `browserid-status-list-v1`
-//! JWS. The signer key is fetched from the list origin's
-//! `/.well-known/browserid` support document over TLS — the same key that
-//! origin publishes for its certificates. This roots the check in WebPKI
-//! rather than DNSSEC (the on-chain evidence covers issuers, not the broker
-//! registry origin); the fetch of the list itself is TLS to the URI named
-//! inside a signed credential, so the signature guards the cache/CDN path.
+//! JWS, verified against the authority's **DNSSEC-published key** — resolved
+//! by the caller from the on-chain `/sys/dnssec/<authority>` evidence, the
+//! same root the attribution verifier uses. Support documents deliberately
+//! carry NO key (a TLS-served key is a downgrade vector; the `_browserid`
+//! record is the sole root of trust), so there is nothing to fetch besides
+//! the list itself. The token's `iss` must equal the chain object's own
+//! authority (an access cert's list is signed by its issuing IdP), and the
+//! signature + `sub == uri` bind the list to the URI the credential named.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use sbo_core::browserid_core::{PublicKey, StatusListToken, StatusRef};
+
+/// A DNSSEC-proven authority key with its RRSig validity window (UNIX
+/// seconds), as [`sbo_core::attribution::extract_provider_key`] returns it.
+pub type AuthorityKey = (PublicKey, i64, i64);
 
 /// How long a fetched list or support-document key is served from cache.
 const CACHE_TTL: Duration = Duration::from_secs(300);
@@ -42,15 +48,9 @@ struct CachedList {
     fetched_at: Instant,
 }
 
-struct CachedKey {
-    key: PublicKey,
-    fetched_at: Instant,
-}
-
 pub struct StatusChecker {
     client: reqwest::Client,
     lists: RwLock<HashMap<String, CachedList>>,
-    keys: RwLock<HashMap<String, CachedKey>>,
     /// uri → (failed_at, reason): the negative cache.
     failures: RwLock<HashMap<String, (Instant, String)>>,
 }
@@ -69,18 +69,24 @@ impl StatusChecker {
                 .build()
                 .expect("reqwest client"),
             lists: RwLock::new(HashMap::new()),
-            keys: RwLock::new(HashMap::new()),
             failures: RwLock::new(HashMap::new()),
         }
     }
 
     /// Check every ref fail-closed: `Err(reason)` if any is revoked OR cannot
-    /// be checked (unreachable list, bad signature, stale token). `Ok(())`
-    /// only when every ref is affirmatively unrevoked.
-    pub async fn check_all(&self, refs: &[(&'static str, StatusRef)]) -> Result<(), String> {
-        for (label, r) in refs {
+    /// be checked (unreachable list, unresolvable authority, bad signature,
+    /// stale token). `Ok(())` only when every ref is affirmatively unrevoked.
+    /// `keys` maps authority domains to their DNSSEC-proven keys (+ RRSig
+    /// windows) — resolved by the caller from on-chain evidence; a ref whose
+    /// authority is absent fails closed.
+    pub async fn check_all(
+        &self,
+        refs: &[(&'static str, StatusRef, String)],
+        keys: &HashMap<String, AuthorityKey>,
+    ) -> Result<(), String> {
+        for (label, r, authority) in refs {
             let token = self
-                .list_for(&r.uri)
+                .list_for(&r.uri, authority, keys)
                 .await
                 .map_err(|e| format!("{label} status unavailable (fail-closed): {e}"))?;
             if token.is_revoked(r.idx) {
@@ -90,7 +96,12 @@ impl StatusChecker {
         Ok(())
     }
 
-    async fn list_for(&self, uri: &str) -> Result<StatusListToken, String> {
+    async fn list_for(
+        &self,
+        uri: &str,
+        authority: &str,
+        keys: &HashMap<String, AuthorityKey>,
+    ) -> Result<StatusListToken, String> {
         if let Some(c) = self.lists.read().unwrap().get(uri) {
             if c.fetched_at.elapsed() < CACHE_TTL {
                 return Ok(c.token.clone());
@@ -103,7 +114,7 @@ impl StatusChecker {
                 return Err(format!("{reason} (cached failure)"));
             }
         }
-        match self.fetch_and_verify(uri).await {
+        match self.fetch_and_verify(uri, authority, keys).await {
             Ok(token) => {
                 self.failures.write().unwrap().remove(uri);
                 let mut lists = self.lists.write().unwrap();
@@ -131,9 +142,27 @@ impl StatusChecker {
         }
     }
 
-    async fn fetch_and_verify(&self, uri: &str) -> Result<StatusListToken, String> {
+    async fn fetch_and_verify(
+        &self,
+        uri: &str,
+        authority: &str,
+        keys: &HashMap<String, AuthorityKey>,
+    ) -> Result<StatusListToken, String> {
         if !uri.starts_with("https://") {
             return Err(format!("status uri '{uri}' is not https"));
+        }
+        let (key, inception, expiration) = keys
+            .get(authority)
+            .ok_or_else(|| format!("no on-chain DNSSEC evidence for status authority '{authority}'"))?;
+        // The DNSSEC proof must be live NOW — this is a wall-clock gate, not
+        // replay validation. Stale evidence is refreshed by clients posting a
+        // fresh /sys/dnssec/<authority> proof (mingo does before each write).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if now < *inception || now > *expiration {
+            return Err(format!("DNSSEC evidence for '{authority}' is outside its validity window"));
         }
         let body = self
             .client
@@ -147,9 +176,18 @@ impl StatusChecker {
             .map_err(|e| format!("read {uri}: {e}"))?;
         let token =
             StatusListToken::parse(body.trim()).map_err(|e| format!("parse list at {uri}: {e}"))?;
-        let key = self.origin_key(uri).await?;
+        // The list's declared issuer must BE the chain object's own authority
+        // (an access cert's list is signed by its issuing IdP) — then the
+        // signature under the DNSSEC-proven key + `sub == uri` bind the list
+        // to the URI the credential named.
+        if token.claims().iss != authority {
+            return Err(format!(
+                "list at {uri} is signed by '{}', not the credential's authority '{authority}'",
+                token.claims().iss
+            ));
+        }
         token
-            .verify(&key, uri)
+            .verify(key, uri)
             .map_err(|e| format!("verify list at {uri}: {e}"))?;
         // Freshness, with a consumer-imposed ttl ceiling (audit M3): a served
         // token older than its advertised (capped) lifetime fails closed.
@@ -158,64 +196,48 @@ impl StatusChecker {
         }
         Ok(token)
     }
-
-    /// The list origin's published signing key, from its `/.well-known/browserid`
-    /// support document (TLS-rooted).
-    async fn origin_key(&self, list_uri: &str) -> Result<PublicKey, String> {
-        let origin = origin_of(list_uri).ok_or_else(|| format!("bad status uri '{list_uri}'"))?;
-        if let Some(c) = self.keys.read().unwrap().get(&origin) {
-            if c.fetched_at.elapsed() < CACHE_TTL {
-                return Ok(c.key.clone());
-            }
-        }
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            #[serde(rename = "public-key")]
-            public_key: Option<PublicKey>,
-        }
-        let url = format!("{origin}/.well-known/browserid");
-        let doc: Doc = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("fetch {url}: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("parse {url}: {e}"))?;
-        let key = doc
-            .public_key
-            .ok_or_else(|| format!("{url} carries no public-key"))?;
-        self.keys.write().unwrap().insert(
-            origin,
-            CachedKey { key: key.clone(), fetched_at: Instant::now() },
-        );
-        Ok(key)
-    }
-}
-
-fn origin_of(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("https://")?;
-    let host = rest.split('/').next()?;
-    if host.is_empty() {
-        return None;
-    }
-    Some(format!("https://{host}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn origin_extraction() {
-        assert_eq!(
-            origin_of("https://browserid.me/.well-known/browserid-status").as_deref(),
-            Some("https://browserid.me")
-        );
-        assert_eq!(origin_of("http://x/y"), None);
-        assert_eq!(origin_of("https:///y"), None);
+    fn key_for(authority: &str) -> HashMap<String, AuthorityKey> {
+        let kp = sbo_core::browserid_core::KeyPair::generate();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        HashMap::from([(authority.to_string(), (kp.public_key(), now - 3600, now + 3600))])
+    }
+
+    #[tokio::test]
+    async fn unresolvable_authority_fails_closed_before_any_fetch() {
+        let checker = StatusChecker::new();
+        let refs = vec![(
+            "warrant",
+            StatusRef { uri: "https://localhost:1/.well-known/browserid-status-noauth".into(), idx: 1 },
+            "browserid.me".to_string(),
+        )];
+        let err = checker.check_all(&refs, &HashMap::new()).await.unwrap_err();
+        assert!(err.contains("no on-chain DNSSEC evidence"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn expired_evidence_fails_closed() {
+        let checker = StatusChecker::new();
+        let kp = sbo_core::browserid_core::KeyPair::generate();
+        let keys = HashMap::from([(
+            "browserid.me".to_string(),
+            (kp.public_key(), 0i64, 1i64), // window long past
+        )]);
+        let refs = vec![(
+            "warrant",
+            StatusRef { uri: "https://localhost:1/.well-known/browserid-status-expired".into(), idx: 1 },
+            "browserid.me".to_string(),
+        )];
+        let err = checker.check_all(&refs, &keys).await.unwrap_err();
+        assert!(err.contains("outside its validity window"), "{err}");
     }
 
     #[tokio::test]
@@ -224,8 +246,9 @@ mod tests {
         let refs = vec![(
             "warrant",
             StatusRef { uri: "https://localhost:1/.well-known/browserid-status".into(), idx: 1 },
+            "browserid.me".to_string(),
         )];
-        let err = checker.check_all(&refs).await.unwrap_err();
+        let err = checker.check_all(&refs, &key_for("browserid.me")).await.unwrap_err();
         assert!(err.contains("fail-closed"), "{err}");
     }
 
@@ -235,16 +258,18 @@ mod tests {
         let refs = vec![(
             "warrant",
             StatusRef { uri: "https://localhost:1/.well-known/browserid-status-neg".into(), idx: 1 },
+            "browserid.me".to_string(),
         )];
-        let first = checker.check_all(&refs).await.unwrap_err();
+        let keys = key_for("browserid.me");
+        let first = checker.check_all(&refs, &keys).await.unwrap_err();
         assert!(!first.contains("cached failure"), "{first}");
-        let second = checker.check_all(&refs).await.unwrap_err();
+        let second = checker.check_all(&refs, &keys).await.unwrap_err();
         assert!(second.contains("cached failure"), "{second}");
     }
 
     #[tokio::test]
     async fn no_refs_is_ok() {
         let checker = StatusChecker::new();
-        assert!(checker.check_all(&[]).await.is_ok());
+        assert!(checker.check_all(&[], &HashMap::new()).await.is_ok());
     }
 }

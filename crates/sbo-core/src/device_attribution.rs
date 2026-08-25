@@ -89,29 +89,48 @@ pub struct DeviceAttribution {
     pub verified: VerifiedAccess,
 }
 
-/// The revocation status refs a presentation's chain objects carry, labeled
-/// (access cert → its IdP, config cert → its IdP, warrant → broker registry;
-/// spec §6.3). A parse-only projection — no verification — for callers that
-/// already verified the presentation and must run the fail-closed status
+/// The revocation status refs a presentation's chain objects carry — labeled,
+/// each with the DOMAIN whose DNSSEC-published key signs that status list
+/// (spec §6.3): the access cert's list is signed by its issuing IdP, the
+/// config cert's by ITS IdP, and the warrant's by the broker registry at the
+/// ref URI's host. A parse-only projection — no verification — for callers
+/// that already verified the presentation and must run the fail-closed status
 /// checks at a NON-consensus enforcement point (the daemon's submit gate:
 /// replay validation is deterministic against inclusion time and must not
 /// consult live revocation state, so the checks run where wall-clock
-/// enforcement is sound). `None` if the presentation does not parse.
+/// enforcement is sound). The authority is what the checker resolves a
+/// DNSSEC-proven key for — support documents deliberately carry NO key (a
+/// TLS-served key is a downgrade vector; the `_browserid` record is the sole
+/// root). `None` if the presentation does not parse.
 pub fn presentation_status_refs(
     presentation: &str,
-) -> Option<Vec<(&'static str, browserid_core::StatusRef)>> {
+) -> Option<Vec<(&'static str, browserid_core::StatusRef, String)>> {
     let pres = AccessPresentation::parse(presentation).ok()?;
     let mut refs = Vec::new();
     if let Some(r) = &pres.access_cert.claims().status {
-        refs.push(("access cert", r.clone()));
+        refs.push(("access cert", r.clone(), pres.access_cert.claims().iss.clone()));
     }
     if let Some(r) = &pres.config_cert.claims().status {
-        refs.push(("config cert", r.clone()));
+        refs.push(("config cert", r.clone(), pres.config_cert.claims().iss.clone()));
     }
     if let Some(r) = &pres.warrant.claims().status {
-        refs.push(("warrant", r.clone()));
+        if let Some(host) = uri_host(&r.uri) {
+            refs.push(("warrant", r.clone(), host.to_string()));
+        } else {
+            // Malformed authority URI: surface a ref the checker cannot
+            // resolve, so it fails closed rather than being skipped.
+            refs.push(("warrant", r.clone(), String::new()));
+        }
     }
     Some(refs)
+}
+
+/// The host of an `https://…` status URI (port stripped) — the domain whose
+/// `_browserid` record roots the list's signing key.
+fn uri_host(uri: &str) -> Option<&str> {
+    let rest = uri.strip_prefix("https://").or_else(|| uri.strip_prefix("http://"))?;
+    let host = rest.split('/').next()?.split(':').next()?;
+    (!host.is_empty()).then_some(host)
 }
 
 /// Verify a device-model attribution end-to-end, validating the DNSSEC proof

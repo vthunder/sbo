@@ -639,11 +639,34 @@ impl RepoApi for DaemonState {
             // Fail-closed revocation gate (browserid §6.3): refuse a NEW write
             // whose presentation carries a revoked — or uncheckable — status
             // ref. Submission-time only: replay validation stays deterministic
-            // against inclusion time (see status.rs module docs).
+            // against inclusion time (see status.rs module docs). Each list is
+            // verified against its authority's DNSSEC-proven key, resolved
+            // from the same on-chain /sys/dnssec/<authority> evidence the
+            // attribution verifier uses — support documents deliberately
+            // carry no key (the _browserid record is the sole root of trust).
             if let Some(pres) = msg.auth_cert.as_deref() {
                 let refs = sbo_core::device_attribution::presentation_status_refs(pres)
                     .unwrap_or_default();
-                if let Err(reason) = self.status_checker.check_all(&refs).await {
+                let mut authority_keys = std::collections::HashMap::new();
+                for (_, _, authority) in &refs {
+                    if authority.is_empty() || authority_keys.contains_key(authority) {
+                        continue;
+                    }
+                    let Some(evidence) = sbo_daemon::validate::fetch_evidence_object(
+                        &overlay,
+                        &format!("/sys/dnssec/{authority}"),
+                    ) else {
+                        continue; // absent evidence ⇒ check_all fails closed
+                    };
+                    if let Ok(key) =
+                        sbo_core::attribution::extract_provider_key(&evidence, authority)
+                    {
+                        authority_keys.insert(authority.clone(), key);
+                    }
+                }
+                if let Err(reason) =
+                    self.status_checker.check_all(&refs, &authority_keys).await
+                {
                     return Err(ApiError::bad_request(format!("revocation: {reason}")));
                 }
             }
