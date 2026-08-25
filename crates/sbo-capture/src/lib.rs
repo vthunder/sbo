@@ -385,14 +385,18 @@ pub async fn capture_device_attribution(
 /// A small non-crypto random u64 for the access-request `jti` (single-use nonce
 /// checked at the mint; uniqueness, not unpredictability, is what matters here).
 fn rand_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    // A process-wide counter guarantees distinctness even when the clock is
+    // too coarse to separate two calls (observed: back-to-back calls in one
+    // frame collided — same nanos, same stack address).
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    // Mix in the address of a stack local for a little extra entropy.
-    let mix = &nanos as *const u64 as u64;
-    nanos ^ mix.rotate_left(17)
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    nanos ^ n.rotate_left(32) ^ (&nanos as *const u64 as u64).rotate_left(17)
 }
 
 #[cfg(test)]

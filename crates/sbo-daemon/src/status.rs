@@ -53,6 +53,13 @@ pub struct StatusChecker {
     lists: RwLock<HashMap<String, CachedList>>,
     /// uri → (failed_at, reason): the negative cache.
     failures: RwLock<HashMap<String, (Instant, String)>>,
+    /// authority → live-captured key (+ RRSig window), cached briefly. The
+    /// submit gate is a WALL-CLOCK check, not consensus: when the chain's
+    /// /sys/dnssec copy is absent or its window has lapsed, the daemon
+    /// captures a fresh RFC 9102 proof itself rather than failing closed on
+    /// client refresh hygiene. Verification is unchanged — offline against
+    /// the pinned IANA root — only the proof's transport differs.
+    live_keys: RwLock<HashMap<String, (AuthorityKey, Instant)>>,
 }
 
 impl Default for StatusChecker {
@@ -70,7 +77,49 @@ impl StatusChecker {
                 .expect("reqwest client"),
             lists: RwLock::new(HashMap::new()),
             failures: RwLock::new(HashMap::new()),
+            live_keys: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The usable key for `authority`: the on-chain evidence's when its
+    /// window covers now, else a freshly captured live proof (cached). `None`
+    /// ⇒ the caller's check fails closed.
+    pub async fn authority_key(
+        &self,
+        authority: &str,
+        on_chain: Option<AuthorityKey>,
+    ) -> Option<AuthorityKey> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Some((_, inception, expiration)) = &on_chain {
+            if now >= *inception && now <= *expiration {
+                return on_chain;
+            }
+        }
+        {
+            let cached = self.live_keys.read().unwrap();
+            if let Some((key, at)) = cached.get(authority) {
+                if at.elapsed() < CACHE_TTL {
+                    return Some(key.clone());
+                }
+            }
+        }
+        let resolver: std::net::SocketAddr = sbo_capture::DEFAULT_RESOLVER.parse().ok()?;
+        let proof = sbo_capture::capture_evidence(resolver, authority).await.ok()?;
+        let key = sbo_core::attribution::extract_provider_key(&proof, authority).ok()?;
+        if now < key.1 || now > key.2 {
+            return None;
+        }
+        let mut cached = self.live_keys.write().unwrap();
+        if cached.len() >= MAX_ENTRIES && !cached.contains_key(authority) {
+            cached.retain(|_, (_, at)| at.elapsed() < CACHE_TTL);
+        }
+        if cached.len() < MAX_ENTRIES || cached.contains_key(authority) {
+            cached.insert(authority.to_string(), (key.clone(), Instant::now()));
+        }
+        Some(key)
     }
 
     /// Check every ref fail-closed: `Err(reason)` if any is revoked OR cannot

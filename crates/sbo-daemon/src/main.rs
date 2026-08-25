@@ -652,14 +652,19 @@ impl RepoApi for DaemonState {
                     if authority.is_empty() || authority_keys.contains_key(authority) {
                         continue;
                     }
-                    let Some(evidence) = sbo_daemon::validate::fetch_evidence_object(
+                    // On-chain evidence when live, else a freshly captured
+                    // proof (status.rs::authority_key) — the gate must not
+                    // fail closed just because no client has re-posted the
+                    // chain copy since its RRSig lapsed.
+                    let on_chain = sbo_daemon::validate::fetch_evidence_object(
                         &overlay,
                         &format!("/sys/dnssec/{authority}"),
-                    ) else {
-                        continue; // absent evidence ⇒ check_all fails closed
-                    };
-                    if let Ok(key) =
-                        sbo_core::attribution::extract_provider_key(&evidence, authority)
+                    )
+                    .and_then(|ev| {
+                        sbo_core::attribution::extract_provider_key(&ev, authority).ok()
+                    });
+                    if let Some(key) =
+                        self.status_checker.authority_key(authority, on_chain).await
                     {
                         authority_keys.insert(authority.clone(), key);
                     }
