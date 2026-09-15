@@ -53,6 +53,39 @@ pub struct TurboDaConfig {
     /// App ID associated with this API key (informational - determined by TurboDA)
     #[serde(default)]
     pub app_id: Option<u32>,
+    /// Per-repo credentials for a daemon that follows several databases: a
+    /// submission for a repo on `app_id` uses that entry's key; a repo with
+    /// no entry falls back to the default key above only when the default
+    /// `app_id` matches (or is unset). Overridable per app id at runtime with
+    /// `SBO_TURBO_DA_API_KEY_<app_id>` (see `apply_env_overrides`).
+    #[serde(default)]
+    pub repos: Vec<TurboDaRepoConfig>,
+}
+
+/// One TurboDA credential, scoped to an Avail app id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurboDaRepoConfig {
+    pub app_id: u32,
+    pub api_key: String,
+}
+
+impl TurboDaConfig {
+    /// The API key to submit with for `app_id` (`None` = the default target).
+    pub fn api_key_for(&self, app_id: Option<u32>) -> Result<&str, String> {
+        if let Some(id) = app_id {
+            if let Some(r) = self.repos.iter().find(|r| r.app_id == id) {
+                return Ok(&r.api_key);
+            }
+            if self.app_id.is_some_and(|d| d != id) {
+                return Err(format!(
+                    "no TurboDA credentials for app {id} (set [[turbo_da.repos]] or SBO_TURBO_DA_API_KEY_{id})"
+                ));
+            }
+        }
+        self.api_key
+            .as_deref()
+            .ok_or_else(|| "TurboDA API key not configured".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -251,6 +284,7 @@ impl Default for Config {
                 endpoint: "https://staging.turbo-api.availproject.org".to_string(),
                 api_key: None,
                 app_id: None,
+                repos: Vec::new(),
             },
             alerts: AlertsConfig::default(),
             prover: ProverConfig::default(),
@@ -283,6 +317,16 @@ impl Config {
         if let Ok(key) = std::env::var("SBO_TURBO_DA_API_KEY") {
             if !key.is_empty() {
                 self.turbo_da.api_key = Some(key);
+            }
+        }
+        // Per-app credentials: SBO_TURBO_DA_API_KEY_<app_id>=<key> (one per
+        // followed database whose writes this node submits).
+        for (k, v) in std::env::vars() {
+            let Some(id) = k.strip_prefix("SBO_TURBO_DA_API_KEY_") else { continue };
+            let (Ok(app_id), false) = (id.parse::<u32>(), v.is_empty()) else { continue };
+            match self.turbo_da.repos.iter_mut().find(|r| r.app_id == app_id) {
+                Some(r) => r.api_key = v,
+                None => self.turbo_da.repos.push(TurboDaRepoConfig { app_id, api_key: v }),
             }
         }
         // Checkpoint/snapshot cadence — overridable at runtime so it can be tuned
@@ -385,6 +429,12 @@ endpoint = "https://staging.turbo-api.availproject.org"
 
 # App ID associated with your API key (informational only)
 # app_id = 506
+#
+# Per-repo credentials when this node follows (and submits to) several
+# databases — env override: SBO_TURBO_DA_API_KEY_<app_id>=<key>.
+# [[turbo_da.repos]]
+# app_id = 530
+# api_key = "..."
 
 # ------------------------------------------------------------------------------
 # Alerts Settings (Optional)
@@ -444,5 +494,43 @@ verify_objects = true
     /// Get the config file path
     pub fn config_path() -> PathBuf {
         Self::sbo_dir().join("config.toml")
+    }
+}
+
+#[cfg(test)]
+mod turbo_credentials_tests {
+    use super::*;
+
+    fn cfg(default_app: Option<u32>) -> TurboDaConfig {
+        TurboDaConfig {
+            endpoint: "x".into(),
+            api_key: Some("default-key".into()),
+            app_id: default_app,
+            repos: vec![TurboDaRepoConfig { app_id: 530, api_key: "key-530".into() }],
+        }
+    }
+
+    #[test]
+    fn selects_the_repo_key_then_the_default_only_when_it_matches() {
+        let c = cfg(Some(506));
+        assert_eq!(c.api_key_for(Some(530)).unwrap(), "key-530");
+        assert_eq!(c.api_key_for(Some(506)).unwrap(), "default-key");
+        assert_eq!(c.api_key_for(None).unwrap(), "default-key");
+        assert!(c.api_key_for(Some(999)).unwrap_err().contains("no TurboDA credentials for app 999"));
+        // An unpinned default key serves any app without its own entry.
+        assert_eq!(cfg(None).api_key_for(Some(999)).unwrap(), "default-key");
+    }
+
+    #[test]
+    fn env_override_adds_or_replaces_a_repo_key() {
+        std::env::set_var("SBO_TURBO_DA_API_KEY_530", "env-530");
+        std::env::set_var("SBO_TURBO_DA_API_KEY_777", "env-777");
+        let mut c = Config::default();
+        c.turbo_da = cfg(Some(506));
+        c.apply_env_overrides();
+        std::env::remove_var("SBO_TURBO_DA_API_KEY_530");
+        std::env::remove_var("SBO_TURBO_DA_API_KEY_777");
+        assert_eq!(c.turbo_da.api_key_for(Some(530)).unwrap(), "env-530");
+        assert_eq!(c.turbo_da.api_key_for(Some(777)).unwrap(), "env-777");
     }
 }

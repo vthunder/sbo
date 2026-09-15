@@ -34,11 +34,18 @@ impl TurboDaClient {
         }
     }
 
-    /// Submit raw data to TurboDA
+    /// Submit raw data to TurboDA with the default credentials.
     pub async fn submit_raw(&self, data: &[u8]) -> crate::Result<SubmissionResult> {
-        let api_key = self.config.api_key.as_ref().ok_or_else(|| {
-            crate::DaemonError::TurboDa("TurboDA API key not configured".to_string())
-        })?;
+        self.submit_raw_for(None, data).await
+    }
+
+    /// Submit raw data for the database on `app_id` (`None` = the default
+    /// target), selecting that app's credentials (`TurboDaConfig::api_key_for`).
+    pub async fn submit_raw_for(&self, app_id: Option<u32>, data: &[u8]) -> crate::Result<SubmissionResult> {
+        let api_key = self
+            .config
+            .api_key_for(app_id)
+            .map_err(crate::DaemonError::TurboDa)?;
 
         let url = format!("{}/v1/submit_raw_data", self.config.endpoint);
 

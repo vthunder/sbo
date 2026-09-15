@@ -6112,6 +6112,7 @@ dependencies = [
  "avail-rust-client",
  "axum",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "dirs 5.0.1",
  "flate2",

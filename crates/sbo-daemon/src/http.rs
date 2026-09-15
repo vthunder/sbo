@@ -172,6 +172,11 @@ pub struct SubmitResultView {
     /// Hex `object_hash` of the accepted write; clients can poll for it to flip
     /// to `confirmed: true`.
     pub hash: String,
+    /// Issuer domains whose `/sys/dnssec/<domain>` evidence this node refreshed
+    /// (and enqueued ahead of the write) because the on-chain copy would not
+    /// have covered the write's inclusion. Empty when nothing was needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refreshed: Vec<String>,
 }
 
 /// Data operations the `/v1/*` routes need from the daemon's state. `repo` (the
@@ -236,7 +241,9 @@ pub trait RepoApi: Send + Sync + 'static {
         Ok(None)
     }
 
-    async fn submit(&self, data: Vec<u8>) -> Result<SubmitResultView, ApiError>;
+    /// Validate, stage and enqueue a write for `repo` (`None` = the sole
+    /// followed repo). Ensures issuer DNSSEC evidence first (`evidence.rs`).
+    async fn submit(&self, repo: Option<&str>, data: Vec<u8>) -> Result<SubmitResultView, ApiError>;
 }
 
 /// Request to create a new auth request
@@ -407,13 +414,14 @@ async fn list_objects_v1<S: RepoApi>(
 /// is the wire-format envelope(s); the daemon forwards it unchanged.
 async fn submit_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
+    Query(q): Query<StateRootParams>,
     body: Bytes,
 ) -> Result<Json<SubmitResultView>, ApiError> {
     if body.is_empty() {
         return Err(ApiError::bad_request("empty submit body"));
     }
     let state = state.read().await;
-    let result = state.submit(body.to_vec()).await?;
+    let result = state.submit(q.repo.as_deref(), body.to_vec()).await?;
     Ok(Json(result))
 }
 
@@ -982,11 +990,12 @@ mod tests {
         fn state_root(&self, _repo: Option<&str>) -> Result<StateRootView, ApiError> {
             Ok(StateRootView { block: 7, state_root: "ab".repeat(32) })
         }
-        async fn submit(&self, _data: Vec<u8>) -> Result<SubmitResultView, ApiError> {
+        async fn submit(&self, _repo: Option<&str>, _data: Vec<u8>) -> Result<SubmitResultView, ApiError> {
             Ok(SubmitResultView {
                 submission_id: "sub-123".to_string(),
                 accepted: true,
                 pending: true,
+                evidence_refreshed: Vec::new(),
                 hash: "ab".repeat(16),
             })
         }

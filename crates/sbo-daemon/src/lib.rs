@@ -19,6 +19,7 @@ pub mod bootstrap;
 pub mod trust;
 pub mod state_view;
 pub mod status;
+pub mod evidence;
 pub mod prover;
 
 use thiserror::Error;

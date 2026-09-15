@@ -172,6 +172,18 @@ identity and `agent.parent` as provenance.
 ## 5. Evidence freshness
 
 A `/sys/dnssec/<domain>` proof is refreshed before its RRSIG window lapses.
+
+> **Operational note (non-normative, reference daemon since 2026-09-15).** A
+> submitting node ensures evidence *at write time*: `POST /v1/submit`
+> collects every issuer the batch's attribution will need (the access-cert
+> and config-cert issuers of a device-model presentation; the `iss` of a
+> legacy identity JWT), and for each whose on-chain proof would not cover
+> inclusion (now + a margin, default 3600 s) captures a fresh RFC 9102 proof
+> and enqueues a self-authorizing `dnssec.v1` refresh **ahead of** the write,
+> so the refresh precedes it in chain order. The response lists them in
+> `evidence_refreshed`. Clients need no refresh logic of their own; a writer
+> that bypasses the daemon (submitting straight to the DA layer) remains
+> responsible for freshness itself.
 Because the proof is what authorizes an email-rooted write, a stale or
 wrong-key proof breaks attribution for that domain until refreshed — so proof
 freshness (and correct IdP key rotation) is operationally load-bearing.

@@ -122,6 +122,9 @@ struct DaemonState {
     #[allow(dead_code)]
     rpc: RpcClient,
     turbo: TurboDaClient,
+    /// TurboDA credentials per DA target — consulted at submit time so a
+    /// repo this node cannot submit for is refused up front.
+    turbo_config: sbo_daemon::config::TurboDaConfig,
     /// Pending sign requests from apps (keyed by request_id)
     sign_requests: HashMap<String, IpcSignRequest>,
     /// Shared mempool overlay (validated-but-unconfirmed writes). Cloned into the
@@ -153,6 +156,7 @@ impl DaemonState {
         let lc = LcManager::new(config.light_client.clone());
         let rpc = RpcClient::new(config.rpc.clone(), false, false, false);
         let turbo = TurboDaClient::new(config.turbo_da.clone());
+        let turbo_config = config.turbo_da.clone();
 
         // Load a persisted fast-sync anchor (if `bootstrap` left one) so reads
         // stay gated until the walk-forward promotes it. Absent for full-replay
@@ -185,6 +189,7 @@ impl DaemonState {
             lc,
             rpc,
             turbo,
+            turbo_config,
             sign_requests: HashMap::new(),
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
             trust_gate,
@@ -594,25 +599,31 @@ impl RepoApi for DaemonState {
         Ok(std::fs::read(&file).ok())
     }
 
-    async fn submit(&self, data: Vec<u8>) -> Result<SubmitResultView, ApiError> {
+    async fn submit(&self, repo_sel: Option<&str>, data: Vec<u8>) -> Result<SubmitResultView, ApiError> {
         use sbo_daemon::validate::{
             message_to_stored_object, validate_message, L2Context, ValidationResult,
         };
 
         // Parse the wire envelope(s). A malformed body is a hard 400 — far
         // better UX than today's silent DA-layer filtering.
-        let messages = sbo_core::wire::parse_batch(&data)
+        let client_messages = sbo_core::wire::parse_batch(&data)
             .map_err(|e| ApiError::bad_request(format!("wire parse failed: {e}")))?;
-        if messages.is_empty() {
+        if client_messages.is_empty() {
             return Err(ApiError::bad_request("no SBO messages in submit body"));
         }
 
-        // Validate against the daemon's sole repo's confirmed state **plus** the
+        // Validate against the selected repo's confirmed state **plus** the
         // mempool's pending tip (Phase B: pending-aware validation via Overlay).
         // Validating against confirmed+pending lets chained optimistic writes
         // (e.g. join → post in one submit) succeed before the earlier write has
         // landed in a block.
-        let repo = resolve_repo(&self.repos, None)?;
+        let repo = resolve_repo(&self.repos, repo_sel)?;
+        let app_id = Some(repo.uri.app_id.0);
+        // Refuse up front when this node cannot submit for the repo at all —
+        // otherwise the write would sit in the queue retrying forever.
+        self.turbo_config
+            .api_key_for(app_id)
+            .map_err(|e| ApiError::bad_request(format!("cannot submit for {}: {e}", repo.display_uri)))?;
         let db = repo
             .state_db()
             .map_err(|e| ApiError::internal(format!("Failed to open state db: {e}")))?;
@@ -623,6 +634,36 @@ impl RepoApi for DaemonState {
         // messages in the same submit observe it.
         let snapshot = self.pending.read().unwrap().snapshot();
         let mut overlay = sbo_daemon::state_view::Overlay::new(&db, snapshot);
+
+        // Write-time evidence (evidence.rs): every issuer this batch's
+        // attribution will need must have `/sys/dnssec/<issuer>` on chain
+        // covering inclusion. Refresh what is stale/absent and put the refresh
+        // objects AHEAD of the client's messages — they validate and stage
+        // through the same pipeline, and the client's own attribution check
+        // below then sees the fresh copy in the overlay.
+        let mut issuers: Vec<String> = Vec::new();
+        for m in &client_messages {
+            for d in sbo_daemon::evidence::required_issuers(m) {
+                if !issuers.contains(&d) {
+                    issuers.push(d);
+                }
+            }
+        }
+        let deadline = now + sbo_daemon::evidence::DEFAULT_MARGIN_SECS;
+        let stale = sbo_daemon::evidence::stale_issuers(&overlay, &issuers, deadline);
+        let refreshes = sbo_daemon::evidence::build_refreshes(&stale)
+            .await
+            .map_err(|e| ApiError::internal(format!("issuer evidence: {e}")))?;
+        let evidence_refreshed: Vec<String> = refreshes.iter().map(|(d, _)| d.clone()).collect();
+        let mut messages: Vec<sbo_core::message::Message> = Vec::new();
+        let mut refresh_wires: Vec<Vec<u8>> = Vec::new();
+        for (domain, wire) in refreshes {
+            let mut parsed = sbo_core::wire::parse_batch(&wire)
+                .map_err(|e| ApiError::internal(format!("evidence refresh for {domain}: {e}")))?;
+            messages.append(&mut parsed);
+            refresh_wires.push(wire);
+        }
+        messages.extend(client_messages);
 
         // Fully validate every message and pre-build its overlay object before
         // mutating the pool, so a rejected message leaves the pool untouched.
@@ -717,7 +758,17 @@ impl RepoApi for DaemonState {
         // + this in-memory queue until the batch lands. A crash before DA-submit
         // loses it (client re-submits on non-confirmation) — same class as the
         // pending pool. Not persisted deliberately (see submit_queue.rs).
-        self.submit_queue.enqueue(data).await;
+        for wire in refresh_wires {
+            self.submit_queue.enqueue_for(app_id, wire).await;
+        }
+        self.submit_queue.enqueue_for(app_id, data).await;
+        if !evidence_refreshed.is_empty() {
+            tracing::info!(
+                "refreshed issuer DNSSEC evidence ahead of a write on {}: {}",
+                repo.display_uri,
+                evidence_refreshed.join(", ")
+            );
+        }
         Ok(SubmitResultView {
             // No DA submission_id at accept time — the real id belongs to the
             // batch the scheduler submits later. Clients track acceptance by
@@ -726,6 +777,7 @@ impl RepoApi for DaemonState {
             accepted: true,
             pending: true,
             hash: last_hash,
+            evidence_refreshed,
         })
     }
 }
@@ -2004,7 +2056,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             // Route through the ordered finality-gated queue (bean sbo-hy4r) so
             // node-emitted writes never reorder relative to /v1/submit content.
             let app_id = repo.uri.app_id;
-            state.submit_queue.enqueue(data).await;
+            state.submit_queue.enqueue_for(Some(app_id.0), data).await;
             Response::ok(serde_json::json!({
                 "submission_id": serde_json::Value::Null,
                 "app_id": app_id,

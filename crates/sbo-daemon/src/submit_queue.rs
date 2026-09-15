@@ -51,7 +51,10 @@ use tokio::sync::{Mutex, Notify};
 /// concatenating entries yields a single valid `parse_batch` payload whose
 /// messages come back out in enqueue order.
 pub struct SubmitQueue {
-    inner: Mutex<VecDeque<Vec<u8>>>,
+    /// `(app_id, wire)` — the DA target the write belongs to, so a node that
+    /// follows several databases batches per target while keeping each
+    /// target's submission order.
+    inner: Mutex<VecDeque<(Option<u32>, Vec<u8>)>>,
     /// Wakes the scheduler when the queue transitions from empty → non-empty, so
     /// the idle case awaits instead of busy-spinning.
     notify: Notify,
@@ -67,27 +70,39 @@ impl SubmitQueue {
 
     /// Enqueue one accepted write's wire bytes at the tail (submission order).
     pub async fn enqueue(&self, wire: Vec<u8>) {
-        self.inner.lock().await.push_back(wire);
+        self.enqueue_for(None, wire).await
+    }
+
+    /// Enqueue a write destined for the database on `app_id` (`None` = the
+    /// default target).
+    pub async fn enqueue_for(&self, app_id: Option<u32>, wire: Vec<u8>) {
+        self.inner.lock().await.push_back((app_id, wire));
         // notify_one stores a permit if no waiter is parked, so a wakeup racing
         // an enqueue is never lost.
         self.notify.notify_one();
     }
 
-    /// Drain the ENTIRE queue, in order, into a single batch payload: the ordered
-    /// concatenation of every queued write's wire bytes. Returns `None` if empty.
+    /// Drain the head run of the queue — every leading write bound for the
+    /// same DA target, in order — into one batch payload: the ordered
+    /// concatenation of their wire bytes. Returns `(app_id, batch)`, or `None`
+    /// if empty. Writes for another target stay queued for the next batch, so
+    /// each target's submission order is preserved.
     ///
     /// The result is a valid multi-message batch: `parse_batch` splits it back
     /// into the same messages in the same order (see the round-trip unit test).
-    pub async fn drain_batch(&self) -> Option<Vec<u8>> {
+    pub async fn drain_batch(&self) -> Option<(Option<u32>, Vec<u8>)> {
         let mut q = self.inner.lock().await;
-        if q.is_empty() {
-            return None;
-        }
+        let (target, _) = q.front()?;
+        let target = *target;
         let mut batch = Vec::new();
-        for wire in q.drain(..) {
+        while let Some((t, _)) = q.front() {
+            if *t != target {
+                break;
+            }
+            let (_, wire) = q.pop_front().expect("front exists");
             batch.extend_from_slice(&wire);
         }
-        Some(batch)
+        Some((target, batch))
     }
 
     /// Current queued entry count (not byte size). For tests/metrics.
@@ -122,6 +137,7 @@ pub trait DaSubmitter: Send + Sync + 'static {
     /// Submit a batch, returning its submission id on success.
     fn submit_batch(
         &self,
+        app_id: Option<u32>,
         data: &[u8],
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
 
@@ -173,7 +189,7 @@ pub async fn run_scheduler<S: DaSubmitter>(
 ) {
     loop {
         // (1) Get the next batch, idling on the notify while empty (no spin).
-        let batch = loop {
+        let (app_id, batch) = loop {
             if let Some(b) = queue.drain_batch().await {
                 break b;
             }
@@ -187,7 +203,7 @@ pub async fn run_scheduler<S: DaSubmitter>(
         // drop this (un-confirmed) batch and exit — the client re-submits on
         // non-confirmation (see the durability note at the top of this module).
         tokio::select! {
-            _ = submit_and_await_finalized(&submitter, &batch, &config) => {}
+            _ = submit_and_await_finalized(&submitter, app_id, &batch, &config) => {}
             _ = shutdown.notified() => return,
         }
     }
@@ -198,13 +214,14 @@ pub async fn run_scheduler<S: DaSubmitter>(
 /// polling) — never advances until finalization is observed.
 async fn submit_and_await_finalized<S: DaSubmitter>(
     submitter: &S,
+    app_id: Option<u32>,
     batch: &[u8],
     config: &SchedulerConfig,
 ) {
     // Submit, retrying forever with backoff until accepted.
     let mut backoff = config.initial_backoff;
     let submission_id = loop {
-        match submitter.submit_batch(batch).await {
+        match submitter.submit_batch(app_id, batch).await {
             Ok(id) => {
                 tracing::info!(
                     "DA batch submitted ({} bytes), submission_id={id}; awaiting finality",
@@ -244,8 +261,12 @@ async fn submit_and_await_finalized<S: DaSubmitter>(
 // ---------------------------------------------------------------------------
 
 impl DaSubmitter for crate::turbo::TurboDaClient {
-    async fn submit_batch(&self, data: &[u8]) -> Result<String, String> {
-        self.submit_raw(data)
+    async fn submit_batch(
+        &self,
+        app_id: Option<u32>,
+        data: &[u8],
+    ) -> Result<String, String> {
+        self.submit_raw_for(app_id, data)
             .await
             .map(|r| r.submission_id)
             .map_err(|e| e.to_string())
@@ -335,7 +356,7 @@ Signature: {sig}\n\
         assert_eq!(q.len().await, 4);
 
         // Drain the whole queue into one batch.
-        let batch = q.drain_batch().await.expect("non-empty");
+        let (_, batch) = q.drain_batch().await.expect("non-empty");
         assert!(q.is_empty().await, "drain must empty the queue");
 
         // The batch is the exact multi-message format parse_batch splits: the
@@ -362,7 +383,7 @@ Signature: {sig}\n\
         q.enqueue(entry_a).await;
         q.enqueue(wire_msg("b1", "{\"y\":1}")).await;
 
-        let batch = q.drain_batch().await.unwrap();
+        let (_, batch) = q.drain_batch().await.unwrap();
         let messages = sbo_core::wire::parse_batch(&batch).unwrap();
         let ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["a1", "a2", "b1"]);
@@ -379,7 +400,11 @@ Signature: {sig}\n\
     }
 
     impl DaSubmitter for FakeSubmitter {
-        async fn submit_batch(&self, data: &[u8]) -> Result<String, String> {
+        async fn submit_batch(
+        &self,
+        app_id: Option<u32>,
+        data: &[u8],
+    ) -> Result<String, String> {
             self.submitted.lock().await.push(data.to_vec());
             Ok("fake-submission".to_string())
         }
@@ -456,5 +481,18 @@ Signature: {sig}\n\
         let nested = serde_json::json!({ "data": { "state": "finalized", "block_number": 7 } });
         assert_eq!(parse_finality(&nested).block_number, Some(7));
         assert!(parse_finality(&nested).finalized);
+    }
+
+    #[tokio::test]
+    async fn drain_batch_splits_runs_per_da_target_in_order() {
+        let q = SubmitQueue::new();
+        q.enqueue_for(Some(506), b"a".to_vec()).await;
+        q.enqueue_for(Some(506), b"b".to_vec()).await;
+        q.enqueue_for(Some(530), b"c".to_vec()).await;
+        q.enqueue_for(Some(506), b"d".to_vec()).await;
+        assert_eq!(q.drain_batch().await, Some((Some(506), b"ab".to_vec())));
+        assert_eq!(q.drain_batch().await, Some((Some(530), b"c".to_vec())));
+        assert_eq!(q.drain_batch().await, Some((Some(506), b"d".to_vec())));
+        assert!(q.drain_batch().await.is_none());
     }
 }

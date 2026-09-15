@@ -64,6 +64,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+chrono = "0.4"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
