@@ -185,6 +185,7 @@ By default an agent write authorizes as the **agent's own identity** (`Auth-Cert
 
 - A warrant carrying **`as:<email>`** (where `<email>` MUST equal the warrant's `iss`) makes the **effective author** of writes under that warrant the **delegator** rather than the agent. The write's owner-authorization, `Creator` integrity, and name-claim checks all evaluate against the delegator.
 - Because a warrant is signed by the delegator, `as:` can only ever name the delegator themselves — an agent cannot be warranted to act as a third party.
+- The **device-cert model** (`Auth-Cert` carrying a four-object presentation, see the Attribution Specification §3) follows the same rule verbatim: the warrant's `grantee` (the access-cert identity that signs the envelope) is the effective author unless the warrant's scopes carry `as:<grantor>`, in which case the `grantor` is. A delegated grant with no `as:` is the agent acting as itself — never silently as the human.
 
 **Safety — delegation never exceeds the delegator.** An on-behalf write authorizes *as the delegator, under the same on-chain policy the delegator faces*. So it can do **at most what the delegator can do**, narrowed by the warrant's other scopes. It is not a policy bypass: a restriction the delegator is subject to still applies. The warrant can only ever *narrow* the delegator's authority, never widen it.
 

@@ -156,8 +156,9 @@ For an agent certificate, after §4 succeeds for the agent certificate itself:
     UNAUTHORIZED).
 
 13. **Effective author** — the write authorizes as the **agent** address by
-    default; if the warrant carries `as:<delegator>` (== `iss`, and combined
-    with a `path:` scope), the effective author is the **delegator**, so
+    default (device model: the warrant `grantee`); if the warrant carries
+    `as:<delegator>` (== `iss` — device model: == the warrant `grantor` — and
+    combined with a `path:` scope), the effective author is the **delegator**, so
     owner/`Creator`/name-claim checks evaluate against the delegator (an
     on-behalf write — see the Authorization Specification). An on-behalf write
     can never exceed what the delegator's own policy permits.

@@ -99,11 +99,15 @@ fn device_attribution_roundtrip_ok() {
     assert_eq!(attr.issuer, IDP_DOMAIN);
 }
 
-/// A DELEGATED (model-A) bundle: a distinct grantee service acts on behalf of a
-/// grantor user, same issuer. The access cert certifies the grantee (the actor
-/// that signs); the config cert authorizes the GRANTOR (the attributed identity);
-/// the warrant delegates grantor → grantee.
+/// A DELEGATED (model-A) bundle: a distinct grantee service acts under a
+/// grantor user's warrant, same issuer. The access cert certifies the grantee
+/// (the actor that signs); the config cert authorizes the GRANTOR (who
+/// delegated); the warrant delegates grantor → grantee with `scopes`.
 fn delegated_fixture() -> (AccessPresentation, KeyPair, KeyPair) {
+    delegated_fixture_with(vec!["action:post".to_string()])
+}
+
+fn delegated_fixture_with(scopes: Vec<String>) -> (AccessPresentation, KeyPair, KeyPair) {
     const GRANTOR: &str = "dan@mingo.place";
     const GRANTEE: &str = "mingo-poster@mingo.place";
     const ISS: &str = "mingo.place";
@@ -126,7 +130,7 @@ fn delegated_fixture() -> (AccessPresentation, KeyPair, KeyPair) {
     // Warrant delegates grantor → grantee, bound to the grantee's holder.
     let warrant = Warrant::create(
         GRANTOR, GRANTEE, HolderMatcher::new("svc.poster").unwrap(), AUDIENCE,
-        vec!["action:post".to_string()], Duration::days(90), &config_key, None,
+        scopes, Duration::days(90), &config_key, None,
     )
     .unwrap();
     let assertion = Assertion::create(AUDIENCE, Duration::days(1), &access_key).unwrap();
@@ -135,7 +139,7 @@ fn delegated_fixture() -> (AccessPresentation, KeyPair, KeyPair) {
 }
 
 #[test]
-fn delegated_attribution_lands_on_grantor() {
+fn delegated_attribution_lands_on_grantee_by_default() {
     let (pres, idp, access_key) = delegated_fixture();
     let now = chrono::Utc::now().timestamp();
     let attr = verify_device_attribution_with_provider_key(
@@ -149,12 +153,13 @@ fn delegated_attribution_lands_on_grantor() {
         None,
         &anchors(),
     )
-    .expect("delegated bundle should attribute to the grantor");
+    .expect("delegated bundle should attribute to the grantee");
 
-    // Attribution lands on the GRANTOR (effective author); the grantee is the
-    // actor of record (provenance). The holder is the grantee's.
-    assert_eq!(attr.email, "dan@mingo.place");
+    // No `as:` ⇒ the agent authors as ITSELF (Authorization Spec, "On-behalf
+    // writes"); the grantor is provenance. The holder is the grantee's.
+    assert_eq!(attr.email, "mingo-poster@mingo.place");
     assert_eq!(attr.grantee, "mingo-poster@mingo.place");
+    assert_eq!(attr.grantor, "dan@mingo.place");
     assert_eq!(attr.holder.as_str(), "svc.poster");
     assert_eq!(attr.issuer, "mingo.place");
     assert_eq!(attr.grantee_issuer, "mingo.place");
@@ -293,4 +298,59 @@ fn replay_judges_expiries_at_the_authoring_instant() {
     // assertion is dead there, so attribution fails (deterministically, not
     // because of anyone's wall clock).
     assert!(call(None).is_err());
+}
+
+fn attr_for(scopes: Vec<String>) -> Result<DeviceAttribution, AttributionError> {
+    let (pres, idp, access_key) = delegated_fixture_with(scopes);
+    let now = chrono::Utc::now().timestamp();
+    verify_device_attribution_with_provider_key(
+        &access_key.public_key().to_base64(),
+        pres,
+        &idp.public_key(),
+        now - 3600,
+        now + 3600,
+        AUDIENCE,
+        now,
+        None,
+        &anchors(),
+    )
+}
+
+#[test]
+fn as_grantor_makes_the_grantor_the_author() {
+    let attr = attr_for(vec![
+        "action:post".into(),
+        "path:/u/dan/**".into(),
+        "as:dan@mingo.place".into(),
+    ])
+    .expect("as:<grantor> with a path: scope is a valid on-behalf grant");
+    assert_eq!(attr.email, "dan@mingo.place");
+    assert_eq!(attr.grantee, "mingo-poster@mingo.place");
+    assert_eq!(attr.grantor, "dan@mingo.place");
+}
+
+#[test]
+fn as_someone_else_is_rejected() {
+    let err = attr_for(vec!["path:/u/**".into(), "as:mallory@mingo.place".into()]).unwrap_err();
+    assert!(matches!(err, AttributionError::InvalidAsScope(_)), "{err}");
+    // Even naming the grantee is wrong: `as:` selects the grantor only.
+    let err = attr_for(vec!["path:/u/**".into(), "as:mingo-poster@mingo.place".into()]).unwrap_err();
+    assert!(matches!(err, AttributionError::InvalidAsScope(_)), "{err}");
+}
+
+#[test]
+fn as_without_path_scope_is_rejected() {
+    let err = attr_for(vec!["action:post".into(), "as:dan@mingo.place".into()]).unwrap_err();
+    assert!(matches!(err, AttributionError::InvalidAsScope(_)), "{err}");
+}
+
+#[test]
+fn two_as_scopes_are_rejected() {
+    let err = attr_for(vec![
+        "path:/u/**".into(),
+        "as:dan@mingo.place".into(),
+        "as:dan@mingo.place".into(),
+    ])
+    .unwrap_err();
+    assert!(matches!(err, AttributionError::InvalidAsScope(_)), "{err}");
 }

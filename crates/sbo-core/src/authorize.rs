@@ -287,9 +287,8 @@ pub fn scopes_authorize(
 /// presentation is already crypto-verified into `attr` (identity, subject,
 /// scopes, all bound to the presentation's audience). This enforces the
 /// remaining SBO-layer authorization: that the warrant's scopes permit THIS
-/// write's action/path/schema. On success returns the warrant identifier
-/// (`attr.email`) — the identity the write speaks for (a user or an agent,
-/// per `attr.subject`).
+/// write's action/path/schema. On success returns the effective author
+/// (`attr.email`): the grantee, or the grantor under `as:<grantor>`.
 ///
 /// Audience-identifies-database is checked by the caller *before* verification
 /// (it must pass the DB-matching audience as the presentation's
@@ -516,6 +515,7 @@ mod tests {
         DeviceAttribution {
             email: email.to_string(),
             grantee: email.to_string(),
+            grantor: email.to_string(),
             holder: Holder::new("svc.sbo").unwrap(),
             key: "ed25519:00".to_string(),
             scopes: scopes.clone(),

@@ -121,6 +121,10 @@ pub enum AttributionError {
     /// audience, or the `(identity, subject, audience)` join).
     #[error("device presentation verification failed: {0}")]
     DevicePresentation(String),
+    /// The warrant's `as:` scope is malformed: names someone other than the
+    /// grantor, appears more than once, or lacks the required `path:` scope.
+    #[error("invalid as: scope: {0}")]
+    InvalidAsScope(String),
     /// An agent certificate was presented without the required warrant.
     #[error("agent certificate requires an Auth-Warrant")]
     MissingWarrant,

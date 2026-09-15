@@ -57,15 +57,19 @@ use crate::attribution::{extract_provider_key, AttributionError, TrustAnchors};
 /// intersection of the DNSSEC proof window and the access cert window).
 #[derive(Debug, Clone)]
 pub struct DeviceAttribution {
-    /// The EFFECTIVE author: the warrant grantor — whom the write is attributed
-    /// to and whose ownership it can satisfy. Equals the actor (`grantee`) for an
-    /// as-you grant; the delegating user for a delegated on-behalf grant.
+    /// The EFFECTIVE author — whom the write is attributed to and whose
+    /// ownership it can satisfy (Authorization Spec, "On-behalf writes"): the
+    /// **grantee** (the agent acting as itself) unless the warrant carries
+    /// `as:<grantor>`, in which case the **grantor** (an on-behalf write).
     pub email: String,
     /// The ACTOR of record: the warrant grantee == the access cert identity (the
-    /// identity that minted the access cert and signs the SBO envelope). Equals
-    /// `email` for as-you grants; a distinct service for delegated grants
-    /// (provenance).
+    /// identity that minted the access cert and signs the SBO envelope).
+    /// Provenance — equals `email` except under `as:`.
     pub grantee: String,
+    /// The warrant grantor — who delegated. Equals `grantee` for a self-grant;
+    /// the delegating user for a delegated grant. Provenance — equals `email`
+    /// only under `as:`.
+    pub grantor: String,
     /// Which of the grantee's holders is acting (opaque, broker-assigned).
     /// Advisory — authorization keys off `email`/owner, not this.
     pub holder: Holder,
@@ -73,11 +77,11 @@ pub struct DeviceAttribution {
     pub key: String,
     /// The warrant's granted scopes (`<dimension>:<value>`; caller enforces).
     pub scopes: Vec<String>,
-    /// The IdP/broker domain that vouches for the ATTRIBUTED identity (`email`) —
-    /// the grantor's issuer (the config cert's `iss`).
+    /// The grantor's issuer (the config cert's `iss`) — vouches for `grantor`.
     pub issuer: String,
-    /// The grantee/actor's issuer (the access cert's `iss`). Equals `issuer` for
-    /// an as-you grant; may differ for a cross-issuer delegated grant.
+    /// The grantee/actor's issuer (the access cert's `iss`) — vouches for
+    /// `grantee`. Equals `issuer` for a self-grant; may differ for a
+    /// cross-issuer delegated grant.
     pub grantee_issuer: String,
     /// Start of the validity window (UNIX seconds, inclusive).
     pub valid_from: i64,
@@ -307,9 +311,16 @@ pub fn verify_device_attribution_with_provider_keys(
         return Err(AttributionError::EmptyWindow);
     }
 
+    // Effective author (Authorization Spec, "On-behalf writes"): the agent by
+    // default; `as:<grantor>` selects the grantor, and MUST name exactly the
+    // grantor, appear at most once, and travel with a `path:` scope (guardrail
+    // 1: impersonation is never repository-wide).
+    let email = effective_author(&grantor, &grantee, &verified.scopes)?;
+
     Ok(DeviceAttribution {
-        email: verified.email.clone(),
+        email,
         grantee,
+        grantor,
         holder: ac.holder.clone(),
         key: cert_key,
         scopes: verified.scopes.clone(),
@@ -319,6 +330,39 @@ pub fn verify_device_attribution_with_provider_keys(
         valid_until,
         verified,
     })
+}
+
+/// Who a write under this warrant is authored by: the grantee (agent) unless
+/// the scopes carry `as:<grantor>`. Rejects a malformed `as:` (wrong identity,
+/// repeated, or without a `path:` scope).
+pub fn effective_author(
+    grantor: &str,
+    grantee: &str,
+    scopes: &[String],
+) -> Result<String, AttributionError> {
+    let as_values: Vec<&str> = scopes
+        .iter()
+        .filter_map(|s| s.strip_prefix("as:"))
+        .collect();
+    match as_values.as_slice() {
+        [] => Ok(grantee.to_string()),
+        [who] => {
+            if *who != grantor {
+                return Err(AttributionError::InvalidAsScope(format!(
+                    "as:{who} does not name the warrant grantor ({grantor})"
+                )));
+            }
+            if !scopes.iter().any(|s| s.starts_with("path:")) {
+                return Err(AttributionError::InvalidAsScope(
+                    "an as: warrant must also carry a path: scope".into(),
+                ));
+            }
+            Ok(grantor.to_string())
+        }
+        _ => Err(AttributionError::InvalidAsScope(
+            "at most one as: scope per warrant".into(),
+        )),
+    }
 }
 
 #[cfg(test)]
