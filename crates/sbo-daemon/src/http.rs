@@ -34,6 +34,7 @@ pub type HttpState<S> = Arc<RwLock<S>>;
 // ===========================================================================
 
 /// An error from a `/v1/*` data operation, carrying the HTTP status to return.
+#[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,

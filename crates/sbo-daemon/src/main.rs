@@ -223,8 +223,16 @@ use sbo_daemon::http::{
 use sbo_daemon::repo::Repo;
 
 /// Resolve which followed repo a request targets. `sel` may be a display/canonical
-/// URI or the local path; `None` selects the sole repo (error if several).
-fn resolve_repo<'a>(repos: &'a RepoManager, sel: Option<&str>) -> Result<&'a Repo, ApiError> {
+/// URI or the local path; `None` selects the sole repo, else the configured
+/// `default_repo` (`[daemon] default_repo` / `SBO_DEFAULT_REPO`), else a 400.
+fn resolve_repo<'a>(
+    repos: &'a RepoManager,
+    sel: Option<&str>,
+    default: Option<&str>,
+) -> Result<&'a Repo, ApiError> {
+    if sel.is_none() && default.is_some() && repos.list().nth(1).is_some() {
+        return resolve_repo(repos, default, None);
+    }
     match sel {
         Some(s) => repos
             .list()
@@ -463,7 +471,7 @@ impl RepoApi for DaemonState {
         id: &str,
         with_proof: bool,
     ) -> Result<ObjectView, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         read_object_view(repo, path, id, with_proof, &self.pending)
     }
 
@@ -473,7 +481,7 @@ impl RepoApi for DaemonState {
         path: &str,
         id: &str,
     ) -> Result<Option<Vec<u8>>, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         read_object_raw(repo, path, id, &self.pending)
     }
 
@@ -482,12 +490,12 @@ impl RepoApi for DaemonState {
         repo: Option<&str>,
         selector: &ListSelector,
     ) -> Result<Vec<ObjectView>, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         read_object_list(repo, selector, &self.pending)
     }
 
     fn state_root(&self, repo: Option<&str>) -> Result<StateRootView, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         let db = repo
             .state_db()
             .map_err(|e| ApiError::internal(format!("Failed to open state db: {e}")))?;
@@ -505,7 +513,7 @@ impl RepoApi for DaemonState {
     }
 
     fn sync_points(&self, repo: Option<&str>) -> Result<sbo_daemon::http::SyncPointsView, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         let dir = self
             .config
             .checkpoint
@@ -569,7 +577,7 @@ impl RepoApi for DaemonState {
         repo: Option<&str>,
         block: Option<u64>,
     ) -> Result<Option<sbo_daemon::snapshot::SnapshotMeta>, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         let dir = self
             .config
             .checkpoint
@@ -588,7 +596,7 @@ impl RepoApi for DaemonState {
         repo: Option<&str>,
         block: u64,
     ) -> Result<Option<Vec<u8>>, ApiError> {
-        let repo = resolve_repo(&self.repos, repo)?;
+        let repo = resolve_repo(&self.repos, repo, self.config.daemon.default_repo.as_deref())?;
         let dir = self
             .config
             .checkpoint
@@ -617,7 +625,7 @@ impl RepoApi for DaemonState {
         // Validating against confirmed+pending lets chained optimistic writes
         // (e.g. join → post in one submit) succeed before the earlier write has
         // landed in a block.
-        let repo = resolve_repo(&self.repos, repo_sel)?;
+        let repo = resolve_repo(&self.repos, repo_sel, self.config.daemon.default_repo.as_deref())?;
         let app_id = Some(repo.uri.app_id.0);
         // Refuse up front when this node cannot submit for the repo at all —
         // otherwise the write would sit in the queue retrying forever.
@@ -2778,4 +2786,47 @@ async fn show_status(config: &Config) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_repo_tests {
+    use super::*;
+    use sbo_core::uri::SboRawUri;
+
+    fn two_repos() -> (tempfile::TempDir, RepoManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repos = RepoManager::load(dir.path().join("repos.json")).unwrap();
+        for app in [506u32, 530] {
+            let uri = SboRawUri::parse(&format!("sbo+raw://avail:turing:{app}/")).unwrap();
+            repos
+                .add(format!("sbo+raw://avail:turing:{app}/"), uri, dir.path().join(app.to_string()), None)
+                .unwrap();
+        }
+        (dir, repos)
+    }
+
+    #[test]
+    fn omitted_selector_uses_the_default_when_several_are_followed() {
+        let (_dir, repos) = two_repos();
+        // No selector, no default ⇒ 400.
+        let err = resolve_repo(&repos, None, None).unwrap_err();
+        assert!(err.message.contains("specify ?repo="), "{}", err.message);
+        // No selector, default ⇒ the default.
+        let r = resolve_repo(&repos, None, Some("sbo+raw://avail:turing:506/")).unwrap();
+        assert_eq!(r.uri.app_id.0, 506);
+        // Explicit selector wins over the default.
+        let r = resolve_repo(&repos, Some("sbo+raw://avail:turing:530/"), Some("sbo+raw://avail:turing:506/")).unwrap();
+        assert_eq!(r.uri.app_id.0, 530);
+        // A default naming an unfollowed repo is a 404, not a silent fallback.
+        assert!(resolve_repo(&repos, None, Some("sbo+raw://avail:turing:999/")).is_err());
+    }
+
+    #[test]
+    fn sole_repo_needs_no_selector_or_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repos = RepoManager::load(dir.path().join("repos.json")).unwrap();
+        let uri = SboRawUri::parse("sbo+raw://avail:turing:506/").unwrap();
+        repos.add("sbo+raw://avail:turing:506/".into(), uri, dir.path().join("r"), None).unwrap();
+        assert_eq!(resolve_repo(&repos, None, None).unwrap().uri.app_id.0, 506);
+    }
 }

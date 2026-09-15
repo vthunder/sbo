@@ -30,6 +30,12 @@ pub struct DaemonConfig {
     pub pid_file: PathBuf,
     pub repos_dir: PathBuf,
     pub repos_index: PathBuf,
+    /// The repo an HTTP request targets when it omits `?repo=` and more than
+    /// one is followed (display or canonical URI, e.g.
+    /// `sbo+raw://avail:turing:506/`). Absent ⇒ such requests are a 400. Env
+    /// override: `SBO_DEFAULT_REPO`.
+    #[serde(default)]
+    pub default_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +274,7 @@ impl Default for Config {
                 pid_file: sbo_dir.join("daemon.pid"),
                 repos_dir: sbo_dir.join("repos"),
                 repos_index: sbo_dir.join("repos.json"),
+                default_repo: None,
             },
             light_client: LightClientConfig {
                 network: "turing".to_string(),
@@ -314,6 +321,10 @@ impl Config {
     /// committed config file (the repo is public). `SBO_TURBO_DA_API_KEY` sets
     /// the TurboDA submit key (provided via `dokku config:set` in prod).
     fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("SBO_DEFAULT_REPO") {
+            let v = v.trim().to_string();
+            self.daemon.default_repo = if v.is_empty() { None } else { Some(v) };
+        }
         if let Ok(key) = std::env::var("SBO_TURBO_DA_API_KEY") {
             if !key.is_empty() {
                 self.turbo_da.api_key = Some(key);
@@ -380,6 +391,10 @@ pid_file = "{sbo_dir}/daemon.pid"
 
 # Directory where repository data is stored
 repos_dir = "{sbo_dir}/repos"
+
+# When several databases are followed, HTTP requests that omit ?repo= target
+# this one (display or canonical URI). Unset ⇒ such requests get a 400.
+# default_repo = "sbo+raw://avail:turing:506/"
 
 # JSON file tracking configured repositories
 repos_index = "{sbo_dir}/repos.json"
