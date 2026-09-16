@@ -1,11 +1,11 @@
 ---
 # sbo-pu34
 title: 'Policy: match on object id, and value conditions on payload fields'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-09-16T20:24:34Z
-updated_at: 2026-09-16T20:26:39Z
+updated_at: 2026-09-16T20:31:19Z
 ---
 
 Two gaps in the policy language, found while trying to express a chain-enforced minimum ecosystem contribution for browserid-pay (bean browserid-pay-er8j).
@@ -39,8 +39,20 @@ Keep it scalar deliberately: the *structure* of the payload carries any formula,
 
 Fail closed throughout: non-JSON payload, missing pointer, wrong type, NaN ⇒ denied.
 
-- [ ] decide the surface: \`id\` field on grants + restrictions; \`fields\` conditions on \`Requirements\`
-- [ ] sbo-core: id matching in \`evaluate.rs\` (grants and restrictions), backward compatible when absent
-- [ ] sbo-core: \`fields\` conditions in \`check_requirements\`, failing closed
-- [ ] Policy Specification text for both (the path-only rule is currently undocumented upstream — browserid-pay asserts it in its own comments)
-- [ ] tests incl. old policies unchanged, ambiguity cases, malformed payloads
+- [x] decide the surface: \`id\` field on grants + restrictions; \`fields\` conditions on \`Requirements\`
+- [x] sbo-core: id matching in \`evaluate.rs\` (grants and restrictions), backward compatible when absent
+- [x] sbo-core: \`fields\` conditions in \`check_requirements\`, failing closed
+- [x] Policy Specification text for both (the path-only rule is currently undocumented upstream — browserid-pay asserts it in its own comments)
+- [x] tests incl. old policies unchanged, ambiguity cases, malformed payloads
+
+## Summary of Changes
+
+Implemented in 1eb6d21.
+
+- `IdPattern` (`sbo-core/src/policy/path.rs`): literal, `*`, prefix glob, with the same `$user`/`$owner` substitution and fail-closed behavior as path patterns.
+- `Grant.id` / `Restriction.id` (`types.rs`), both `Option<IdPattern>`, `skip_serializing_if` so an untouched policy is byte-identical. Matched in `evaluate.rs` against `message.id` — which was already in scope, so no daemon plumbing changed.
+- `FieldCondition` + `Requirements.fields` with `pointer` / `eq` / `min` / `max`, evaluated by `check_fields`. Fails closed on no payload, non-JSON, missing pointer, unreadable type, non-finite number. Numeric strings compare as numbers (money is decimal strings).
+- `grant_covered_by_template` (`delegation.rs`) now covers `id`: absent on the template covers any child id, present must be reproduced exactly. Without this a child grant omitting `id` would have escaped a narrowing template — a hole the new field would otherwise have opened.
+- SBO Policy Specification: new "Object-Id Patterns" section, "Payload-field conditions" under Requirement Conditions, and `id` in both field tables. The path-only rule was undocumented upstream until now.
+
+193 sbo-core tests pass, 183 of them pre-existing and unchanged; full workspace green.
