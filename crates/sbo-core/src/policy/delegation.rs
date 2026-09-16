@@ -22,9 +22,17 @@ use super::types::{DescendantConstraint, Grant, Policy, Restriction};
 pub fn grant_covered_by_template(child: &Grant, template: &[Grant]) -> bool {
     let child_to = serde_json::to_value(&child.to).ok();
     let child_on = serde_json::to_value(&child.on).ok();
+    let child_id = serde_json::to_value(&child.id).ok();
     template.iter().any(|t| {
+        // An absent `id` on the TEMPLATE means any id, so any child id is within
+        // it. An id ON the template is a narrowing the child must reproduce
+        // exactly — otherwise a child omitting `id` (= any id) would escape a
+        // template that had restricted it to one. Exact equality, matching how
+        // `on` is already compared: pattern subsumption is not decided here.
+        let id_covered = t.id.is_none() || serde_json::to_value(&t.id).ok() == child_id;
         serde_json::to_value(&t.to).ok() == child_to
             && serde_json::to_value(&t.on).ok() == child_on
+            && id_covered
             && child
                 .can
                 .iter()
@@ -144,5 +152,40 @@ mod tests {
         // A child with no grants passes a no-op constraint.
         let empty_child = policy(serde_json::json!({}));
         assert!(check_descendant_constraint(&empty_child, &c).is_ok());
+    }
+
+    #[test]
+    fn template_id_cannot_be_escaped_by_omitting_it() {
+        // Template narrows to one id; a child that omits `id` means ANY id and
+        // must NOT be covered, or the narrowing is meaningless.
+        let template: Vec<Grant> = serde_json::from_value(serde_json::json!([
+            {"to": "*", "can": ["create"], "on": "/a/**", "id": "listing"}
+        ])).unwrap();
+
+        let narrow: Grant = serde_json::from_value(serde_json::json!(
+            {"to": "*", "can": ["create"], "on": "/a/**", "id": "listing"})).unwrap();
+        assert!(grant_covered_by_template(&narrow, &template));
+
+        let wide: Grant = serde_json::from_value(serde_json::json!(
+            {"to": "*", "can": ["create"], "on": "/a/**"})).unwrap();
+        assert!(!grant_covered_by_template(&wide, &template));
+
+        let other: Grant = serde_json::from_value(serde_json::json!(
+            {"to": "*", "can": ["create"], "on": "/a/**", "id": "proposal"})).unwrap();
+        assert!(!grant_covered_by_template(&other, &template));
+    }
+
+    #[test]
+    fn template_without_id_covers_any_child_id() {
+        let template: Vec<Grant> = serde_json::from_value(serde_json::json!([
+            {"to": "*", "can": ["create"], "on": "/a/**"}
+        ])).unwrap();
+        for child in [
+            serde_json::json!({"to": "*", "can": ["create"], "on": "/a/**"}),
+            serde_json::json!({"to": "*", "can": ["create"], "on": "/a/**", "id": "listing"}),
+        ] {
+            let g: Grant = serde_json::from_value(child).unwrap();
+            assert!(grant_covered_by_template(&g, &template));
+        }
     }
 }

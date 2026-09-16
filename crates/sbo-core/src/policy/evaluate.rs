@@ -57,16 +57,18 @@ pub fn evaluate(
     let granted = policy.grants.iter().any(|grant| {
         let path_parsed = crate::message::Path::parse(target_path).unwrap();
         let path_matches = grant.on.matches(&path_parsed, vars);
+        // An absent `id` matches any id, so pre-existing policies are unchanged.
+        let id_matches = grant.id.as_ref().is_none_or(|p| p.matches(message.id.as_str(), vars));
         let action_matches = grant.can.iter().any(|granted| action_covered_by(*granted, action));
         let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles, primary_domain);
 
         grant_debug.push(format!(
-            "  grant to={:?} can={:?} on={:?} -> path:{} action:{} identity:{}",
-            grant.to, grant.can, grant.on,
-            path_matches, action_matches, identity_match
+            "  grant to={:?} can={:?} on={:?} id={:?} -> path:{} id:{} action:{} identity:{}",
+            grant.to, grant.can, grant.on, grant.id,
+            path_matches, id_matches, action_matches, identity_match
         ));
 
-        path_matches && action_matches && identity_match
+        path_matches && id_matches && action_matches && identity_match
     });
 
     if !granted {
@@ -76,7 +78,9 @@ pub fn evaluate(
 
     // 3. Check restrictions
     for restriction in &policy.restrictions {
-        if restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars) {
+        let path_matches = restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars);
+        let id_matches = restriction.id.as_ref().is_none_or(|p| p.matches(message.id.as_str(), vars));
+        if path_matches && id_matches {
             if let Some(reason) = check_requirements(&restriction.require, message, is_attested) {
                 return PolicyResult::Denied(reason);
             }
@@ -154,6 +158,13 @@ fn check_requirements(
                     max_size
                 ));
             }
+        }
+    }
+
+    // Check payload-field conditions
+    if !require.fields.is_empty() {
+        if let Some(reason) = check_fields(&require.fields, message.payload.as_deref()) {
+            return Some(reason);
         }
     }
 
@@ -373,6 +384,64 @@ fn identity_matches(
             any.iter().any(|id| identity_matches(id, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain))
         }
     }
+}
+
+/// Evaluate payload-field conditions. Fails closed at every step: a missing
+/// payload, a payload that is not JSON, a pointer that resolves to nothing, or a
+/// value that is not readable as the compared type is a DENIAL.
+fn check_fields(fields: &[super::types::FieldCondition], payload: Option<&[u8]>) -> Option<String> {
+    let Some(bytes) = payload else {
+        return Some("Payload-field condition on a message with no payload".to_string());
+    };
+    let doc: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("Payload is not JSON, required by a field condition: {e}")),
+    };
+    for cond in fields {
+        let Some(value) = doc.pointer(&cond.pointer) else {
+            return Some(format!("Payload has no value at '{}'", cond.pointer));
+        };
+        if let Some(expected) = &cond.eq {
+            if value != expected {
+                return Some(format!(
+                    "Payload value at '{}' is {value}, required to equal {expected}",
+                    cond.pointer
+                ));
+            }
+        }
+        if cond.min.is_some() || cond.max.is_some() {
+            let Some(n) = as_number(value) else {
+                return Some(format!(
+                    "Payload value at '{}' is {value}, which is not a number",
+                    cond.pointer
+                ));
+            };
+            if let Some(min) = cond.min {
+                if !(n >= min) {
+                    return Some(format!("Payload value at '{}' is {n}, below the minimum {min}", cond.pointer));
+                }
+            }
+            if let Some(max) = cond.max {
+                if !(n <= max) {
+                    return Some(format!("Payload value at '{}' is {n}, above the maximum {max}", cond.pointer));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A JSON number, or a string holding one. Money is carried as a decimal STRING
+/// in several schemas (`"0.01"`), so a numeric string is read as a number rather
+/// than rejected. Non-finite values are refused so a NaN can never pass a
+/// comparison by default.
+fn as_number(v: &serde_json::Value) -> Option<f64> {
+    let n = match v {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    n.is_finite().then_some(n)
 }
 
 #[cfg(test)]
@@ -871,5 +940,155 @@ mod tests {
             evaluate(&policy, &actor, ActionType::Create, "/x/", &PolicyVars::default(), false, &no, &msg, Some("mingo.place")),
             PolicyResult::Allowed
         ));
+    }
+
+    // ---- object-id matching + payload-field conditions (bean sbo-pu34) ----
+
+    /// A message at `/agreements/a1/` with id `id` and the given JSON payload.
+    fn agreement_msg(id: &str, payload: serde_json::Value) -> Message {
+        let key = SigningKey::generate();
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let mut msg = Message {
+            action: Action::Post,
+            path: Path::parse("/agreements/a1/").unwrap(),
+            id: Id::new(id).unwrap(),
+            object_type: ObjectType::Object,
+            signing_key: key.public_key(),
+            signature: Signature::parse(&"0".repeat(128)).unwrap(),
+            content_type: Some("application/json".to_string()),
+            content_hash: Some(ContentHash::sha256(&payload)),
+            payload: Some(payload),
+            owner: None,
+            creator: None,
+            content_encoding: None,
+            content_schema: None,
+            policy_ref: None,
+            related: None,
+            hlc: None,
+            prev: None,
+            auth_cert: None,
+            auth_evidence: None,
+            auth_warrant: None,
+        };
+        msg.sign(&key);
+        msg
+    }
+
+    fn eval(policy: &Policy, msg: &Message) -> PolicyResult {
+        let actor = Id::new("e_x").unwrap();
+        let yes = |_: &AttestedSource| true;
+        evaluate(policy, &actor, ActionType::Create, "/agreements/a1/", &PolicyVars::default(), false, &yes, msg, None)
+    }
+
+    /// The contribution floor browserid-pay needs: pin `fn`, floor both operands.
+    fn contribution_floor_policy() -> Policy {
+        serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/agreements/**"}],
+            "restrictions": [{
+                "on": "/agreements/*/",
+                "id": "proposal",
+                "require": { "fields": [
+                    { "pointer": "/contribution/fn", "eq": "max" },
+                    { "pointer": "/contribution/amount", "min": 0.01 },
+                    { "pointer": "/contribution/percentage", "min": 0.01 }
+                ]}
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn proposal(amount: &str, percentage: f64) -> serde_json::Value {
+        serde_json::json!({ "contribution": { "fn": "max", "amount": amount, "percentage": percentage } })
+    }
+
+    #[test]
+    fn restriction_id_scopes_the_requirement_to_one_object() {
+        let policy = contribution_floor_policy();
+        // A proposal below the floor is denied...
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", proposal("0.01", 0.001))), PolicyResult::Denied(_)));
+        // ...but an acceptance in the SAME container is untouched, though it
+        // carries no contribution at all. Without id matching this would fail.
+        assert!(matches!(eval(&policy, &agreement_msg("acceptance", serde_json::json!({"v": 1}))), PolicyResult::Allowed));
+    }
+
+    #[test]
+    fn contribution_floor_admits_and_refuses() {
+        let policy = contribution_floor_policy();
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", proposal("0.01", 0.01))), PolicyResult::Allowed));
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", proposal("0.50", 1.0))), PolicyResult::Allowed));
+        // Below the floor on either operand.
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", proposal("0.00", 0.01))), PolicyResult::Denied(_)));
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", proposal("0.01", 0.0))), PolicyResult::Denied(_)));
+    }
+
+    #[test]
+    fn pinning_fn_stops_the_min_dodge() {
+        // Without the `fn` == "max" condition a proposer could pick min() and
+        // pay the smaller of the two. The pin refuses it.
+        let policy = contribution_floor_policy();
+        let dodge = serde_json::json!({ "contribution": { "fn": "min", "amount": "0.01", "percentage": 0.01 } });
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", dodge)), PolicyResult::Denied(_)));
+    }
+
+    #[test]
+    fn field_conditions_fail_closed() {
+        let policy = contribution_floor_policy();
+        // Missing the pointer entirely.
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", serde_json::json!({"v": 1}))), PolicyResult::Denied(_)));
+        // Present but not a number.
+        let bad = serde_json::json!({ "contribution": { "fn": "max", "amount": "free", "percentage": 0.01 } });
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", bad)), PolicyResult::Denied(_)));
+        // Null.
+        let nul = serde_json::json!({ "contribution": { "fn": "max", "amount": null, "percentage": 0.01 } });
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", nul)), PolicyResult::Denied(_)));
+    }
+
+    #[test]
+    fn non_json_payload_is_denied_not_skipped() {
+        let policy = contribution_floor_policy();
+        let mut msg = agreement_msg("proposal", serde_json::json!({}));
+        msg.payload = Some(b"not json at all".to_vec());
+        assert!(matches!(eval(&policy, &msg), PolicyResult::Denied(_)));
+    }
+
+    #[test]
+    fn money_as_a_decimal_string_compares_as_a_number() {
+        // Money is carried as decimal strings in these schemas; a string that
+        // holds a number must compare, or the whole use case fails.
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/agreements/**"}],
+            "restrictions": [{"on": "/agreements/*/", "id": "proposal",
+                "require": {"fields": [{"pointer": "/fees/adjudicator", "max": 5.0}]}}]
+        })).unwrap();
+        let ok = serde_json::json!({ "fees": { "adjudicator": "4.50" } });
+        let over = serde_json::json!({ "fees": { "adjudicator": "5.01" } });
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", ok)), PolicyResult::Allowed));
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", over)), PolicyResult::Denied(_)));
+    }
+
+    #[test]
+    fn grant_id_narrows_authority_and_absent_id_still_matches_everything() {
+        // Same language on grants: only `listing` may be created here.
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/agreements/**", "id": "listing"}]
+        })).unwrap();
+        assert!(matches!(eval(&policy, &agreement_msg("listing", serde_json::json!({}))), PolicyResult::Allowed));
+        assert!(matches!(eval(&policy, &agreement_msg("proposal", serde_json::json!({}))), PolicyResult::Denied(_)));
+
+        // A policy written before `id` existed keeps its exact meaning.
+        let legacy: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/agreements/**"}]
+        })).unwrap();
+        assert!(matches!(eval(&legacy, &agreement_msg("proposal", serde_json::json!({}))), PolicyResult::Allowed));
+        assert!(matches!(eval(&legacy, &agreement_msg("anything-at-all", serde_json::json!({}))), PolicyResult::Allowed));
+    }
+
+    #[test]
+    fn absent_id_round_trips_out_of_serialization() {
+        // `skip_serializing_if` keeps an untouched policy byte-identical.
+        let json = serde_json::json!({"grants": [{"to": "*", "can": ["create"], "on": "/a/**"}], "restrictions": []});
+        let policy: Policy = serde_json::from_value(json.clone()).unwrap();
+        let back = serde_json::to_value(&policy).unwrap();
+        assert!(back["grants"][0].get("id").is_none(), "absent id must not serialize: {back}");
     }
 }

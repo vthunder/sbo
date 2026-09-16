@@ -96,6 +96,54 @@ impl PathPattern {
     }
 }
 
+/// Pattern for matching an object's **id** (the leaf name within a container),
+/// as opposed to its container path. Ids are single tokens, so the grammar is
+/// deliberately small: a literal, `*` for "any id", or a glob with `*` standing
+/// for any run of characters (`ev_*`). Policy variables are substituted exactly
+/// as in [`PathPattern`], and an undefined variable fails closed for the same
+/// reason.
+///
+/// Why a separate field rather than a longer path pattern: `/agreements/*/proposal`
+/// is ambiguous between the container `/agreements/x/proposal/` and the object
+/// with id `proposal` at `/agreements/x/`. Keeping the id out of the path
+/// pattern removes the ambiguity, and lets an existing policy keep its exact
+/// meaning — an absent `id` matches ANY id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IdPattern(String);
+
+impl IdPattern {
+    pub fn new(pattern: impl Into<String>) -> Self {
+        Self(pattern.into())
+    }
+
+    /// Match against an object id, with policy variables resolved.
+    pub fn matches(&self, id: &str, vars: &PolicyVars) -> bool {
+        let mut pattern = self.0.clone();
+        if let Some(v) = vars.owner { pattern = pattern.replace("$owner", v); }
+        if let Some(v) = vars.user { pattern = pattern.replace("$user", v); }
+        if let Some(v) = vars.email { pattern = pattern.replace("$email", v); }
+        if let Some(v) = vars.name { pattern = pattern.replace("$name", v); }
+        glob_match(&pattern, id)
+    }
+}
+
+/// `*` matches any run of characters (including none); everything else is literal.
+fn glob_match(pattern: &str, s: &str) -> bool {
+    match pattern.find('*') {
+        None => pattern == s,
+        Some(i) => {
+            let (head, rest) = (&pattern[..i], &pattern[i + 1..]);
+            if !s.starts_with(head) {
+                return false;
+            }
+            let s = &s[head.len()..];
+            // Try every split point for the `*`.
+            (0..=s.len()).any(|j| glob_match(rest, &s[j..]))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +166,27 @@ mod tests {
         let pattern = PathPattern::new("/users/**");
         assert!(pattern.matches(&Path::parse("/users/alice/").unwrap(), &PolicyVars::default()));
         assert!(pattern.matches(&Path::parse("/users/alice/nfts/").unwrap(), &PolicyVars::default()));
+    }
+
+    #[test]
+    fn id_pattern_literal_and_wildcard() {
+        let vars = PolicyVars::default();
+        assert!(IdPattern::new("proposal").matches("proposal", &vars));
+        assert!(!IdPattern::new("proposal").matches("acceptance", &vars));
+        assert!(IdPattern::new("*").matches("anything", &vars));
+        assert!(IdPattern::new("ev_*").matches("ev_abc", &vars));
+        assert!(!IdPattern::new("ev_*").matches("lock", &vars));
+        // `*` may stand for nothing at all.
+        assert!(IdPattern::new("ev_*").matches("ev_", &vars));
+    }
+
+    #[test]
+    fn id_pattern_substitutes_variables_and_fails_closed() {
+        let user = "alice@x.test";
+        let vars = PolicyVars { user: Some(user), ..Default::default() };
+        assert!(IdPattern::new("$user").matches(user, &vars));
+        assert!(!IdPattern::new("$user").matches("bob@x.test", &vars));
+        // Undefined variable keeps the literal token, which matches no real id.
+        assert!(!IdPattern::new("$user").matches(user, &PolicyVars::default()));
     }
 }

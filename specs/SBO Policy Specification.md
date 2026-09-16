@@ -102,6 +102,7 @@ An array of grant objects specifying who can perform which actions on which path
 | `to` | identity | Who this grant applies to |
 | `can` | array | Actions permitted |
 | `on` | string | Path pattern where grant applies |
+| `id` | string | *Optional.* Object-id pattern. Absent ⇒ **any id**. See [Object-Id Patterns](#object-id-patterns). |
 
 ### `restrictions`
 
@@ -121,6 +122,7 @@ An array of conditions that apply to granted actions. Even if a grant allows an 
 | Field | Type | Description |
 |-------|------|-------------|
 | `on` | string | Path pattern where restriction applies |
+| `id` | string | *Optional.* Object-id pattern. Absent ⇒ **any id**. See [Object-Id Patterns](#object-id-patterns). |
 | `require` | object | Conditions that must be met |
 
 ### `roles`
@@ -232,6 +234,51 @@ caught by the independent `to: owner` control check.
 
 ---
 
+## Object-Id Patterns
+
+`on` matches an object's **container path**; it never sees the object's **id**.
+An object at path `/agreements/a1/` with id `proposal` matches the pattern
+`/agreements/*/` — and so does its sibling with id `acceptance`. Path patterns
+alone therefore cannot express a rule about one kind of object inside a shared
+container.
+
+The optional `id` field, valid on both **grants** and **restrictions**, supplies
+that discriminator. The matching language is deliberately identical in both
+places.
+
+| Pattern | Matches |
+|---------|---------|
+| `"proposal"` | Exactly that id |
+| `"*"` | Any id (same as omitting the field) |
+| `"ev_*"` | Any id with that prefix; `*` stands for any run of characters |
+| `"$user"` | Dynamic: the acting signer's canonical identity |
+
+**Absent ⇒ any id.** A policy written before this field existed keeps its exact
+meaning, and an unset `id` is omitted from the serialized policy.
+
+**Why a separate field, not a longer path pattern.** `/agreements/*/proposal` is
+ambiguous: it could mean the container `/agreements/x/proposal/` or the object
+with id `proposal` at `/agreements/x/`. Keeping the id out of the path pattern
+removes the ambiguity.
+
+Policy variables (`$owner`, `$user`, `$email`, `$name`) interpolate exactly as in
+path patterns, and an undefined variable fails closed the same way.
+
+**Delegation.** In a `descendant_constraint` template, an absent `id` on the
+template covers any child `id`; an `id` **on** the template must be reproduced
+exactly by the child grant. Otherwise a child omitting `id` (meaning *any* id)
+would escape a template that had narrowed it to one.
+
+```json
+{
+  "restrictions": [
+    {"on": "/agreements/*/", "id": "proposal", "require": {"schema": "agreement.proposal.v1"}}
+  ]
+}
+```
+
+---
+
 ## Requirement Conditions
 
 Used in the `require` field of restrictions:
@@ -244,6 +291,53 @@ Used in the `require` field of restrictions:
 | `{"content_type": "application/json"}` | Object must have specified content type |
 | `{"attested": {"type": "membership", "by": "cooks@example.org"}}` | The acting user (`$user`) must be the **in-force subject** of such an attestation |
 | `{"not_attested": {"type": "ban", "by": "cooks@example.org"}}` | The acting user must **not** be the in-force subject of such an attestation |
+| `{"fields": [{"pointer": "/a/b", "min": 1}]}` | Values inside the JSON payload, addressed by pointer. See [Payload-field conditions](#payload-field-conditions). |
+
+### Payload-field conditions
+
+`fields` conditions read **inside** the payload, addressing values by
+[RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON pointer. Every condition
+in the array must hold; they are AND-ed with each other and with the rest of
+`require`.
+
+| Key | Meaning |
+|-----|---------|
+| `pointer` | JSON pointer into the payload, e.g. `/contribution/percentage` |
+| `eq` | The value must equal this exactly (any JSON type) |
+| `min` | The value, read as a number, must be ≥ this |
+| `max` | The value, read as a number, must be ≤ this |
+
+**Numbers may be strings.** Money is carried as a decimal string in several
+schemas, so `"0.01"` compares as `0.01`. Non-finite values (NaN, infinity) never
+satisfy a comparison.
+
+**Fail-closed.** A message with no payload, a payload that is not JSON, a pointer
+that resolves to nothing, or a value that is not readable as the compared type is
+a **denial** — never a skipped check.
+
+**Deliberately scalar.** A condition compares one addressed value against a
+constant; the policy language has no expression evaluator and no parser. Where a
+payload carries something formula-shaped, express it as *structure* and pin it
+with several conditions. For example, a contribution declared as
+`{"fn": "max", "amount": "0.01", "percentage": 0.01}` is floored by pinning the
+function and flooring each operand:
+
+```json
+{"on": "/agreements/*/", "id": "proposal", "require": {"fields": [
+  {"pointer": "/contribution/fn", "eq": "max"},
+  {"pointer": "/contribution/amount", "min": 0.01},
+  {"pointer": "/contribution/percentage", "min": 0.01}
+]}}
+```
+
+Pinning `fn` is not optional: without it, a writer picks `min` and pays the
+smaller operand.
+
+Because conditions are AND-ed, componentwise comparison is **exact** for a floor
+on `min(a,b)` and a cap on `max(a,b)`, and **conservative** (stricter than
+strictly necessary) the other way round — a floor on `max(a,b)` requires both
+operands to clear it, where the result alone would need only one. This is sound;
+the exact form would need a disjunction the language does not have.
 
 `attested` / `not_attested` use the same matching rules as an [attestation-defined role](#attestation-defined-roles) (`type`, optional `by`, subject resolves to the acting user's controller, in force at inclusion time). They let a policy gate actions on a positive claim (membership, a credential) or a negative one (a ban) without listing identities.
 

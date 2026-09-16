@@ -1,11 +1,11 @@
 ---
 # sbo-pu34
 title: 'Policy: match on object id, and value conditions on payload fields'
-status: todo
+status: in-progress
 type: feature
 priority: normal
 created_at: 2026-09-16T20:24:34Z
-updated_at: 2026-09-16T20:24:34Z
+updated_at: 2026-09-16T20:26:39Z
 ---
 
 Two gaps in the policy language, found while trying to express a chain-enforced minimum ecosystem contribution for browserid-pay (bean browserid-pay-er8j).

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use super::path::PathPattern;
+use super::path::{IdPattern, PathPattern};
 
 /// Policy document (policy.v2 schema)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,12 +78,25 @@ pub struct Grant {
     pub to: Identity,
     pub can: Vec<ActionType>,
     pub on: PathPattern,
+
+    /// Optional object-id pattern. `on` matches the container PATH; this matches
+    /// the object's ID within it. Absent ⇒ any id, so every policy written before
+    /// this field existed keeps its exact meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<IdPattern>,
 }
 
 /// Restriction: conditions on allowed actions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Restriction {
     pub on: PathPattern,
+
+    /// Optional object-id pattern, with the same meaning as on a [`Grant`]:
+    /// absent ⇒ any id. The matching language is deliberately identical for
+    /// grants and restrictions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<IdPattern>,
+
     pub require: Requirements,
 }
 
@@ -147,6 +160,12 @@ pub struct Requirements {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_size: Option<usize>,
 
+    /// Conditions on values inside the payload, addressed by JSON pointer.
+    /// Every condition must hold (they are AND-ed with each other and with the
+    /// rest of the requirements). Empty ⇒ no payload-value conditions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldCondition>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<SchemaRequirement>,
 
@@ -195,4 +214,32 @@ pub struct RequirePayloadSignedBy {
 pub enum SchemaRequirement {
     Single(String),
     Any { any: Vec<String> },
+}
+
+/// A condition on one value inside a JSON payload.
+///
+/// Deliberately **scalar**: the policy compares one addressed value against a
+/// constant and never evaluates an expression. Anything formula-shaped is
+/// carried by the STRUCTURE of the payload and pinned with several conditions
+/// (e.g. `fn == "max"` plus a floor on each operand), which keeps the policy
+/// language free of a parser.
+///
+/// Fails closed: a payload that is not JSON, a pointer that resolves to nothing,
+/// or a value of the wrong type is a denial, never a pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldCondition {
+    /// RFC 6901 JSON pointer into the payload, e.g. `/contribution/percentage`.
+    pub pointer: String,
+
+    /// The value must equal this exactly (any JSON type).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<serde_json::Value>,
+
+    /// The value, read as a number, must be >= this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+
+    /// The value, read as a number, must be <= this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
 }
