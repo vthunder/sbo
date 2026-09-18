@@ -1134,6 +1134,19 @@ impl SyncEngine {
             if matches!(msg.action, sbo_core::message::Action::Delete) {
                 // Delete operation
                 if let Some(old_obj) = existing {
+                    // A deleted policy must leave the policy index with it.
+                    // Otherwise the ancestor walk keeps resolving a policy that
+                    // is no longer there, every later write under that path is
+                    // denied `No matching grant`, and the path is unrecoverable
+                    // (mingo-hpli). Deleting a policy means "inherit the
+                    // parent", never "deny everything, permanently".
+                    if old_obj.content_schema.as_deref() == Some("policy.v2") {
+                        if let Err(e) = state_db.delete_policy_at(&msg.path) {
+                            tracing::warn!("Failed to drop policy index at {}: {}", msg.path, e);
+                        } else {
+                            tracing::info!("Dropped policy index at {} (policy deleted)", msg.path);
+                        }
+                    }
                     touched.deletes.push(TouchedDelete {
                         path_segments: path_segments.clone(),
                         old_object_hash: old_obj.object_hash,

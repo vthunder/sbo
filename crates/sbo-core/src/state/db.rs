@@ -198,6 +198,20 @@ impl StateDb {
             .map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
+    /// Remove the policy indexed at `path`, so the ancestor walk falls through
+    /// to the nearest ancestor that still has one.
+    ///
+    /// Without this, deleting a `policy.v2` object leaves its path governed by a
+    /// policy that is no longer there: `resolve_policy_entry` keeps finding the
+    /// stale entry, every write is denied `No matching grant`, and the path
+    /// cannot be recovered (mingo-hpli). Deleting a policy is meant to mean
+    /// "inherit the parent", not "deny everything, permanently".
+    pub fn delete_policy_at(&self, path: &crate::message::Path) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        self.db.delete_cf(&cf, path.to_string().as_bytes())
+            .map_err(|e| DbError::RocksDb(e.to_string()))
+    }
+
     /// Resolve policy by walking up the path hierarchy (see [`resolve_policy_entry`]).
     pub fn resolve_policy(&self, path: &crate::message::Path) -> Result<Option<Policy>, DbError> {
         Ok(self.resolve_policy_entry(path)?.map(|e| e.policy))
