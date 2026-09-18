@@ -999,6 +999,19 @@ impl SyncEngine {
             if src_is_name {
                 let _ = state_db.delete_name_claim(&msg.signing_key.to_string());
             }
+            // A deleted policy must leave the policy index with it, exactly as a
+            // deleted name claim leaves the name index. Otherwise the ancestor
+            // walk keeps resolving a policy that is no longer there, every later
+            // write under that path is denied `No matching grant`, and the path
+            // is unrecoverable (mingo-hpli). Deleting a policy means "inherit
+            // the parent", never "deny everything, permanently".
+            if existing.content_schema.as_deref() == Some("policy.v2") {
+                if let Err(e) = state_db.delete_policy_at(&msg.path) {
+                    tracing::warn!("Failed to drop policy index at {}: {}", msg.path, e);
+                } else {
+                    tracing::info!("Dropped policy index at {} (policy deleted)", msg.path);
+                }
+            }
             if let Ok(mut pool) = self.pending.write() {
                 pool.reconcile_applied(&existing);
             }
