@@ -26,6 +26,12 @@ pub struct StoredObject {
     /// against for email-rooted objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_ref: Option<String>,
+    /// The write's `Related` header (Wire Format Spec §Related Objects), kept so
+    /// readers can see an object's declared references without re-fetching and
+    /// re-parsing the raw wire. Descriptive only: nothing authorizes on it, and
+    /// `ref` is not resolved or checked to exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related: Option<Vec<crate::message::Related>>,
     pub block_number: u64,
     /// SHA-256 hash of the complete raw SBO object bytes (headers + payload)
     /// Used for merkle tree leaf computation in the proof system

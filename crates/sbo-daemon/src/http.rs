@@ -92,6 +92,12 @@ pub struct ObjectView {
     pub hlc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
+    /// The object's `Related` header (Wire Format Spec §Related Objects), if it
+    /// carried one. Descriptive: `ref` is not resolved and nothing authorizes
+    /// on it — it is what the writer declared, signed along with the rest of
+    /// the headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related: Option<Vec<sbo_core::message::Related>>,
     pub object_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
@@ -940,6 +946,7 @@ mod tests {
             block: 7,
             hlc: None,
             prev: None,
+            related: None,
             object_hash: "00".repeat(32),
             value: Some(serde_json::json!({ "name": "Cooks" })),
             payload_text: "{\"name\":\"Cooks\"}".to_string(),

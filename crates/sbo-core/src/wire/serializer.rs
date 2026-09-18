@@ -75,6 +75,11 @@ pub fn serialize(msg: &Message) -> Vec<u8> {
     if let Some(ref owner) = msg.owner {
         headers.push(("Owner".to_string(), owner.as_str().to_string()));
     }
+    if let Some(ref rel) = msg.related {
+        if let Some(v) = crate::message::Related::header_value(rel) {
+            headers.push(("Related".to_string(), v));
+        }
+    }
     if let Some(ref pr) = msg.policy_ref {
         headers.push(("Policy-Ref".to_string(), pr.clone()));
     }

@@ -184,6 +184,7 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
     let content_encoding = headers.get("Content-Encoding").map(|s| s.to_string());
     let content_schema = headers.get("Content-Schema").map(|s| s.to_string());
     let policy_ref = headers.get("Policy-Ref").map(|s| s.to_string());
+    let related = headers.get("Related").and_then(|s| crate::message::Related::parse_header(s));
     let hlc = headers.get("HLC").map(|s| s.to_string());
     let prev = headers.get("Prev").map(|s| s.to_string());
     let auth_cert = headers.get("Auth-Cert").map(|s| s.to_string());
@@ -233,7 +234,7 @@ fn parse_at(bytes: &[u8], start: usize) -> Result<(Message, usize), ParseError> 
         content_encoding,
         content_schema,
         policy_ref,
-        related: None,
+        related,
         hlc,
         prev,
         auth_cert,

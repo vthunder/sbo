@@ -276,6 +276,7 @@ fn build_object_view(obj: &StoredObject, sboq: Option<String>, confirmed: bool) 
         block: obj.block_number,
         hlc: obj.hlc.clone(),
         prev: obj.prev.clone(),
+        related: obj.related.clone(),
         object_hash: hex::encode(obj.object_hash),
         value,
         payload_text,

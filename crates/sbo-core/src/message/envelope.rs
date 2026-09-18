@@ -10,11 +10,38 @@ pub enum ObjectType {
     Collection,
 }
 
-/// Related object reference
-#[derive(Debug, Clone)]
+/// Related object reference (Wire Format Spec §Related Objects).
+///
+/// Serialized on the wire as one JSON array in the `Related` header:
+/// `Related: [{"rel":"license","ref":"sbo+raw://avail:mainnet:13/licenses/cc-by"}]`
+///
+/// `rel` is an open vocabulary — the spec names `license`, `collection`,
+/// `policy` and `origin` as common types and requires unknown ones to pass
+/// through, so applications may define their own.
+///
+/// The Rust field is `reference` because `ref` is a keyword; serde maps it to
+/// the spec's `ref` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Related {
     pub rel: String,
+    #[serde(rename = "ref")]
     pub reference: String,
+}
+
+impl Related {
+    /// The `Related` header value: a JSON array, or `None` when there is
+    /// nothing to say (an empty array is never emitted).
+    pub fn header_value(items: &[Related]) -> Option<String> {
+        if items.is_empty() { return None; }
+        serde_json::to_string(items).ok()
+    }
+
+    /// Parse a `Related` header value. A malformed value is dropped rather than
+    /// failing the message: the header is descriptive, never authorizing, and
+    /// the Wire spec requires unknown relationship types to pass through.
+    pub fn parse_header(v: &str) -> Option<Vec<Related>> {
+        serde_json::from_str::<Vec<Related>>(v).ok().filter(|r| !r.is_empty())
+    }
 }
 
 /// Validated identifier (1-256 chars, RFC 3986 unreserved plus `@`
@@ -223,6 +250,9 @@ impl Message {
         }
         if let Some(ref pr) = self.policy_ref {
             headers.push(("Policy-Ref".to_string(), pr.clone()));
+        }
+        if let Some(ref v) = self.related {
+            if let Some(h) = Related::header_value(v) { headers.push(("Related".to_string(), h)); }
         }
         if let Some(ref v) = self.hlc { headers.push(("HLC".to_string(), v.clone())); }
         if let Some(ref v) = self.prev { headers.push(("Prev".to_string(), v.clone())); }

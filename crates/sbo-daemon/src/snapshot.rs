@@ -194,7 +194,7 @@ mod tests {
                 content_type: "application/json".into(),
                 content_hash: sbo_core::crypto::ContentHash::sha256(b"{}"),
                 payload: b"{}".to_vec(),
-                policy_ref: None,
+                policy_ref: None, related: None,
                 content_schema: Some("x.v1".into()),
                 owner_ref: None,
                 block_number: 10,

@@ -227,7 +227,7 @@ mod tests {
             content_type: "application/json".to_string(),
             content_hash: ContentHash::sha256(b"{}"),
             payload: b"{}".to_vec(),
-            policy_ref: None,
+            policy_ref: None, related: None,
             content_schema: Some("post.v1".to_string()),
             owner_ref: Some(creator.to_string()),
             block_number: 1,

@@ -16,7 +16,7 @@ fn test_store_and_retrieve_object() {
         content_type: "application/json".to_string(),
         content_hash: ContentHash::sha256(b"{}"),
         payload: b"{}".to_vec(),
-        policy_ref: None,
+        policy_ref: None, related: None,
         content_schema: None,
         owner_ref: None,
         block_number: 1,
