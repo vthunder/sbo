@@ -5,7 +5,7 @@ status: todo
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:40Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-03T14:16:04Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -18,3 +18,7 @@ The repo has no CI at all today (no `.github/`; `[skip ci]` trailers and `make w
 - [ ] Dockerfile + deploy workflow review (cross-repo, cite browserid-ng W7)
 - [ ] logging PII review
 - [ ] report `docs/security-audit-2026-11-ws7-supply-chain.md`
+
+## Scope decision (Dan, 2026-11-03)
+
+In scope from the mingo repo: only the sbo-daemon deployable — `~/src/mingo/deploy/sbo-daemon/` (Dockerfile, entrypoint.sh, config.toml), `~/src/mingo/.github/workflows/deploy-daemon.yml`, and the sandmill-infra side for that app. mingo-app, mingo-idp, mingo-web and `deploy/mingo/` are OUT of scope: anything noticed there is recorded as a lead for a later separate mingo audit, not as a finding here. Infra-side remediation for the daemon deployable is filed as task beans in mingo's beans, not sbo's.
