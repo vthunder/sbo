@@ -21,3 +21,6 @@ tracing.workspace = true
 
 # Async
 tokio.workspace = true
+
+[dev-dependencies]
+proptest = "1"
