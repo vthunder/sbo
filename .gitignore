@@ -14,3 +14,4 @@ fuzz/target/
 
 # proptest failure-persistence files (audit 2026-11 WS3): regenerated locally, never committed
 *.proptest-regressions
+fuzz/fuzz-*.log
