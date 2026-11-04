@@ -134,7 +134,7 @@ caller's `domain` against `1.1.1.1:53`. `needed_by` is caller-chosen, so
 (several round trips) and returns a few KiB; the resolver sees the node as
 the source. Nothing in `mingo-web` calls this route; `mingo-app`'s
 `appoint` CLI still does (`appoint.rs:273`), and `/v1/submit` now refreshes
-evidence itself (`evidence.rs` module doc). Decision Q22 asks whether the
+evidence itself (`evidence.rs` module doc). Decision Q30 asks whether the
 route stays behind the allowlist or goes.
 
 ### 2.3 W5-3 — no route answers 429 (Medium)
@@ -229,7 +229,7 @@ caller; `SignRequestStatus::Expired` is never assigned and nothing sweeps the
 map. A thousand GETs leave a thousand pending entries (ignored test), which
 also fill the operator's `ListSignRequests` view. Since no client in this
 repo or mingo uses the popup flow (no `sbo auth approve` in `sbo-cli`, no
-`sbo:response` listener in `mingo-web`), Q23 proposes removing the three
+`sbo:response` listener in `mingo-web`), Q31 proposes removing the three
 `/auth` routes and the sign-request IPC commands rather than hardening them.
 
 ## 3. Refuted leads
@@ -277,10 +277,10 @@ repo or mingo uses the popup flow (no `sbo auth approve` in `sbo-cli`, no
 
 ## 6. What needs Dan's decision
 
-- **Q22.** `/v1/dnssec`: keep it behind the Q15 allowlist, or remove it now
+- **Q30.** `/v1/dnssec`: keep it behind the Q15 allowlist, or remove it now
   that `/v1/submit` refreshes evidence itself (`mingo-app`'s `appoint` CLI
   is the one remaining caller).
-- **Q23.** The `/auth` popup flow and the sign-request IPC commands have no
+- **Q31.** The `/auth` popup flow and the sign-request IPC commands have no
   caller in this repo or mingo: remove them, or keep and harden (expiry,
   per-source cap, 128-bit ids).
 

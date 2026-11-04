@@ -18,7 +18,7 @@
 | WS2 conformance vectors | sbo-5t0f | Running (Q1, Q4, Q5 settled). |
 | WS3 fuzz + proptest | sbo-qw0z | Running. |
 | WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
-| WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q22, Q23. |
+| WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q30, Q31 (numbered past the WS4/WS7 Q22–Q25 pairs). |
 | WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
 | WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q26–Q29. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
@@ -450,7 +450,7 @@ commit, but every `cargo update` moves it (the dry run jumps `de07cce1` to
 
 **Recommendation: (a).** It also makes R7-1 a lockfile-only change.
 
-### Q22. `/v1/dnssec` after submit-side evidence refresh (WS5 W5-2, Medium)
+### Q30. `/v1/dnssec` after submit-side evidence refresh (WS5 W5-2, Medium)
 
 `GET /v1/dnssec?domain=` runs a live DNSSEC chain walk through the node's
 resolver for any caller and any domain (`needed_by` is caller-chosen, so the
@@ -464,7 +464,7 @@ and the one remaining caller is `mingo-app`'s `appoint` CLI.
 **Recommendation: (a).** One fewer unauthenticated amplifier, and the
 submit path already does the job once.
 
-### Q23. The `/auth` popup flow and sign-request IPC commands (WS5 W5-10, Low)
+### Q31. The `/auth` popup flow and sign-request IPC commands (WS5 W5-10, Low)
 
 `GET /auth`, `POST /auth/request`, `GET /auth/status/:id` plus the six
 sign-request IPC commands implement a daemon-mediated login popup. No client
