@@ -1,11 +1,11 @@
 ---
 # sbo-ip5k
 title: 'WS7: supply chain, CI gates, build/deploy, secret scan, logging PII'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:40Z
-updated_at: 2026-11-03T14:16:04Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -22,3 +22,6 @@ The repo has no CI at all today (no `.github/`; `[skip ci]` trailers and `make w
 ## Scope decision (Dan, 2026-11-03)
 
 In scope from the mingo repo: only the sbo-daemon deployable — `~/src/mingo/deploy/sbo-daemon/` (Dockerfile, entrypoint.sh, config.toml), `~/src/mingo/.github/workflows/deploy-daemon.yml`, and the sandmill-infra side for that app. mingo-app, mingo-idp, mingo-web and `deploy/mingo/` are OUT of scope: anything noticed there is recorded as a lead for a later separate mingo audit, not as a finding here. Infra-side remediation for the daemon deployable is filed as task beans in mingo's beans, not sbo's.
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q21 (a) weekly fuzz-smoke launchd job is a WS7/WS3 shared item.

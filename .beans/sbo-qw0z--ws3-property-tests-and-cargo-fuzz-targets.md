@@ -1,11 +1,11 @@
 ---
 # sbo-qw0z
 title: 'WS3: property tests and cargo-fuzz targets'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:39Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -22,3 +22,6 @@ All time arithmetic: HLC (`hlc.rs`), inclusion-time clock, cert/warrant exp/iat 
 - [ ] fuzz/ workspace, targets, seeds, make fuzz-smoke
 - [ ] smoke run tally (0 crashes or findings)
 - [ ] report `docs/security-audit-2026-11-ws3-fuzz-proptest.md`
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q5 (a) identity rule; Q9 (a) assertion judged at authoring instant bounded by a capped W, everything else at inclusion time; Q17 (a) role cycles need write-time validation + eval guard (property: bounded depth); Q21 (a) weekly fuzz-smoke launchd.

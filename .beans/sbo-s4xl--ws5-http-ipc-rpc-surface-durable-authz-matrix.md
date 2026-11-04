@@ -1,11 +1,11 @@
 ---
 # sbo-s4xl
 title: 'WS5: HTTP / IPC / RPC surface + durable authz matrix'
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-11-03T08:06:39Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -17,3 +17,6 @@ Daemon HTTP (`sbo-daemon/src/http.rs`): `/auth`, `/auth/request`, `/auth/status/
 - [ ] authz matrix test
 - [ ] CSRF / redirect / SSRF / limits / enumeration pass
 - [ ] report `docs/security-audit-2026-11-ws5-http-surface.md`
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q15 (a): loopback mode keeps today's behaviour; public mode drops the private-network header, CORS restricted to a configured origin list, per-source rate limits, operator allowlist (origin or bearer) for /v1/submit and /v1/dnssec. Matrix expectations are written against public mode.

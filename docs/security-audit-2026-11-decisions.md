@@ -1,6 +1,6 @@
 # Security audit 2026-11: open decisions
 
-> **Status: open — WS1 decisions Q1–Q21 await Dan.** Product and design
+> **Status: all 21 decisions settled 2026-11-04.** Kept as the record. Product and design
 > calls that remediation depends on, collected from each workstream as it
 > lands. Each item: what was found, the options, and a recommendation.
 > Reply per item number; answers are recorded here and in the affected
@@ -15,12 +15,12 @@
 | Workstream | Bean | Result |
 |---|---|---|
 | WS1 threat model + spec review | sbo-dl2l | Done 2026-11-03. 10 adversaries, 14 boundaries, 36 invariants. 50 code leads D1–D58 (3 Critical, 13 High pre-verification), 20 spec findings S1–S22. All 12 open July 2026 leads still present. 21 decisions below. |
-| WS2 conformance vectors | sbo-5t0f | Blocked on Q1, Q4, Q5. |
-| WS3 fuzz + proptest | sbo-qw0z | Blocked on Q5, Q9. |
-| WS4 never-audited layers | sbo-f8cj | Ready (owns D7, D11, D12, D15–D17, D20–D23, D25–D28, D33, D34, D39, D55–D58). |
-| WS5 HTTP / IPC surface | sbo-s4xl | Blocked on Q15 for the matrix expectations; D18, D19, D37, D38, D50, D52 otherwise ready. |
-| WS6 crypto core / verification | sbo-iye5 | Blocked on Q7 (genesis shape) and Q19 (zkVM scope); D1–D6, D8–D10, D24, D30 otherwise ready. |
-| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Ready (D35, D36). |
+| WS2 conformance vectors | sbo-5t0f | Running (Q1, Q4, Q5 settled). |
+| WS3 fuzz + proptest | sbo-qw0z | Running. |
+| WS4 never-audited layers | sbo-f8cj | Running (owns D7, D11, D12, D15–D17, D20–D23, D25–D28, D33, D34, D39, D55–D58). |
+| WS5 HTTP / IPC surface | sbo-s4xl | Running (Q15 settled); D18, D19, D37, D38, D50, D52 otherwise ready. |
+| WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
+| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Running (D35, D36). |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
 | WS9 ledger + remediation beans | sbo-q92z | Blocked on WS2–WS8. |
 
@@ -59,6 +59,8 @@ already describes the device model. WS2's vectors must encode one of them.
 **Recommendation: (a).** The device model is what browserid-ng ships and
 what mingo produces; the single-cert text is history.
 
+**Decided 2026-11-04 (Dan): (a).** History checked: `Auth-Warrant` was added 2026-07-11 (6b5d3f5) so an agent cert would be inert without a delegator-signed, audience-bound warrant; the 2026-07-20 device-cert refactor (ac48868) folded both properties into the four-object presentation (warrant is object 3, assertion carries the audience, fail-closed for every identity). Nothing was lost; carry the `sign:sbo:<action>` scope grammar into the rewrite.
+
 ### Q2. `brokers.v1` payload shape (S3)
 
 Spec: `{ "brokers": ["broker.example"] }`. Code: a bare JSON array. A
@@ -70,6 +72,8 @@ write rejected).
 
 **Recommendation: (b)** unless a regenesis is already planned for D3/D4
 (Q18), in which case (a) rides along.
+
+**Decided 2026-11-04 (Dan): (a).** Judged on shape alone (regenesis cost ignored): the object form matches `dns-root.v1` and can grow per-broker fields.
 
 ### Q3. Pinned root KSK (S4, D6, July `sbo-y5ek`)
 
@@ -83,6 +87,8 @@ inject it into `dnssec-prover` and never reads the object.
   rollover can break replay of old evidence until the library updates.
 
 **Recommendation: (a).** Durability of replay across the next IANA
+
+**Decided 2026-11-04 (Dan): (a).**
 rollover is the spec's central promise; (b) gives it up.
 
 ### Q4. Batch atomicity (S5, D29)
@@ -100,6 +106,10 @@ write in one batch, which under (a) couples their fate.
 semantics and costs the refresh design; the genesis case (the one listed
 motivation) is covered by Q7.
 
+**Independent survey 2026-11-04 (per Dan, before committing to (b)):** per-message is the only semantics any shipped code implements, and the live app 506 chain, its state roots and SBOP proofs already encode it; atomic would re-root the chain. Every intra-batch dependency (Policy-Ref, Auth-Evidence `ref:`, `_config` then items, transfer then update, attestation then attested write, same-slot double create) fails closed or falls back to the parent/default when the earlier message is rejected; the one "different meaning" case is a name-claim race changing a later object's creator attribute (cosmetic under global uniqueness). Atomic semantics would let one expiring assertion veto every other user's write and every evidence refresh in the shared `submit_queue` batch (griefing), undoing sbo-hy4r. Rules the spec text must state: (1) a submission that fails to parse is ignored whole; (2) strict submission order, N validated against state after 1..N-1; (3) a rejected message leaves state unchanged and is invisible to later messages; (4) an LWW loser is valid with no effect, not a rejection; (5) index within a submission is the slot tiebreak (State Commitment §"lower message index wins"); (6) state root and object_hash commit per block; (7) genesis is not an atomic exception, fail-closed bootstrap comes from Q7 ("root policy present by end of the anchor block"); (8) drop the multi-object-transfer atomicity claims, point clients at submit-time validation. Residual: IO error mid-block half-applies one node (D58).
+
+**Decided 2026-11-04 (Dan): (b)**, with the eight rules above written into the Wire spec.
+
 ### Q5. One identity-comparison rule (S6, D13, D54)
 
 No SBO spec states how two identity references compare. Code compares
@@ -112,6 +122,8 @@ byte-exact everywhere and `Id` admits several `@`.
 - (b) Byte-exact everywhere, reject uppercase domains at parse.
 
 **Recommendation: (a)** with the canonical-form rule, so comparison and
+
+**Decided 2026-11-04 (Dan): (a).**
 path matching agree.
 
 ### Q6. Bare-key owners (S7, July `sbo-4arq`)
@@ -126,6 +138,8 @@ genesis roots depend on the signer-fallback form.
   spec.
 
 **Recommendation: (a)**, as `sbo-4arq` already says.
+
+**Decided 2026-11-04 (Dan): go further than (a) — remove bare-key owners entirely.** Explicit bare-key literals in `Owner`/`Creator`/`New-Owner` are rejected AND the signer-key fallback is dropped: every write names an owner that is a `/sys/names` name or an email; a message with no owner is invalid. Key-rooted name records stay (Mode A, self-sovereign users). The single exception is the genesis batch at the anchor, where `/sys/names/sys` is self-certifying under the Q7 strict rule. Spec: Identity owner-reference table and `resolve_controller` pseudocode lose the bare-key row. Owners: WS4 (daemon owner resolution), WS6 (core `resolve`/`authorize`).
 
 ### Q7. Genesis fail-closed shape (S8, S19, D5, D23, July `sbo-9d7l`)
 
@@ -144,6 +158,8 @@ root policy appears.
 lenient rule; WS6 must check whether its genesis block passes (a) before the
 rule ships.
 
+**Decided 2026-11-04 (Dan): (a).** If the live app 506 genesis fails strict mode, regenesis.
+
 ### Q8. Self-certification required for Mode B (S9)
 
 - (a) Required for Mode B from the next genesis; plain self-signed domains
@@ -151,6 +167,8 @@ rule ships.
 - (b) Optional (current spec), with the hard reject of D7 when present.
 
 **Recommendation: (b)** now, (a) at the next regenesis.
+
+**Decided 2026-11-04 (Dan): (a)**, shipping with the Q18 regenesis.
 
 ### Q9. Authoring instant vs inclusion time for credential windows (S10, D22)
 
@@ -170,6 +188,8 @@ anyone who can create `_config`.
 
 **Recommendation: (a).**
 
+**Decided 2026-11-04 (Dan): (a).**
+
 ### Q10. Bridge spec status (S11, July `sbo-rx1z`)
 
 - (a) Mark Status: Aspirational, not implemented; leave the text.
@@ -177,6 +197,8 @@ anyone who can create `_config`.
   until implemented.
 
 **Recommendation: (a).**
+
+**Decided 2026-11-04 (Dan): (a).**
 
 ### Q11. D1 fix ordering
 
@@ -188,6 +210,8 @@ the payload swap and the pin confusion first.
 
 **Recommendation: (b)**, as in browserid-ng Q1: the report should carry a
 shown impact, and the audit rule is no production change on the branch.
+
+**Decided 2026-11-04 (Dan): (b).**
 
 ### Q12. Fast-sync trust (D26, D27)
 
@@ -202,6 +226,8 @@ shown impact, and the audit rule is no production change on the branch.
 **Recommendation: (a).** The spec is unambiguous that the manifest is
 never a trust root.
 
+**Decided 2026-11-04 (Dan): (a).**
+
 ### Q13. Owner fast-path versus policy (S13, D57)
 
 - (a) Spec wins: owner updates, transfers and deletes evaluate `deny` and
@@ -213,6 +239,8 @@ never a trust root.
 breaking every existing community policy that relies on the implicit owner
 grant; revisit (a) with a spec note.
 
+**Decided 2026-11-04 (Dan): (a), spec wins.** Nothing bypasses policy evaluation; the owner is a principal like any other. The implicit owner grant becomes an explicit default: the genesis presets and the default/root policy carry a `to: owner` grant for update/transfer/delete, so existing community policies keep working by inheriting it rather than by a code fast-path. Remediation must include a check that every policy on app 506 still admits its owners under the new rule before regenesis.
+
 ### Q14. Name claims under policy (S14, D56)
 
 - (a) Evaluate the governing policy for `/sys/names/` creates and updates
@@ -220,6 +248,8 @@ grant; revisit (a) with a spec note.
 - (b) Keep name claims policy-free and amend the Identity/Genesis specs.
 
 **Recommendation: (a).**
+
+**Decided 2026-11-04 (Dan): (a).** Dan: every path should be able to carry policy; name claims being policy-free was never intended.
 
 ### Q15. HTTP exposure model (D38, D18, D19)
 
@@ -235,6 +265,8 @@ private-network header, no limits), but da.sandmill.org binds it publicly.
 
 **Recommendation: (a).**
 
+**Decided 2026-11-04 (Dan): (a).** Understood that an Origin allowlist only raises the bar (a proxy bypasses CORS); the per-source rate limit is the real bound on TurboDA spend, and a bearer is the knob for trusted non-browser clients.
+
 ### Q16. `/sys/dnssec/` rollback (D33)
 
 - (a) A refresh must not lower the current occupant's RRSIG expiration
@@ -243,6 +275,8 @@ private-network header, no limits), but da.sandmill.org binds it publicly.
 
 **Recommendation: (a)**; it is one comparison in the policy check.
 
+**Decided 2026-11-04 (Dan): (a).**
+
 ### Q17. Role cycles (D10)
 
 - (a) Both: a policy-validation pass on write (cycles, unknown keys,
@@ -250,6 +284,8 @@ private-network header, no limits), but da.sandmill.org binds it publicly.
 - (b) Evaluation guard only.
 
 **Recommendation: (a).**
+
+**Decided 2026-11-04 (Dan): (a).**
 
 ### Q18. Root-changing fixes and regenesis (D3, D4, Q2)
 
@@ -262,6 +298,8 @@ root and every proof.
 
 **Recommendation: (a).**
 
+**Decided 2026-11-04 (Dan): (a).** Q2, Q6, Q8 and Q13 all ride this regenesis.
+
 ### Q19. zkVM scope (D8, July `sbo-5rww`)
 
 - (a) Mark `sbo-zkvm` experimental in README and specs, feature-gated,
@@ -270,6 +308,8 @@ root and every proof.
   the guest.
 
 **Recommendation: (a).**
+
+**Decided 2026-11-04 (Dan): (a).**
 
 ### Q20. DA trust (D9, D39, July `sbo-7bl8`)
 
@@ -280,6 +320,8 @@ root and every proof.
 
 **Recommendation: (a).**
 
+**Decided 2026-11-04 (Dan): (c) do nothing this round.** Correction from Dan: the Avail light client the daemon queries verifies finality and data availability itself before serving app data, so it is closer to a local full node than to a trusted remote RPC; the WS1 framing overstated the trust. Avail is expected to replace the current light client with a new light-node implementation within a couple of months, so DA-side changes (KZG, reorgs, chain-id cross-check) wait for that. WS4 records D9/D39 as accepted risk with a note on what the LC verifies (read its API docs; information only) and files one deferred follow-up bean for the light-node migration.
+
 ### Q21. Fuzzing cadence (Info)
 
 - (a) Weekly launchd `make fuzz-smoke` on the dev box, like browserid-ng
@@ -287,6 +329,8 @@ root and every proof.
 - (b) Manual only.
 
 **Recommendation: (a).**
+
+**Decided 2026-11-04 (Dan): (a).**
 
 ## 3. Already settled by the spec text (no decision needed)
 
@@ -296,6 +340,4 @@ root and every proof.
 
 ## 4. Next
 
-WS1 is done. Dan answers Q1–Q21 (Q1, Q4, Q5, Q7, Q9, Q15, Q19 unblock
-WS2/3/5/6); WS4 and WS7 can start now. Decisions get recorded here and in
-the affected beans as they arrive.
+All 21 decisions settled 2026-11-04. WS2–WS7 run in parallel; WS8 follows WS4/5/6; WS9 consolidates. New decisions from the skeptic passes are appended as Q22+.

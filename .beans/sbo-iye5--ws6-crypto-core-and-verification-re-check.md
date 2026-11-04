@@ -1,11 +1,11 @@
 ---
 # sbo-iye5
 title: 'WS6: crypto core and verification re-check'
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-11-03T08:06:39Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -17,3 +17,6 @@ Reviewer-then-skeptic over the verification core, oracle = WS1 invariants. Two e
 - [ ] tests per crate (pass / ignored tally)
 - [ ] July re-verification table
 - [ ] report `docs/security-audit-2026-11-ws6-crypto-core.md`
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q1 (a) device presentation is normative; Q3 (a) pinned root KSK must be injectable into dnssec-prover; Q6 remove bare-key owners (core resolve/authorize side); Q7 (a) strict genesis — check whether the live app 506 genesis passes; Q8 (a) self-cert required for Mode B at next regenesis; Q11 (b) PoC D1 before any fix; Q17 (a); Q18 (a) raw-bytes object_hash + trie domain separation ship together as state-commitment v2 with regenesis; Q19 (a) zkVM marked experimental, no remediation.

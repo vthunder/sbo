@@ -1,11 +1,11 @@
 ---
 # sbo-5t0f
 title: 'WS2: conformance / test-vector suite across duplicate implementations'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:39Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -28,3 +28,9 @@ Duplicate implementations to pit against each other (confirm the list while read
 - [ ] CI job
 - [ ] disagreements written up as findings W2-n with AUDIT-2026-11 tests
 - [ ] report `docs/security-audit-2026-11-ws2-conformance.md`
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q1 (a): vectors encode the four-object device presentation inside Auth-Cert; Auth-Warrant is dead on the wire.
+- Q4 (b): per-message batch semantics, ordered and state-threaded; vectors for the eight rules.
+- Q5 (a): identity comparison = exactly one @, domain lowercased A-label, local part byte-exact; canonical on-chain form lowercase domain.
+- Q2 (a): brokers.v1 is { "brokers": [...] }.

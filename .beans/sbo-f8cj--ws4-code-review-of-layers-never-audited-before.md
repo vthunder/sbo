@@ -1,11 +1,11 @@
 ---
 # sbo-f8cj
 title: 'WS4: code review of layers never audited before'
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-11-03T08:06:39Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:39:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -25,3 +25,7 @@ Candidates from WS1 routed here are confirmed/refuted with tests (ignored AUDIT-
 - [ ] per-layer candidate list
 - [ ] skeptic pass with tests
 - [ ] report `docs/security-audit-2026-11-ws4-layers.md`
+
+## Decisions affecting this workstream (settled 2026-11-04, see docs/security-audit-2026-11-decisions.md)
+- Q6: remove bare-key owners entirely (explicit literal rejected AND signer fallback dropped; genesis anchor is the only exception) — daemon owner resolution side.
+- Q7 (a) strict genesis; Q9 (a) authoring instant for the assertion only, W capped, _config privileged; Q12 (a) fast-sync trusts only signed checkpoints by pinned key; Q13 (a) nothing bypasses policy, implicit owner grant becomes an explicit default in presets/root policy; Q14 (a) name claims evaluate policy; Q16 (a) monotonic /sys/dnssec freshness; Q20 (c) DA/LC trust accepted this round — record D9/D39 as accepted risk, note what the Avail LC verifies (docs, information only), file one deferred bean for the light-node migration.
