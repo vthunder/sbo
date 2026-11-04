@@ -1,0 +1,380 @@
+{
+  "description": "Each vector is one wire message as received. `spec.valid` is the Wire/Core spec verdict (threat-model I1, I2, I5, I7; decisions Q5, S21, S22). `object_hash_raw` is sha256 over the bytes exactly as given (State Commitment §Object Hash). Implementations under test: sbo-core `wire::parse` + `verify_message`, sbo-wasm (same source compiled separately), the daemon's object_hash rule (sha256 of `wire::serialize(parse(bytes))`, sync.rs:1122).",
+  "key": {
+    "public_key": "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+    "seed_hex": "4242424242424242424242424242424242424242424242424242424242424242"
+  },
+  "suite": "sbo conformance 2026-11 / wire envelope",
+  "vectors": [
+    {
+      "description": "canonical post with payload",
+      "id": "W-OK-01",
+      "object_hash_raw": "66dec4ed82fb81c871a03dee74a3546fb65495acf9d4749ff3199fcb6d2d00c0",
+      "spec": {
+        "ref": "Wire §Parsing",
+        "valid": true
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "canonical transfer, no payload, no Content-Length",
+      "id": "W-OK-02",
+      "object_hash_raw": "b79028b49eb3f0fb9c5686df6ee75dbbb245600aed9bf295e408aeefb7396dde",
+      "spec": {
+        "ref": "Wire §Conditionally Required Headers",
+        "valid": true
+      },
+      "wire": "SBO-Version: 0.5\nAction: transfer\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nNew-Owner: bob@example.com\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 458ebfcb3f0f376e64f0e57b2f2241d74598c1eb7655ab938d305775c5e10f61c5739ef39cb8f5d527b811fb99aff21b5c8c4179623f7b3aaddf91878c3e7e06\n\n"
+    },
+    {
+      "description": "canonical post with Related, HLC and Prev",
+      "id": "W-OK-03",
+      "object_hash_raw": "af564e5a357efc3c490c2224339b34b1f026fd322b0ea6bcfb4f7f6c5eba6f91",
+      "spec": {
+        "ref": "Core §Related Objects",
+        "valid": true
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPrev: 0000000000000000000000000000000000000000000000000000000000000001\nRelated: [{\"rel\":\"license\",\"ref\":\"sbo+raw://avail:mainnet:13/licenses/cc-by\"}]\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 91afd1fd7e57df0ba411eeb43bde74a3ab01e14055d8916b3c379fa31626274223552b9973239d5f8f752687740b779f3fbe17cc52894e2691003f31c5712d00\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "canonical collection",
+      "id": "W-OK-04",
+      "object_hash_raw": "3d97224a522a261a7ce0957a33fd8add5be8cdf110dc3d96ecba0fc15d6e8f2e",
+      "spec": {
+        "ref": "Core §Object Types",
+        "valid": true
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: collection\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: da04d88fbd77d4f95767a0994f44d30be072de14ab0374ec6443a18ace66e5efd67bcae4f8b22bb050058f252cd68fd3656605443feb2dfb0e38be01c92d0900\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "signed message carrying the canonical `Attestation` header (bridge/import header in its canonical slot)",
+      "id": "W-OK-05",
+      "object_hash_raw": "d463baebf9032e8023fc4b7dada9e8d08ac1a514eb386473cb79b353d77d2ca9",
+      "spec": {
+        "ref": "Wire §Canonical Header Order; §Encoding Rules (unknown headers ignored does not apply: Attestation is a listed header)",
+        "valid": true
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nAttestation: bridge-attestation-opaque\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 3438404bd26dd5e2c2d493d270ddeddac322f71fe7ce75c460cbd6faa3851fa47d43f482817eb578390f84ebe19d88685d936d38971a24a524e11fd85146d40a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "payload swapped for one of equal length; headers and signature untouched",
+      "id": "W-CH-01",
+      "object_hash_raw": "fda3f093335a1c15853b5e74c1a673505b3cdab2163ddf8787728abe574d359d",
+      "spec": {
+        "ref": "Core §Signature Scope: payload is bound only via Content-Hash; Wire §Validation 5",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"EVIL!\"}"
+    },
+    {
+      "description": "Content-Hash header altered (signature then fails)",
+      "id": "W-CH-02",
+      "object_hash_raw": "429d9f5bede31c828dd16c37e7b625f364526cc0df6fcb7842530b903f8da7a7",
+      "spec": {
+        "ref": "Wire §Validation 5, 6",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff510\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "two headers swapped out of canonical order",
+      "id": "W-ORD-01",
+      "object_hash_raw": "5ec44644ffe0a79b96f12838c96f55f2b8cb88fa3f0bbb26bdcb015dbccc6a9d",
+      "spec": {
+        "ref": "Wire §Validation 2: headers not in canonical order",
+        "valid": false
+      },
+      "wire": "Action: post\nSBO-Version: 0.5\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "a header repeated with the identical value",
+      "id": "W-DUP-01",
+      "object_hash_raw": "baf1e2aab6eccc395df953c5b94c8b9009f6607033d8d219da8a27d816b52fbd",
+      "spec": {
+        "ref": "Wire §Header format (one line per header); I2",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "a header repeated; the first occurrence is unsigned attacker text, the last is the signed value",
+      "id": "W-DUP-02",
+      "object_hash_raw": "8d597894c921bd5e9220981687b4bc3a4b7869e8234acc9311816585e699bec7",
+      "spec": {
+        "ref": "I2: duplicate header",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: mallory@example.com\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "CRLF line ending on one header",
+      "id": "W-CRLF-01",
+      "object_hash_raw": "581ba7a8367f1a09929eabd13053a2de92e4dc8d52f0c77d46b6e5abd143e7f2",
+      "spec": {
+        "ref": "Wire §Encoding Rules: LF only",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\r\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Content-Length written as `+16`",
+      "id": "W-CL-01",
+      "object_hash_raw": "e6d35fad1063b258cf8699c490cd091ab408fe458d8b88c18dd7c94d744129d6",
+      "spec": {
+        "ref": "Wire §Encoding Rules: canonical decimal (S22)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: +16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Content-Length written as `016`",
+      "id": "W-CL-02",
+      "object_hash_raw": "928e7d095b141214c1d2351f3a46dfe821398b776c0e87a2683fb6f756a61978",
+      "spec": {
+        "ref": "Wire §Encoding Rules: canonical decimal (S22)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 016\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Content-Length larger than the payload",
+      "id": "W-CL-03",
+      "object_hash_raw": "dd771b1059eed0c0019b2df5ea153d92195d732ed1879b48484b39be389c374a",
+      "spec": {
+        "ref": "Wire §Validation 4",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 17\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Content-Length smaller than the payload (one trailing byte unframed)",
+      "id": "W-CL-04",
+      "object_hash_raw": "ca085148ebdbb9db0fe15c9e1453d2d6c3609cbdb3143a6fdd0ace8e1d3e8143",
+      "spec": {
+        "ref": "Wire §Validation 4",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 15\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Signature hex in uppercase",
+      "id": "W-HEX-01",
+      "object_hash_raw": "548247d2129bff8894b0c2cca5661044e84fdee7722b96361a87a766f7194653",
+      "spec": {
+        "ref": "Wire §Encoding Rules: hex lowercase (S22)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: B7C9E0843DD7BF0FB26C681E0E9E34C29FAE78FD83E99F3279C5C3FD317C842787AD78097133CD42072121E90C134EBC0E993716EA85A868F99A15DE2C9B720A\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Public-Key hex in uppercase",
+      "id": "W-HEX-02",
+      "object_hash_raw": "93f27ecf474a2d5c9b351bbfc07bf745f7131c1ce927a6e465134e53da178c32",
+      "spec": {
+        "ref": "Wire §Encoding Rules: hex lowercase (S22)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152F8D19B791D24453242E15F2EAB6CB7CFFA7B6A5ED30097960E069881DB12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "an unlisted header injected after signing",
+      "id": "W-INJ-01",
+      "object_hash_raw": "6954b2bdba784241c7a2cdda5a1888617bcda312e6c0ecadd790ea4342b6482b",
+      "spec": {
+        "ref": "Core §Signature Scope: the bytes verified are the bytes received (I2); an implementation that drops unlisted headers before verifying accepts bytes the signer never produced",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nX-Injected: by-the-network\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "the listed `Attestation` header injected after signing",
+      "id": "W-INJ-02",
+      "object_hash_raw": "8e18165096dfbad73fc144791fe42df04ea9049eb9af4108b276e8901825eab2",
+      "spec": {
+        "ref": "Core §Signature Scope (I2)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nAttestation: injected\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "ID is `..`",
+      "id": "W-ID-01",
+      "object_hash_raw": "122592454622928562a7ac920f67debfbe244a7c646052778b4de5227ba95a26",
+      "spec": {
+        "ref": "I5 / D21",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: ..\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: c8de79226fff64e47fd38f16885d43aece810bca0c27fb5373d746060b360b7cf6ee91694c6e6325c5f87cd4a90bed721bdd085c627767ba9d581ab91d19210d\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Path contains a `..` segment",
+      "id": "W-ID-02",
+      "object_hash_raw": "40ff1c08ea028c985acde65d2456ab57d43c2137ca5272c3e9d3f8e94afb73dc",
+      "spec": {
+        "ref": "I5 / D21",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/../\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 39a367a44993f0015598417bfa53c093736dea43f2efbe4bd3dde0d37866779f19a555f9d187f917527a18110d242ca1c2076869fbdd02b120701c0a8ec8fa09\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Owner carries two `@`",
+      "id": "W-ID-03",
+      "object_hash_raw": "e2fd7135816e860ec7a1b8ba1528c9439a2bdaa382280fcba4adb57d47c2ffa2",
+      "spec": {
+        "ref": "Q5 / D54",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com@evil\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 1958945b7f10e0caa38173e71f799d60ecc96e995bff3ad9af3cb6c086c33caa261be8803280ac07bad7b0cfdc40a965350a4018e306f1c03e0f257fcdf18a00\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Owner domain in uppercase (non-canonical on-chain form)",
+      "id": "W-ID-04",
+      "object_hash_raw": "5ef34d161e0ed3f583a32be7b6b1a65d915ab913547287ee570d498de6f55701",
+      "spec": {
+        "ref": "Q5: canonical lowercase domain",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@EXAMPLE.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: e72bfc8f1e84aab239c48fb86b0131da179cb45bb90cac986fa6dbfddb783269ed57657362b551b3a1514eba71f25e6a8b3b8f4a11d1418680048eb9bdc9ca05\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Type: Object (case)",
+      "id": "W-ENUM-01",
+      "object_hash_raw": "eb32326dc50afa8747efe70389c824f48f4490b2749e79da869b2fd760c3973c",
+      "spec": {
+        "ref": "Wire §Validation 9",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: Object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Action: POST (case)",
+      "id": "W-ENUM-02",
+      "object_hash_raw": "c9b46f403ae3fdf5de1ac216818105ce96a4e480c0642daaf33a8aa427d8a04e",
+      "spec": {
+        "ref": "Wire §Validation 8",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: POST\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Action: create (not a wire action)",
+      "id": "W-ENUM-03",
+      "object_hash_raw": "55814396a5c192600cf48e51330df6a8fc19c7634b0bfd87cfc429941ee904d5",
+      "spec": {
+        "ref": "Wire §Validation 8",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: create\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "SBO-Version: 0.6",
+      "id": "W-ENUM-04",
+      "object_hash_raw": "650a56ed4398e92387444b077c022c4e8912827cb44a5f3098c5db4b6158fe02",
+      "spec": {
+        "ref": "Wire §Validation 7",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.6\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Public-Key with secp256k1 prefix",
+      "id": "W-ENUM-05",
+      "object_hash_raw": "eda04e839aff9d4c1245035b209489a7f8ddca096b8dc4bef682a098d6b885ce",
+      "spec": {
+        "ref": "Wire §Validation 11 (S21: ed25519 is the only REQUIRED algorithm)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: secp256k1:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Content-Hash with keccak256 prefix",
+      "id": "W-ENUM-06",
+      "object_hash_raw": "3cc66424a54ac4d468d26f1dcdaca13b13b30908a70b0175ed827bfb6ccb9ca7",
+      "spec": {
+        "ref": "Wire §Validation 11 (S21)",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: keccak256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "one signature bit flipped",
+      "id": "W-SIG-01",
+      "object_hash_raw": "7fe66e4222c5da53cb491eaa153a6e0a19aa7976ebc44462579f8b7a869ec80c",
+      "spec": {
+        "ref": "Wire §Validation 6",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c691e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "signature truncated to 63 bytes",
+      "id": "W-SIG-02",
+      "object_hash_raw": "494ab903fda34af32831ab1f50ac92da355c3189897dc0036fc31c8da9060231",
+      "spec": {
+        "ref": "Wire §Validation 10",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b72\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "signed by another key, Public-Key claims the first",
+      "id": "W-SIG-03",
+      "object_hash_raw": "6fd8321a1e7ad21dd96c65074f632a13826ac01b71f197f0c6e3b7d22d933885",
+      "spec": {
+        "ref": "Wire §Validation 6",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: f78e598efc6d2f948dc402471fceb6cb875a5146f4664683d900ff88ae5eef2648b6ee24b59a8da2eec78c967732aca921c85a4a8f87cb0328efb4a3e3ed0002\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Signature header missing",
+      "id": "W-SIG-04",
+      "object_hash_raw": "b3f056ec464e74fab404c8dd33f6489373d868651982ef85862ef824b4ca5cc1",
+      "spec": {
+        "ref": "Wire §Validation 3",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "no blank line between headers and payload",
+      "id": "W-STR-01",
+      "object_hash_raw": "635b4fe8425709e5ad81637d4fc6788d808bccbe39f5b457159d81bc451085af",
+      "spec": {
+        "ref": "Wire §Parsing",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "header separator without the space (`Action:post`)",
+      "id": "W-STR-02",
+      "object_hash_raw": "9491037ea15dce0ad4bede751d739cce182282bb13424ff74952e3fee7d5ff1e",
+      "spec": {
+        "ref": "Wire §Encoding Rules: `Name: value`",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction:post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "Path header missing",
+      "id": "W-STR-03",
+      "object_hash_raw": "034ee9f941a7fafc9213314800b26e38dff5178a72af357cbf36ba16a798408d",
+      "spec": {
+        "ref": "Wire §Validation 3",
+        "valid": false
+      },
+      "wire": "SBO-Version: 0.5\nAction: post\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice@example.com\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: b7c9e0843dd7bf0fb26c681e0e9e34c29fae78fd83e99f3279c5c3fd317c842787ad78097133cd42072121e90c134ebc0e993716ea85a868f99a15de2c9b720a\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "description": "empty input",
+      "id": "W-STR-04",
+      "object_hash_raw": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "spec": {
+        "ref": "Wire §Parsing",
+        "valid": false
+      },
+      "wire": ""
+    }
+  ]
+}

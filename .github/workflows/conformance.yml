@@ -1,0 +1,74 @@
+# Security audit 2026-11, WS2: cross-implementation conformance vectors.
+#
+# Runs every `audit_2026_11_ws2_*` runner (sbo-core, sbo-wasm, sbo-types,
+# sbo-crypto, sbo-daemon) against `conformance/*.json`. Each runner carries an
+# expected-fail table naming the audit finding that owns a disagreement; the
+# job goes red if an implementation disagrees with the spec anywhere else, OR
+# if a listed vector starts agreeing without its table entry being removed.
+# Removing an entry is the acceptance test for the fix.
+#
+# Separate from the workspace test job (WS7, test.yml) so a conformance
+# regression is visible by name.
+
+name: conformance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "conformance/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/conformance.yml"
+  pull_request:
+    paths:
+      - "conformance/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/conformance.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain the daemon image builds with (mingo deploy/sbo-daemon/Dockerfile).
+      - uses: dtolnay/rust-toolchain@cfcaf53ba4c621917ec7f78a66bff7a8848ddad4 # 1.85.0 tag commit; toolchain pinned by input
+        with:
+          toolchain: "1.93"
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # rocksdb (sbo-core `storage`, sbo-daemon) needs clang + cmake.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler
+
+      - name: Conformance vectors (every implementation of the same check)
+        run: |
+          cargo test -p sbo-types  --test audit_2026_11_ws2_types
+          cargo test -p sbo-crypto --test audit_2026_11_ws2_crypto
+          cargo test -p sbo-core   --test audit_2026_11_ws2_core
+          cargo test -p sbo-wasm   --test audit_2026_11_ws2_wasm
+          cargo test -p sbo-daemon --test audit_2026_11_ws2_daemon
+
+      # The vectors are generated from a fixed seed; a drifted generator or a
+      # hand edit to the JSON must not go unnoticed.
+      - name: Vectors are reproducible
+        run: |
+          cargo test -p sbo-core --test audit_2026_11_ws2_generate -- --ignored
+          git diff --exit-code -- conformance/

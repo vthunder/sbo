@@ -1,0 +1,65 @@
+{
+  "description": "State Commitment §State Tree Structure: node hash = sha256 of canonical JSON {\"children\":{seg:\"sha256:<hex>\",…}} with sorted keys; leaf value = object_hash. Threat-model I30: a leaf and an internal node are distinguishable (D4). Implementations: sbo-crypto `SparseTrie` (builder), `PartialTrie` via `verify_state_transition` (verifier, also the zkVM guest's code), sbo-core `StateDb::compute_trie_state_root` (daemon, rocksdb). `root` is what the builder computes today and every other implementation must reproduce; `distinct_from` names a vector whose root the spec requires to differ.",
+  "suite": "sbo conformance 2026-11 / state trie",
+  "vectors": [
+    {
+      "id": "TRIE-01",
+      "objects": [
+        {
+          "object_hash": "1244d48bb80500bdb33fa00d6ce8464f3b027486d5b4c0de7bba92d5046d1072",
+          "segments": [
+            "a",
+            "b"
+          ]
+        }
+      ],
+      "root": "d2ce21c00970cfe53484b505a48534f563ec9ba9ebed7e3940196f202c2ec25d"
+    },
+    {
+      "id": "TRIE-02",
+      "objects": [
+        {
+          "object_hash": "1244d48bb80500bdb33fa00d6ce8464f3b027486d5b4c0de7bba92d5046d1072",
+          "segments": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "object_hash": "da44296012d2d4d45aec191c2e80eb0fdee240935f4ac900adbc7eb75dbdc648",
+          "segments": [
+            "a",
+            "c"
+          ]
+        },
+        {
+          "object_hash": "d8d8407f260739439fcc23861e7fc190d87d54e75c7c3ac5c7741479cc276760",
+          "segments": [
+            "z"
+          ]
+        }
+      ],
+      "root": "6eb189447ae1c89396f793b150313ee6f9033ed8776989feb938053c4c56861b"
+    },
+    {
+      "description": "object at [a] whose object_hash equals the hash of the node {b: H}",
+      "distinct_from": "TRIE-01",
+      "id": "TRIE-03",
+      "objects": [
+        {
+          "object_hash": "5cd6338b0a9ebfbb60aec3e8a8e119b875be827a664d4283e790134d38b81493",
+          "segments": [
+            "a"
+          ]
+        }
+      ],
+      "root": "d2ce21c00970cfe53484b505a48534f563ec9ba9ebed7e3940196f202c2ec25d"
+    },
+    {
+      "description": "empty state",
+      "id": "TRIE-04",
+      "objects": [],
+      "root": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

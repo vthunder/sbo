@@ -1,0 +1,61 @@
+{
+  "description": "Threat-model I7: both wrappers (`sbo-core::crypto::ed25519::verify`, `sbo-crypto::ed25519::verify`) accept exactly the same signatures, and the spec admits one canonical signature per (key, message): RFC 8032 §5.1.7 canonical S, no small-order keys (D30).",
+  "suite": "sbo conformance 2026-11 / ed25519",
+  "vectors": [
+    {
+      "id": "ED-OK-01",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "signature": "3d02562d2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ce129404ec0a4e7dae7e92ef2e634ffb36bfe0db0bc5ea6147996891afc219406",
+      "valid": true
+    },
+    {
+      "description": "tampered signature",
+      "id": "ED-REJ-01",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "signature": "3d0256ad2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ce129404ec0a4e7dae7e92ef2e634ffb36bfe0db0bc5ea6147996891afc219406",
+      "valid": false
+    },
+    {
+      "description": "wrong message",
+      "id": "ED-REJ-02",
+      "message_hex": "6f74686572",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "signature": "3d02562d2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ce129404ec0a4e7dae7e92ef2e634ffb36bfe0db0bc5ea6147996891afc219406",
+      "valid": false
+    },
+    {
+      "description": "non-canonical S (S + L)",
+      "id": "ED-REJ-03",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "signature": "3d02562d2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ccefd35abda07fa32be862695c52edec86bfe0db0bc5ea6147996891afc219416",
+      "valid": false
+    },
+    {
+      "description": "small-order public key (identity point), R = identity, S = 0",
+      "id": "ED-REJ-04",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "0100000000000000000000000000000000000000000000000000000000000000",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "valid": false
+    },
+    {
+      "description": "public key of 31 bytes",
+      "id": "ED-REJ-05",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db",
+      "signature": "3d02562d2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ce129404ec0a4e7dae7e92ef2e634ffb36bfe0db0bc5ea6147996891afc219406",
+      "valid": false
+    },
+    {
+      "description": "signature of 65 bytes",
+      "id": "ED-REJ-06",
+      "message_hex": "73626f20636f6e666f726d616e636520323032362d3131",
+      "public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "signature": "3d02562d2e8cb7c939b044005a7508b5da96a591d7e95873532daeb1bcbd735ce129404ec0a4e7dae7e92ef2e634ffb36bfe0db0bc5ea6147996891afc21940600",
+      "valid": false
+    }
+  ]
+}

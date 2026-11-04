@@ -1,0 +1,29 @@
+{
+  "suite": "sbo conformance 2026-11 / identity comparison",
+  "description": "Decision Q5 (2026-11-04): two identity references are the same identity iff the local part is byte-equal and the domain is equal as a lowercased A-label; exactly one `@`. Every comparison site (`resolve::resolve_controller` primary-domain match, `dns::parse_email`, policy `canonical_name_ref`, `device_attribution` check_authority) follows this one rule (threat-model I23).",
+  "primary_domain": "example.com",
+  "pairs": [
+    {"id": "IDC-01", "a": "alice@example.com", "b": "alice@example.com", "equal": true},
+    {"id": "IDC-02", "a": "alice@example.com", "b": "alice@EXAMPLE.COM", "equal": true, "note": "domain case-insensitive"},
+    {"id": "IDC-03", "a": "alice@example.com", "b": "Alice@example.com", "equal": false, "note": "local part byte-exact"},
+    {"id": "IDC-04", "a": "alice@example.com", "b": "alice+bot@example.com", "equal": false, "note": "subaddress is a distinct identity"},
+    {"id": "IDC-05", "a": "alice@example.com", "b": "alice@example.com.", "equal": false, "note": "trailing dot is a different label string"},
+    {"id": "IDC-06", "a": "alice@xn--bcher-kva.example", "b": "alice@XN--BCHER-KVA.example", "equal": true},
+    {"id": "IDC-07", "a": "alice@example.com", "b": "alice@example.org", "equal": false}
+  ],
+  "domain_of": [
+    {"id": "IDD-01", "identity": "alice@example.com", "domain": "example.com"},
+    {"id": "IDD-02", "identity": "alice@EXAMPLE.com", "domain": "example.com", "note": "lowercased A-label"},
+    {"id": "IDD-03", "identity": "alice+bot@example.com", "domain": "example.com"},
+    {"id": "IDD-04", "identity": "a@mingo.place@evil", "domain": null, "note": "D54: two `@` is not an identity; neither `mingo.place` nor `mingo.place@evil`"},
+    {"id": "IDD-05", "identity": "alice", "domain": null, "note": "a bare name has no domain"},
+    {"id": "IDD-06", "identity": "@example.com", "domain": null},
+    {"id": "IDD-07", "identity": "alice@", "domain": null}
+  ],
+  "resolve_through_primary_domain": [
+    {"id": "IDR-01", "reference": "alice@example.com", "name_record_for": "alice", "resolves_to_name_record": true},
+    {"id": "IDR-02", "reference": "alice@EXAMPLE.com", "name_record_for": "alice", "resolves_to_name_record": true, "note": "Q5: domain compared case-insensitively; today byte-exact (D13)"},
+    {"id": "IDR-03", "reference": "Alice@example.com", "name_record_for": "alice", "resolves_to_name_record": false, "note": "local part byte-exact"},
+    {"id": "IDR-04", "reference": "alice@example.org", "name_record_for": "alice", "resolves_to_name_record": false}
+  ]
+}
