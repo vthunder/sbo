@@ -19,7 +19,7 @@
 | WS3 fuzz + proptest | sbo-qw0z | Running. |
 | WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q30, Q31 (numbered past the WS4/WS7 Q22–Q25 pairs). |
-| WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
+| WS6 crypto core / verification | sbo-iye5 | Done 2026-11-04. 12 candidates: 9 confirmed, 2 partial (D3, D24), 1 read-only (D8). 5 new findings W6-1..W6-5. Tests: sbo-core 13 pass / 14 ignored, sbo-crypto 2 / 1 (+1 kzg), sbo-daemon 0 / 3. Live v5 genesis passes Q7 only under Q33 (a); fails Q8 either way. Decisions Q32, Q33. |
 | WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q26–Q29. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
 | WS9 ledger + remediation beans | sbo-q92z | Blocked on WS2–WS8. |
@@ -479,6 +479,52 @@ and the assertion is a 64-bit bearer.
 
 **Recommendation: (a).** Dead surface is the cheapest surface to secure;
 the device-cert model made this flow obsolete.
+
+### Q32. Unknown headers versus a raw-bytes `object_hash` (WS6 W6-4, Medium)
+
+The Wire spec says unknown headers are ignored, and the signature covers
+only the modelled headers in canonical order. The State Commitment spec,
+and Q18, say `object_hash = sha256(raw_sbo_bytes)`. Both cannot hold: a
+relay can append `X-Relay: injected` to any signed message, every parser
+accepts it, and the raw hash (hence the state root and every proof)
+changes. Today the code hashes the reserialization, which quietly picks the
+second rule and breaks the first spec. Test: `d2_unsigned_unknown_header_is_rejected`.
+
+- (a) Fail closed: the parser rejects any header it does not model, and the
+  signing content is the received header block minus the `Signature` line.
+  Then every accepted message is canonical, raw and reserialized hashes
+  coincide, and the spec text can keep `sha256(raw_sbo_bytes)`.
+- (b) Keep "unknown headers are ignored" and amend the State Commitment and
+  Genesis specs to define `object_hash` and `genesisHash` over the
+  canonical serialization of the modelled headers.
+
+**Recommendation: (a).** Forward compatibility for new headers is better
+served by a version bump than by unsigned bytes in a signed message; it is
+also the only option under which the July `sbo-2tue` fix (hash the raw
+bytes) is safe.
+
+### Q33. Shape of the genesis batch under strict mode (WS6 D5)
+
+Q7 (a) says only the genesis batch at the anchor is valid before a root
+policy exists and `Genesis::validate` checks it structurally. The live v5
+and v6 batches put nine community objects, policies and configs *before*
+`/sys/policies/root`, which is the last of 14 messages. Under Q4 (b)
+per-message state threading those nine writes are evaluated before any
+policy exists.
+
+- (a) The anchor submission is one structural unit: the mode objects must
+  appear in their relative order (dnssec, domain, sys, root), the root
+  policy may sit anywhere in the submission, and every other message in
+  the submission is accepted without policy evaluation (today's lenient
+  rule confined to the anchor submission). The live layout passes.
+- (b) The mode objects come first, in order, and every message after the
+  root policy is validated normally against the state it left (Q4). The
+  live layout fails; the regenesis Dan already accepted (Q8, Q18) puts the
+  root policy fourth and the community objects after it, where they get a
+  real policy check.
+
+**Recommendation: (b).** It is the only reading consistent with Q4, it
+removes the last accept-all window, and the regenesis is already planned.
 
 ## 3. Already settled by the spec text (no decision needed)
 
