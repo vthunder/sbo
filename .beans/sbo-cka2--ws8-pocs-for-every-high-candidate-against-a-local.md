@@ -1,11 +1,11 @@
 ---
 # sbo-cka2
 title: 'WS8: PoCs for every High+ candidate against a local instance'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:40Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T20:56:48Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
