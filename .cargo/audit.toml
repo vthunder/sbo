@@ -1,0 +1,32 @@
+# cargo-audit configuration (security audit 2026-11, WS7). Read by `cargo
+# audit` from the workspace root; the CI gate is
+# .github/workflows/supply-chain.yml. Policy: every RUSTSEC *vulnerability*
+# fails the gate unless listed here with a reason and a review date.
+# Unsound/unmaintained *warnings* are reported but do not fail. Keep this list
+# in step with `[advisories].ignore` in deny.toml.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.24.4 (hickory-resolver in sbo-core): O(n^2) name
+    # compression on ENCODE. Fixed only in 0.26.1, a major bump of
+    # hickory-resolver, not a lockfile change. Encode side is our own short
+    # queries. Review: 2027-02-01.
+    "RUSTSEC-2026-0119",
+    # rsa 0.9 Marvin timing side channel: no upstream fix. Reaches the tree only
+    # through rzup/risc0-build in the non-default sbo-zkvm crate (Q19:
+    # experimental, no trust claim); daemon and CLI never link it. Review:
+    # 2027-02-01.
+    "RUSTSEC-2023-0071",
+    # zip 2.4.2 (risc0-circuit-recursion in the non-default sbo-zkvm crate): four
+    # extraction advisories (symlink escape, SUID bits, abort); patched only in
+    # zip 9, a major bump that waits on risc0. The daemon and CLI never link
+    # zip and extract no archives. Q19: experimental. Review: 2027-02-01.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    # tracing-subscriber 0.2.25 (ark-relations via risc0-groth16, sbo-zkvm
+    # only): ANSI escapes in logged input. Fixed in 0.3.20; the 0.2 line is
+    # pinned by ark. Not linked by the daemon or CLI. Review: 2027-02-01.
+    "RUSTSEC-2025-0055",
+]

@@ -1,0 +1,83 @@
+# cargo-deny policy (security audit 2026-11, WS7). Run by
+# .github/workflows/supply-chain.yml and locally with `cargo deny check`.
+#
+# advisories: every RUSTSEC vulnerability fails unless listed in `ignore`
+#             with a reason and a review date (unmaintained/unsound warn only).
+# bans:       duplicate crate versions are warnings (the tree has two reqwest,
+#             two rustls, two h2 by way of reqwest 0.11 vs 0.12 — W7-6).
+# licenses:   permissive allow-list; the workspace itself is MIT OR Apache-2.0.
+# sources:    git dependencies only from the two organisations we pin to.
+
+[graph]
+all-features = false
+targets = []
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = [
+    # hickory-proto 0.24.4 (via hickory-resolver in sbo-core): O(n²) name
+    # compression on ENCODE. Fixed only in 0.26.1 (major bump of
+    # hickory-resolver, not a lockfile change). Encode side is our own short
+    # queries, not attacker input. Same entry as browserid-ng. Review 2027-02-01.
+    "RUSTSEC-2026-0119",
+    # rsa 0.9.x Marvin timing side channel: no fix exists upstream. Pulled only
+    # by rzup/risc0-build in the non-default sbo-zkvm crate (Q19: experimental,
+    # no trust claim); nothing in the daemon or CLI uses RSA. Review 2027-02-01.
+    "RUSTSEC-2023-0071",
+    # zip 2.4.2 (risc0-circuit-recursion in the non-default sbo-zkvm crate): four
+    # extraction advisories (symlink escape, SUID bits, abort); patched only in
+    # zip 9, a major bump that waits on risc0. The daemon and CLI never link
+    # zip and extract no archives. Q19: experimental. Review: 2027-02-01.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    # tracing-subscriber 0.2.25 (ark-relations via risc0-groth16, sbo-zkvm
+    # only): ANSI escapes in logged input. Fixed in 0.3.20; the 0.2 line is
+    # pinned by ark. Not linked by the daemon or CLI. Review: 2027-02-01.
+    "RUSTSEC-2025-0055",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause",
+    "BSD-3-Clause", "ISC", "Unicode-3.0", "Unicode-DFS-2016", "Zlib",
+    "MPL-2.0", "CC0-1.0", "BSL-1.0", "0BSD", "OpenSSL", "Unlicense",
+    "CDLA-Permissive-2.0", "GPL-3.0", "MIT-0", "NCSA",
+    # LGPL-3.0 reaches the tree only through risc0 (rzup -> downloader,
+    # risc0-circuit-* -> malachite), i.e. the non-default sbo-zkvm crate.
+    # Nothing in the daemon or CLI links it. Review when Q19 changes.
+    "LGPL-3.0-only", "LGPL-3.0-or-later",
+]
+exceptions = []
+# sbo-zkvm-methods (crates/sbo-zkvm/methods/Cargo.toml) declares no `license`
+# field (W7-8); the one-line fix is `license.workspace = true` in that
+# manifest, which is a production-manifest edit left to remediation. Until
+# then the crate is exempted here so the check stays meaningful for the
+# third-party tree.
+[[licenses.clarify]]
+crate = "sbo-zkvm-methods"
+expression = "MIT OR Apache-2.0" # the workspace license, which the manifest should inherit
+license-files = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = ["vthunder", "availproject"]

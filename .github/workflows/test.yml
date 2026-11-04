@@ -1,0 +1,53 @@
+# Run the Rust workspace test suite on every push and PR (security audit
+# 2026-11, WS7 finding W7-1: nothing gated `main` before this; the only
+# required status check on the branch was the IP-approval gate).
+#
+# `cargo test` with no `-p` operates on `default-members` (Cargo.toml), which
+# excludes the RISC Zero crates: those need the risc0 toolchain and are
+# experimental (decision Q19). Third-party actions are pinned by commit SHA
+# with the release in a trailing comment; Dependabot (github-actions only)
+# keeps the two in step.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain the deploy image builds with (rust:1.93-bookworm in
+      # mingo/deploy/sbo-daemon/Dockerfile).
+      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+
+      - name: Native build deps (rocksdb bindgen, protobuf for avail-rust)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake protobuf-compiler
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Test (default members)
+        run: cargo test --locked
+
+      # Audit tests encoding confirmed findings are `#[ignore]`d with an
+      # `AUDIT-2026-11 <id>: fails today` comment; they are listed here so a
+      # fix that un-ignores one is exercised, and a regression that makes a
+      # passing audit test fail is caught.
+      - name: Audit pins (non-ignored)
+        run: cargo test --locked -- audit_2026_11

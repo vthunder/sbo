@@ -1,6 +1,6 @@
 # Security audit 2026-11: open decisions
 
-> **Status: all 21 decisions settled 2026-11-04.** Kept as the record. Product and design
+> **Status: Q1–Q21 settled 2026-11-04; Q22–Q25 (WS4) open.** Product and design
 > calls that remediation depends on, collected from each workstream as it
 > lands. Each item: what was found, the options, and a recommendation.
 > Reply per item number; answers are recorded here and in the affected
@@ -20,7 +20,7 @@
 | WS4 never-audited layers | sbo-f8cj | Running (owns D7, D11, D12, D15–D17, D20–D23, D25–D28, D33, D34, D39, D55–D58). |
 | WS5 HTTP / IPC surface | sbo-s4xl | Running (Q15 settled); D18, D19, D37, D38, D50, D52 otherwise ready. |
 | WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
-| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Running (D35, D36). |
+| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q22–Q25. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
 | WS9 ledger + remediation beans | sbo-q92z | Blocked on WS2–WS8. |
 
@@ -331,6 +331,124 @@ root and every proof.
 **Recommendation: (a).**
 
 **Decided 2026-11-04 (Dan): (a).**
+
+### Q22. IPC authorization model (WS4 D20)
+
+The daemon's unix socket is created with the process umask (measured
+`0755`); every command — `Shutdown`, `ApproveSignRequest`, `RepoAdd` to any
+directory, `Submit` (TurboDA spend) — needs only socket access, so on a
+multi-user host any local account drives the daemon. `RepoRemove` was
+refuted as an arbitrary delete (it removes the daemon's own state dir).
+
+- (a) `chmod 0600` the socket (and `0700` its parent) right after bind;
+  same-uid callers keep full access. One line; enough for a single-user host
+  and for the dokku container.
+- (b) (a) plus a per-command authorization token for the mutating commands,
+  for shared hosts.
+
+**Recommendation: (a).** A same-uid process can already read the keyring,
+so a token adds nothing on the hosts we run.
+
+### Q23. A block with no inclusion time (WS4 D28)
+
+`rpc.rs` treats a missing `timestamp.set` as non-fatal. `validate.rs` then
+evaluates attestations at `t = 0` (every ban lifts), skips the HLC bound,
+and fails attributed writes closed — so a node without the timestamp applies
+a different set of writes from the same block than a node with it.
+
+- (a) A block whose timestamp cannot be read is a fetch failure: retry, never
+  process it, same as "block not available".
+- (b) Process it with every attested, attributed and HLC-bearing write
+  failing closed (deterministic, but divergent from nodes that have it).
+
+**Recommendation: (a).** The timestamp is in the block; failing to read it is
+transport, not chain state.
+
+### Q24. Filesystem mirror encoding and failure policy (WS4 D21, D58)
+
+On-chain path segments and ids are joined into the mirror path verbatim.
+`Id` admits `.` and `..`, so a write escapes the repo directory; an id and a
+collection name share one grammar, so `/c/x` (file) and `/c/x/y` (needs a
+directory) collide; any mirror error aborts the block mid-way on that node
+and `run` moves to the next block.
+
+- (a) Grammar: `.` and `..` are not valid ids (spec Core §Identifier Syntax
+  and core `Id::new`). Mirror: best-effort — the state DB is authoritative,
+  a mirror write failure logs and never aborts validation or state; objects
+  and collections get a collision-free layout (e.g. objects as
+  `<id>` files, collections as `<id>.d/` directories, or percent-encoding of
+  `.`-only segments).
+- (b) Grammar fix only; keep the mirror authoritative and halt sync on any
+  mirror error so an operator notices.
+
+**Recommendation: (a).** A mirror error must not fork state; state is in
+RocksDB and the trie, the mirror is a view.
+
+### Q25. Overlay rule on a missing HLC (WS4 D17)
+
+`overlay_wins` (read merge) lets a pending write without an HLC shadow a
+confirmed one; `pending_still_wins` (reconcile) drops that pending write when
+the confirming value lands. The tip can show a value that is about to be
+discarded.
+
+- (a) Align the read merge with reconcile: on a missing or unparseable HLC
+  the confirmed value wins.
+- (b) Keep the optimistic tip.
+
+**Recommendation: (a).** One rule for both sides; HLC-less writes are the
+legacy case anyway.
+
+### Q22. WS7: supply-chain gate is red until the bumps land (W7-2, W7-6)
+
+The new `supply-chain.yml` fails on main today: 34 RUSTSEC advisories, all of
+which close with R7-1 (`cargo update`, after pinning `avail-rust` by rev) and
+R7-2 (delete the unused `reqwest 0.11` from `sbo-core`, the only thing holding
+rustls 0.21). Both are production changes (lockfile, one manifest line), which
+the audit rule keeps off the branch.
+
+- (a) Land R7-1 and R7-2 on the branch now so the gate is green at PR time
+  (browserid-ng Q8 chose this).
+- (b) Keep the audit rule; the gate stays red until the remediation bean lands.
+
+**Recommendation: (a).** Nothing a deployed binary links stays vulnerable, and
+a green gate on the first PR is what makes people keep it.
+
+### Q23. WS7: daemon container runs as root (W7-12, Medium)
+
+`/data` holds the checkpoint and attestor secret keys, the state index and the
+unix socket, all root-owned; any RCE in the daemon is uid 0 in the namespace.
+The fix needs a one-time chown of the dokku storage dir on the hobby host,
+so it is coordinated with sandmill-infra (same shape as browserid-ng Q9).
+
+- (a) `USER` in the Dockerfile + chown on the host + read-only fs /
+  no-new-privileges docker-options + `app.json` healthcheck; mingo and
+  sandmill-infra task beans.
+- (b) Leave as is.
+
+**Recommendation: (a).**
+
+### Q24. WS7: required status checks on `main` (W7-1)
+
+Branch protection on `vthunder/sbo` requires only the external
+`ip-approval-gate`. The new `test` and `supply-chain` workflows are not
+required, so a red run does not block a merge.
+
+- (a) Add `test` and `supply-chain` to the required checks (GitHub settings;
+  infra task bean).
+- (b) Advisory only.
+
+**Recommendation: (a)**, once Q22 makes the gate green.
+
+### Q25. WS7: `avail-rust` tracked by branch (W7-3, Low)
+
+Three manifests pin `avail-rust` to `branch = "main"`; the lockfile holds the
+commit, but every `cargo update` moves it (the dry run jumps `de07cce1` to
+`3f2fe9e7`).
+
+- (a) Pin by `rev`; bump deliberately, as the `browserid-core` pins do.
+- (b) Keep tracking `main`; rely on the lockfile.
+
+**Recommendation: (a).** It also makes R7-1 a lockfile-only change.
 
 ## 3. Already settled by the spec text (no decision needed)
 
