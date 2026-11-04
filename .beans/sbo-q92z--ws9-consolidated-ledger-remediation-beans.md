@@ -1,11 +1,11 @@
 ---
 # sbo-q92z
 title: 'WS9: consolidated ledger + remediation beans'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:40Z
-updated_at: 2026-11-03T08:06:40Z
+updated_at: 2026-11-04T21:27:26Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-5t0f

@@ -18,12 +18,12 @@ Workstreams: WS1 threat model + spec review (first, alone) → WS2–WS8 in para
 
 - [x] WS1 threat model + spec/design review (sbo-dl2l)
 - [x] Spec decisions brought to Dan before WS2–WS8 launch (Q1–Q21 settled 2026-11-04)
-- [ ] WS2 conformance vectors
-- [ ] WS3 property tests + fuzz
-- [ ] WS4 never-audited layers
-- [ ] WS5 HTTP/IPC surface + authz matrix
-- [ ] WS6 crypto core + verification
-- [ ] WS7 supply chain / CI / secrets / logging
-- [ ] WS8 PoCs
+- [x] WS2 conformance vectors (sbo-5t0f)
+- [x] WS3 property tests + fuzz (sbo-qw0z)
+- [x] WS4 never-audited layers (sbo-f8cj)
+- [x] WS5 HTTP/IPC surface + authz matrix (sbo-s4xl)
+- [x] WS6 crypto core + verification (sbo-iye5)
+- [x] WS7 supply chain / CI / secrets / logging (sbo-ip5k)
+- [x] WS8 PoCs (sbo-cka2)
 - [ ] WS9 ledger + remediation beans
 - [ ] Decisions doc published as private artifact; decisions recorded in doc + beans
