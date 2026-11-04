@@ -17,7 +17,7 @@
 | WS1 threat model + spec review | sbo-dl2l | Done 2026-11-03. 10 adversaries, 14 boundaries, 36 invariants. 50 code leads D1–D58 (3 Critical, 13 High pre-verification), 20 spec findings S1–S22. All 12 open July 2026 leads still present. 21 decisions below. |
 | WS2 conformance vectors | sbo-5t0f | Running (Q1, Q4, Q5 settled). |
 | WS3 fuzz + proptest | sbo-qw0z | Running. |
-| WS4 never-audited layers | sbo-f8cj | Running (owns D7, D11, D12, D15–D17, D20–D23, D25–D28, D33, D34, D39, D55–D58). |
+| WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Running (Q15 settled); D18, D19, D37, D38, D50, D52 otherwise ready. |
 | WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
 | WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q22–Q25. |
