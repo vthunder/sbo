@@ -15,7 +15,7 @@
 | Workstream | Bean | Result |
 |---|---|---|
 | WS1 threat model + spec review | sbo-dl2l | Done 2026-11-03. 10 adversaries, 14 boundaries, 36 invariants. 50 code leads D1–D58 (3 Critical, 13 High pre-verification), 20 spec findings S1–S22. All 12 open July 2026 leads still present. 21 decisions below. |
-| WS2 conformance vectors | sbo-5t0f | Running (Q1, Q4, Q5 settled). |
+| WS2 conformance vectors | sbo-5t0f | Done 2026-11-04. 135 vectors in 8 suites, 5 runners (19 tests) green in CI (`conformance.yml`) with expected-fail tables. 4 genuine cross-implementation disagreements (W2-1..W2-4); everything else is the stack agreeing with itself against the spec (D1, D2, D3, D4, D13, D21, D28, D30, D54 all confirmed by vector). Decisions Q34–Q37. |
 | WS3 fuzz + proptest | sbo-qw0z | Running. |
 | WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q30, Q31 (numbered past the WS4/WS7 Q22–Q25 pairs). |
@@ -525,6 +525,71 @@ policy exists.
 
 **Recommendation: (b).** It is the only reading consistent with Q4, it
 removes the last accept-all window, and the regenesis is already planned.
+
+### Q34. `state_root` wire form in checkpoint objects (WS2 W2-4 / S18, Low)
+
+The State Commitment spec writes `state_root` as `sha256:<hex>` in every
+example; `trust::claim_from_message` and `bootstrap` decode bare hex only,
+so a spec-shaped `checkpoint.v1` is silently not a claim and never counts
+as a backer (vectors CP-01, CP-03). Whatever the live checkpointer emits
+today is the form that works.
+
+- (a) Spec form wins: code accepts `sha256:<hex>` (and, during migration,
+  bare hex), and emits the prefixed form.
+- (b) Spec examples move to bare hex.
+
+**Recommendation: (a).** Every other hash on the wire carries its
+algorithm prefix (`Content-Hash`, `Prev`, `genesisHash`); a bare hash is
+the odd one out.
+
+### Q35. Which bytes `genesisHash` covers (WS2, Genesis spec vs State Commitment)
+
+The Genesis spec defines `genesisHash` over the *canonical
+re-serialization* of the ordered genesis messages; the State Commitment
+spec defines `object_hash` over the *raw received bytes* (Q18 (a)). The two
+agree only when raw and canonical bytes coincide, which Q32 (a) makes
+mandatory for accepted messages. Until Q32 lands, the daemon's
+`genesis_hash_from_wire` and `object_hash` take different inputs.
+
+- (a) After Q32 (a): define both over the bytes as included on chain and
+  say in the Genesis spec that, because non-canonical messages are invalid,
+  this equals the canonical serialization.
+- (b) Keep two definitions.
+
+**Recommendation: (a).** One hashing rule; it is what the generator and
+every runner in `conformance/` already assume.
+
+### Q36. Two identifier grammars (WS2 W2-1, Low)
+
+`sbo-types` (`Id`, `Path`, `Action`, re-exported as `sbo_core::Id` and used
+by the zkVM guest) predates `@`, `+` and `:`: it rejects every email-rooted
+and agent identity sbo-core accepts, and its `Action::parse` folds case and
+admits `create` / `update`, which are not wire actions (13 vectors).
+Nothing on the wire path uses it today, which is why it has not bitten.
+
+- (a) One grammar: move the sbo-core `message` grammar into `sbo-types`
+  and have `sbo-core::message` re-export it (sbo-wasm follows by
+  `#[path]`).
+- (b) Delete the sbo-types grammar and the re-exports.
+
+**Recommendation: (a).** The guest and the wasm kit then share one
+definition by construction, and the conformance runner for sbo-types stays
+meaningful.
+
+### Q37. Percent-encoding versus the identifier charset (WS2 / S23, Info)
+
+Core §Identifier Syntax says non-ASCII is not allowed directly and to use
+percent-encoding (`café` → `caf%C3%A9`), but `%` is not in `id_char`, so
+the example is not a valid id under the grammar on the same page
+(vector ID-REJ-06; every implementation rejects it, agreeing with the
+grammar and not the prose).
+
+- (a) Drop the percent-encoding sentence: ids are ASCII only.
+- (b) Add `%` to `id_char` with a normative percent-encoding rule, and
+  define comparison (byte-exact on the encoded form).
+
+**Recommendation: (a).** Nothing emits or decodes percent-encoded ids, and
+(b) would reopen the normalization questions Q5 just closed.
 
 ## 3. Already settled by the spec text (no decision needed)
 
