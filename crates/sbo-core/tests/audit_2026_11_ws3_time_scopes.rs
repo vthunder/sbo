@@ -285,9 +285,9 @@ fn w3_2_scope_path_glob_is_polynomial() {
     let scope = format!("path:/{}/zz/", vec!["**"; 10].join("/"));
     let path = format!("/{}/", vec!["a"; 24].join("/"));
     let t0 = Instant::now();
-    let ok = scopes_authorize(&[scope], "post", &path, None);
+    let ok = audit_2026_11_ws3_support::bounded(5, move || scopes_authorize(&[scope], "post", &path, None));
     let dt = t0.elapsed();
-    assert!(!ok);
+    assert_eq!(ok, Some(false), "10×`**` scope did not finish in {dt:?}");
     assert!(dt < Duration::from_millis(200), "10×`**` scope against 24 segments took {dt:?}");
 }
 

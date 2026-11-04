@@ -1,0 +1,22 @@
+SBO-Version: 0.5
+Action: post
+Path: /u/alice/posts/
+ID: p1
+Type: object
+Content-Type: application/json
+Content-Length: 13
+Content-Hash: sha256:8f1de4697a700dd8df293b4b51025bff262ca9f65a2af030cd50acb3818eebfd
+Public-Key: ed25519:3f07ddec98f77249108b514a3dd4a095a9987df8437a7c82e6e80bbba0aee11f
+Signature: 02c82265c3084cfd5c1004f35e78427e479f7bf654aa00e5141de98bed11893a592fc4e81afc9e849663c55b59663e39aaceeb60ab231dd73efa70a11595d507
+
+{"body":"hi"}SBO-Version: 0.5
+Action: post
+Path: /u/bob/
+ID: x
+Type: object
+Content-Type: application/json
+Content-Length: 0
+Content-Hash: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Public-Key: ed25519:cecacaefde3cef21eb6d433cfe132b8ce43ea8723d331ab8ab9cdf59a8f65161
+Signature: d8131c6f16edff78126a897eb2ba10458f0e9e37823165451202c668151e3f998e8af485fa40406377b5590bc14422f0134afd38bd96bb3e10fb4b0435782b04
+

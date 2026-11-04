@@ -241,9 +241,9 @@ fn w3_1_path_pattern_matching_is_polynomial() {
     let pattern = PathPattern::new(format!("/{}/zz/", vec!["**"; 10].join("/")));
     let path = Path::parse(&format!("/{}/", vec!["a"; 24].join("/"))).unwrap();
     let t0 = Instant::now();
-    let m = pattern.matches(&path, &PolicyVars::default());
+    let m = bounded(5, move || pattern.matches(&path, &PolicyVars::default()));
     let dt = t0.elapsed();
-    assert!(!m);
+    assert_eq!(m, Some(false), "10×`**` against 24 segments did not finish in {dt:?}");
     assert!(dt < Duration::from_millis(200), "10×`**` against 24 segments took {dt:?}");
 }
 
@@ -255,9 +255,9 @@ fn w3_1_id_pattern_matching_is_polynomial() {
     let pattern = IdPattern::new(format!("{}b", "*a".repeat(14)));
     let id = "a".repeat(40);
     let t0 = Instant::now();
-    let m = pattern.matches(&id, &PolicyVars::default());
+    let m = bounded(5, move || pattern.matches(&id, &PolicyVars::default()));
     let dt = t0.elapsed();
-    assert!(!m);
+    assert_eq!(m, Some(false), "14×`*` against 40 chars did not finish in {dt:?}");
     assert!(dt < Duration::from_millis(200), "14×`*` against 40 chars took {dt:?}");
 }
 

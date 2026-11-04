@@ -145,3 +145,16 @@ fn sboq_proof_length_header_is_advisory_today() {
     let img = String::from_utf8(serialize_sboq(&m)).unwrap().replace("Proof-Length: 1", "Proof-Length: 99");
     assert!(parse_sboq(img.as_bytes()).is_ok());
 }
+
+/// W3-9 (Medium): found by the `proof_parse` fuzz target. `parse_sbop` walks
+/// header lines with `pos = line_end + 1`; when the image has no blank line
+/// and its last line has no trailing newline, `pos` ends one past the end
+/// and `&bytes[pos..]` panics. SBOP messages are read off the chain by every
+/// light-mode node, so one DA submission carrying the five headers and no terminator panics the sync task of every light node.
+#[test]
+#[ignore] // AUDIT-2026-11 W3-9: fails today — SBOP image without a header terminator panics parse_sbop
+fn w3_9_sbop_without_blank_line_does_not_panic() {
+    let img = b"SBOP-Version: 0.1\nBlock-From: 1\nBlock-To: 9\nReceipt-Kind: k\nReceipt-Length: 6";
+    let r = std::panic::catch_unwind(|| parse_sbop(img).is_err());
+    assert!(matches!(r, Ok(true)), "parse_sbop panicked or accepted a header-only image");
+}

@@ -16,7 +16,7 @@
 |---|---|---|
 | WS1 threat model + spec review | sbo-dl2l | Done 2026-11-03. 10 adversaries, 14 boundaries, 36 invariants. 50 code leads D1–D58 (3 Critical, 13 High pre-verification), 20 spec findings S1–S22. All 12 open July 2026 leads still present. 21 decisions below. |
 | WS2 conformance vectors | sbo-5t0f | Done 2026-11-04. 135 vectors in 8 suites, 5 runners (19 tests) green in CI (`conformance.yml`) with expected-fail tables. 4 genuine cross-implementation disagreements (W2-1..W2-4); everything else is the stack agreeing with itself against the spec (D1, D2, D3, D4, D13, D21, D28, D30, D54 all confirmed by vector). Decisions Q34–Q37. |
-| WS3 fuzz + proptest | sbo-qw0z | Running. |
+| WS3 fuzz + proptest | sbo-qw0z | Done 2026-11-04. proptest: core 47 pass / 22 ignored, crypto 5 / 3, rpc 3 / 1, daemon 3 / 1. 12 cargo-fuzz targets in a standalone `fuzz/` workspace (`make fuzz-smoke`, weekly launchd, `fuzz-smoke.yml`). New findings W3-1..W3-11 (2 High: exponential glob matching in policy patterns and warrant scopes; W3-8/W3-9 verifier and parser panics on untrusted input). Decisions Q38–Q40. |
 | WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q30, Q31 (numbered past the WS4/WS7 Q22–Q25 pairs). |
 | WS6 crypto core / verification | sbo-iye5 | Done 2026-11-04. 12 candidates: 9 confirmed, 2 partial (D3, D24), 1 read-only (D8). 5 new findings W6-1..W6-5. Tests: sbo-core 13 pass / 14 ignored, sbo-crypto 2 / 1 (+1 kzg), sbo-daemon 0 / 3. Live v5 genesis passes Q7 only under Q33 (a); fails Q8 either way. Decisions Q32, Q33. |
@@ -590,6 +590,67 @@ grammar and not the prose).
 
 **Recommendation: (a).** Nothing emits or decodes percent-encoded ids, and
 (b) would reopen the normalization questions Q5 just closed.
+
+### Q38. Glob matching: linear algorithm or wildcard cap (WS3 W3-1 / W3-2, High)
+
+`PathPattern::match_parts`, `IdPattern::glob_match` and the warrant
+`path:` glob in `scopes_authorize` all backtrack over every split of every
+`**` (or `*`), so a pattern with k wildcards against an n-segment path costs
+O(n^k). Policy patterns are authored by anyone with a `govern` grant on a
+subtree (or via a `descendant_constraint` template) and evaluated by every
+node on every write beneath; warrant scopes are authored by ANY wallet and
+evaluated at the submit gate and on replay. Ten `**` against 24 segments
+does not finish. Tests: `w3_1_path_pattern_matching_is_polynomial`,
+`w3_1_id_pattern_matching_is_polynomial`, `w3_2_scope_path_glob_is_polynomial`.
+
+- (a) Replace all three matchers with one memoised (dynamic-programming)
+  matcher, O(k·n), shared by core policy and `authorize.rs`; no grammar change.
+- (b) Keep the recursion and reject at write time any pattern with more
+  than N wildcards (and any scope string with more than N) — a grammar
+  change that also has to be stated in the Policy and Authorization specs.
+- (c) Both: the linear matcher, plus a generous cap stated in the spec as a
+  size bound (like the 256-char id limit).
+
+**Recommendation: (c).** (a) alone leaves no spec statement a second
+implementation can be held to; (b) alone leaves the quadratic-ish worst
+case in place. The reference matchers in the WS3 tests and fuzz targets
+are the oracle for (a).
+
+### Q39. Unknown keys in policy documents (WS3 W3-3, Medium)
+
+`Policy`, `Grant`, `Restriction` and `Requirements` deserialize without
+`deny_unknown_fields`, so a restriction whose condition key is misspelled
+(`max_sise`, `not_attestd`) is accepted as an EMPTY requirement and fails
+open; an unknown grant key is dropped. Threat model I11 says unknown
+condition keys reject at write time. Making the parser strict is
+consensus-changing: any policy already on chain with a stray key would
+become invalid on replay.
+
+- (a) Strict parse (`deny_unknown_fields` on all four structs) from the
+  Q18 regenesis; WS8/WS9 survey app 506's policies first.
+- (b) Strict parse now behind the protocol version, lenient for existing
+  chains.
+- (c) Leave lenient; document that unknown keys are ignored.
+
+**Recommendation: (a).**; it rides the same regenesis as Q2/Q6/Q8/Q13.
+
+### Q40. A warrant with no scopes (WS3 observation, Info)
+
+`scopes_authorize([])` is `true`: a warrant whose scope list is empty
+authorizes every action on every path and schema for its audience. The
+Authorization spec's scope grammar says a dimension with no scope is
+unconstrained but never says whether an EMPTY list is "everything" or
+"nothing". browserid warrants for a ledger audience carry `sign:sbo:*`
+scopes today, so nothing emits an empty list. Pinned by
+`empty_scopes_authorize_everything_today`.
+
+- (a) Spec: an empty scope list is unconstrained (today's behaviour), stated
+  explicitly.
+- (b) Spec: a ledger warrant MUST carry at least one `action:`/`sign:sbo:`
+  scope; an empty list authorizes nothing.
+
+**Recommendation: (b)**; it matches the browserid "inert without a warrant"
+posture, and the cost is one line in every signer.
 
 ## 3. Already settled by the spec text (no decision needed)
 

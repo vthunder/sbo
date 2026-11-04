@@ -296,3 +296,21 @@ fn d21_dot_segments_are_rejected() {
         prop_assert!(Path::parse(&p).is_err(), "Path::parse({:?}) accepted", p);
     });
 }
+
+/// W3-10 (Medium): found by the `wire_parse` fuzz target. The batch
+/// splitter computes `end_pos = pos + Content-Length` unchecked
+/// (`parser.rs:75`): `Content-Length: 18446744073709551615` panics with
+/// "attempt to add with overflow" in a debug build and wraps in release so
+/// the `end_pos > len` check passes and `&bytes[pos..end_pos]` panics. One DA
+/// submission carrying that header kills the sync task of every node that
+/// parses the app id (and the daemon's `/v1/submit`, which parses first).
+#[test]
+#[ignore] // AUDIT-2026-11 W3-10: fails today — Content-Length arithmetic in the batch splitter is unchecked
+fn w3_10_huge_content_length_does_not_panic() {
+    let msg = signed("/u/", "x", vec![], &key_from_seed(1));
+    let img = set_header(&wire::serialize(&msg), "Content-Length", &u64::MAX.to_string());
+    for f in [wire::parse as fn(&[u8]) -> _, |b: &[u8]| wire::parse_batch(b).map(|mut v| v.remove(0))] {
+        let r = std::panic::catch_unwind(|| f(&img).is_err());
+        assert!(matches!(r, Ok(true)), "parser panicked or accepted an impossible Content-Length");
+    }
+}

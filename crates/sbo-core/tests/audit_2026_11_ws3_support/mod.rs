@@ -125,3 +125,12 @@ pub fn join_wire(headers: &[(String, String)], payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(payload);
     out
 }
+
+/// Run `f` on a thread and give it `secs` seconds; `None` if it did not
+/// finish (used by the exponential-matching tests so they fail in seconds,
+/// not hours).
+pub fn bounded<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(f()); });
+    rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+}

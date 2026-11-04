@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Weekly cargo-fuzz smoke run on the dev box (security audit 2026-11, Q21 /
+     bean sbo-qw0z). Installed by `make fuzz-smoke-install` into
+     ~/Library/LaunchAgents/. Sundays 13:00, an hour after
+     org.sandmill.cargo-sweep. Runs `make fuzz-smoke` (FUZZ_SECS=60 per
+     target) through `ssh localtest` like every cargo invocation on this box
+     (Gatekeeper); launchd appends the output to /tmp/sbo-fuzz-smoke.log and the
+     last line of a run is the `fuzz-smoke: OK` / `fuzz-smoke: FAILED (exit N)`
+     verdict. The job is inline so it depends on nothing but the checkout's
+     Makefile. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.sandmill.sbo-fuzz-smoke</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-o</string>
+    <string>pipefail</string>
+    <string>-c</string>
+    <string>REPO="$HOME/src/sbo"; echo "=== fuzz-smoke $(date '+%Y-%m-%d %H:%M:%S') repo=$REPO FUZZ_SECS=60"; ssh -o BatchMode=yes localtest "cd '$REPO' &amp;&amp; PATH=\$HOME/.cargo/bin:\$PATH FUZZ_SECS=60 make fuzz-smoke 2>&amp;1" 2>&amp;1 | sed 's/\x1b\[[0-9;]*m//g'; s=$?; if [ "$s" -eq 0 ]; then echo "fuzz-smoke: OK $(date '+%Y-%m-%d %H:%M:%S')"; else echo "fuzz-smoke: FAILED (exit $s) $(date '+%Y-%m-%d %H:%M:%S') — see $REPO/fuzz/artifacts/"; fi; exit "$s"</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>14</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/sbo-fuzz-smoke.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/sbo-fuzz-smoke.log</string>
+</dict>
+</plist>

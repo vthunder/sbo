@@ -1,0 +1,121 @@
+# Security audit 2026-11 WS3 — cargo-fuzz targets for the sbo parsers.
+#
+# Standalone workspace on purpose: the root Cargo.toml's member list drives the
+# mingo-side Dockerfile's dependency-caching stage, and libfuzzer-sys needs
+# nightly. Build and run only through `cargo +nightly fuzz` (see README.md /
+# `make fuzz-smoke`). `sbo-core` is built without `storage` so the fuzz build
+# never touches rocksdb.
+[package]
+name = "sbo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+chrono = "0.4"
+sbo-core = { path = "../crates/sbo-core", default-features = false }
+sbo-crypto = { path = "../crates/sbo-crypto" }
+sbo-types = { path = "../crates/sbo-types" }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "gen_seeds"
+path = "src/bin/gen_seeds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_parse"
+path = "fuzz_targets/wire_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_build"
+path = "fuzz_targets/wire_build.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri_dns"
+path = "fuzz_targets/uri_dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_json"
+path = "fuzz_targets/policy_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path_glob"
+path = "fuzz_targets/path_glob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_parse"
+path = "fuzz_targets/proof_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hlc_lww"
+path = "fuzz_targets/hlc_lww.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trie_proof"
+path = "fuzz_targets/trie_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schema_json"
+path = "fuzz_targets/schema_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presentation"
+path = "fuzz_targets/presentation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnssec_rr"
+path = "fuzz_targets/dnssec_rr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwt"
+path = "fuzz_targets/jwt.rs"
+test = false
+doc = false
+bench = false

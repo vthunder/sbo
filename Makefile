@@ -2,6 +2,8 @@
 #
 #   make build            compile the workspace
 #   make test             run the test suite
+#   make fuzz-smoke       run every cargo-fuzz target for FUZZ_SECS (default 60) — see fuzz/README.md
+#   make fuzz-smoke-install  (dev box) install the weekly launchd agent org.sandmill.sbo-fuzz-smoke
 #   make push             push HEAD to origin
 #   make watch            watch CI runs for HEAD until they all finish
 #   make deploy           see below — sbo has no deployable of its own
@@ -19,13 +21,30 @@
 
 SHA := $(shell git rev-parse HEAD)
 
-.PHONY: build test push watch deploy
+.PHONY: build test fuzz-smoke fuzz-smoke-install push watch deploy
 
 build:
 	cargo build --workspace
 
 test:
 	cargo test --workspace
+
+# cargo-fuzz smoke run (security audit 2026-11 WS3). Standalone workspace under
+# fuzz/ — nothing here is built by `make build`/CI-test/Docker. On the dev box:
+# ssh localtest 'make fuzz-smoke'.
+fuzz-smoke:
+	scripts/fuzz-smoke.sh
+
+# Dev-box only (audit 2026-11 Q21): weekly fuzz-smoke via launchd, Sundays
+# 14:00 (after the browserid-ng run at 13:00), through `ssh localtest`, log
+# /tmp/sbo-fuzz-smoke.log. Check with `launchctl print gui/$$(id -u)/org.sandmill.sbo-fuzz-smoke`;
+# kick one off now with `launchctl kickstart gui/$$(id -u)/org.sandmill.sbo-fuzz-smoke`.
+FUZZ_PLIST = org.sandmill.sbo-fuzz-smoke.plist
+fuzz-smoke-install:
+	cp scripts/launchd/$(FUZZ_PLIST) $(HOME)/Library/LaunchAgents/$(FUZZ_PLIST)
+	-launchctl bootout gui/$$(id -u)/org.sandmill.sbo-fuzz-smoke 2>/dev/null
+	launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/$(FUZZ_PLIST)
+	launchctl print gui/$$(id -u)/org.sandmill.sbo-fuzz-smoke | head -3
 
 push:
 	git push origin HEAD
