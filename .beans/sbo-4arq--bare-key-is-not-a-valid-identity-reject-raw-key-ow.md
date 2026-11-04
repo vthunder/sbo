@@ -1,11 +1,11 @@
 ---
 # sbo-4arq
 title: 'Bare key is not a valid identity: reject raw-key owners; require /sys/names or email'
-status: todo
+status: scrapped
 type: bug
 priority: high
 created_at: 2026-07-07T10:00:25Z
-updated_at: 2026-07-08T15:49:37Z
+updated_at: 2026-11-04T21:34:48Z
 ---
 
 Per the identity-model decision (2026-07-07): an identity is EITHER a /sys/names/<handle> name OR an email; a BARE KEY is NOT a valid identity. Today authorization violates this: a write can declare `Owner: ed25519:<key>` and `authorize_owner` (sbo-core/authorize.rs) resolves it to `Controller::Key` and authorizes on direct signature — so a raw key can own a namespace (e.g. `/u/ed25519:<key>/**` via the `/u/$owner/**` grant) with NO /sys/names registration, no email, no DNSSEC. This bypasses the sovereignty model /u/ is meant to enforce (flagged by owner during mingo-hqp2 work).
@@ -27,3 +27,7 @@ Confirmed live at resolve.rs:128 (Controller::Key) and authorize.rs:129. Additio
 
 - [ ] Thread explicit-vs-fallback provenance into resolve_controller
 - [ ] Update Identity Spec (owner table + pseudocode) to drop bare-key owner
+
+## Reasons for Scrapping
+
+Superseded by sbo-yd72 (audit 2026-11 Q6). Every unchecked item above is carried in that bean's checklist; the finding was re-verified by the 2026-11 audit and is encoded as an ignored `AUDIT-2026-11` test there.

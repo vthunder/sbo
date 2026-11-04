@@ -81,6 +81,8 @@ proptest! {
     /// browserid-ng W2-6 class; WS2 decides whether that is the rule).
     #[test]
     fn dns_record_parsing(junk in "[a-z=0-9 ]{0,24}", bare in any::<bool>(), version in prop::sample::select(vec!["sbo1", "sbo2", ""])) {
+        // WS9: junk must not carry a key the record reads (last-wins would honour it).
+        prop_assume!(!junk.split(' ').any(|t| t.starts_with("v=") || t.starts_with("repo=") || t.starts_with("genesis=")));
         let _ = parse_record(&junk);
         let repo = if bare { "sbo+raw://avail:turing:506@1/" } else { "sbo+raw://avail:turing:506/x/" };
         let v = if version.is_empty() { String::new() } else { format!("v={version} ") };

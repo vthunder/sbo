@@ -22,7 +22,7 @@
 | WS6 crypto core / verification | sbo-iye5 | Done 2026-11-04. 12 candidates: 9 confirmed, 2 partial (D3, D24), 1 read-only (D8). 5 new findings W6-1..W6-5. Tests: sbo-core 13 pass / 14 ignored, sbo-crypto 2 / 1 (+1 kzg), sbo-daemon 0 / 3. Live v5 genesis passes Q7 only under Q33 (a); fails Q8 either way. Decisions Q32, Q33. |
 | WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q26–Q29. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
-| WS9 ledger + remediation beans | sbo-q92z | Blocked on WS2–WS8. |
+| WS9 ledger + remediation beans | sbo-q92z | Done 2026-11-04. `docs/security-audit-2026-11.md`: 2 Critical, 12 High, 29 Medium, 22 Low, 10 Info confirmed; 20+ leads refuted. 60 beans under the epic (48 remediation: 28 `todo`, 20 `draft` pending Q22–Q40; 12 spec-edit). Suite: 518 pass / 0 fail / 94 ignored after one WS3 generator fix. July epic sbo-f5wn closed, every open item carried. |
 
 **Highest-severity candidates (pre-verification)**
 
@@ -660,4 +660,4 @@ posture, and the cost is one line in every signer.
 
 ## 4. Next
 
-All 21 decisions settled 2026-11-04. WS2–WS7 run in parallel; WS8 follows WS4/5/6; WS9 consolidates. New decisions from the skeptic passes are appended as Q22+.
+Audit phase complete. Dan answers Q22–Q40; each answer flips the named `draft` beans to `todo` and is recorded here and in the bean. Remediation proceeds in the ledger's §5 order; the PR from `audit-2026-11` opens when Dan says.

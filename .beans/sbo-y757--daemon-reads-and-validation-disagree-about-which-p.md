@@ -1,11 +1,11 @@
 ---
 # sbo-y757
 title: 'Daemon: reads and validation disagree about which policy is in force while replaying'
-status: todo
+status: scrapped
 type: bug
 priority: normal
 created_at: 2026-09-16T21:35:30Z
-updated_at: 2026-09-16T21:35:30Z
+updated_at: 2026-11-04T21:34:48Z
 ---
 
 A daemon replaying the chain (e.g. after a redeploy) validates writes against its **confirmed state plus the mempool**, while `/v1/object` serves the **pending overlay**. Between a policy leaving the mempool and being replayed from the chain, it is in neither: reads show the NEW policy, validation applies the OLD one, and nothing tells a client which is in force.
@@ -26,3 +26,7 @@ Ideas, not yet decided:
 - [ ] document the window in the Policy Specification: publishing is not enforcing
 
 Workaround documented in browserid-pay `deploy/GENESIS.md`: watch `Processed block N` in the daemon log and wait for it to pass the block `policy-update` reported before trusting a probe.
+
+## Reasons for Scrapping
+
+Superseded by sbo-5fja (audit 2026-11 W2-3/D17). Every unchecked item above is carried in that bean's checklist; the finding was re-verified by the 2026-11 audit and is encoded as an ignored `AUDIT-2026-11` test there.

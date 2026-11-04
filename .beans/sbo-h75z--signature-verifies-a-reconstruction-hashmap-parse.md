@@ -1,11 +1,11 @@
 ---
 # sbo-h75z
 title: Signature verifies a reconstruction (HashMap parse), enabling wire-form malleability
-status: todo
+status: scrapped
 type: bug
 priority: high
 created_at: 2026-07-08T15:48:57Z
-updated_at: 2026-07-08T15:48:57Z
+updated_at: 2026-11-04T21:34:48Z
 parent: sbo-f5wn
 ---
 
@@ -14,3 +14,7 @@ parser.rs:123 collects headers into a HashMap (discards order, silently last-win
 - [ ] Use verify_strict
 - [ ] Preserve/serialize Related and import (Origin/Registry-Path/Object-Path/Attestation) headers
 - [ ] Reject non-lowercase hex / leading-zero Content-Length per Encoding Rules
+
+## Reasons for Scrapping
+
+Superseded by sbo-cusw and sbo-zom8 (audit 2026-11 D2/Q32). Every unchecked item above is carried in that bean's checklist; the finding was re-verified by the 2026-11 audit and is encoded as an ignored `AUDIT-2026-11` test there.

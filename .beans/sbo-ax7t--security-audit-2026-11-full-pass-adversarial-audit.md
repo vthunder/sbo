@@ -5,7 +5,7 @@ status: in-progress
 type: epic
 priority: high
 created_at: 2026-11-03T08:05:09Z
-updated_at: 2026-11-04T20:39:38Z
+updated_at: 2026-11-04T21:40:43Z
 ---
 
 Full-pass security audit of the sbo repo (specs + reference implementation: sbo-core, sbo-crypto, sbo-types, sbo-rpc, sbo-avail, sbo-capture, sbo-daemon, sbo-cli, sbo-wasm, sbo-zkvm), run with the browserid-ng 2026-11 method: reviewer-then-skeptic, every confirmed finding encoded as an ignored test tagged `AUDIT-2026-11 <id>` whose un-ignoring is the acceptance test for the fix, post-verification severities, PoCs only against a local instance with fake keys. No production code changes during the audit.
@@ -25,5 +25,5 @@ Workstreams: WS1 threat model + spec review (first, alone) → WS2–WS8 in para
 - [x] WS6 crypto core + verification (sbo-iye5)
 - [x] WS7 supply chain / CI / secrets / logging (sbo-ip5k)
 - [x] WS8 PoCs (sbo-cka2)
-- [ ] WS9 ledger + remediation beans
+- [x] WS9 ledger + remediation beans (sbo-q92z)
 - [ ] Decisions doc published as private artifact; decisions recorded in doc + beans

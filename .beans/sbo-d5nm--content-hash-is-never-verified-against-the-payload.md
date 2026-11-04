@@ -1,11 +1,11 @@
 ---
 # sbo-d5nm
 title: Content-Hash is never verified against the payload (payload swappable)
-status: todo
+status: scrapped
 type: bug
 priority: critical
 created_at: 2026-07-08T15:48:22Z
-updated_at: 2026-07-08T15:48:22Z
+updated_at: 2026-11-04T21:34:48Z
 parent: sbo-f5wn
 ---
 
@@ -14,3 +14,7 @@ parser.rs:169 explicitly skips Content-Hash validation ('Skip content hash valid
 - [ ] Reject on mismatch (wire up ContentHashMismatch)
 - [ ] Enforce object/collection payload-presence rules (Type: object MUST have payload + content headers)
 - [ ] Tests: swapped payload rejected; missing/extra content headers rejected
+
+## Reasons for Scrapping
+
+Superseded by sbo-xd6u (audit 2026-11 D1). Every unchecked item above is carried in that bean's checklist; the finding was re-verified by the 2026-11 audit and is encoded as an ignored `AUDIT-2026-11` test there.
