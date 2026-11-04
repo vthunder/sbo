@@ -26,4 +26,4 @@ Workstreams: WS1 threat model + spec review (first, alone) → WS2–WS8 in para
 - [x] WS7 supply chain / CI / secrets / logging (sbo-ip5k)
 - [x] WS8 PoCs (sbo-cka2)
 - [x] WS9 ledger + remediation beans (sbo-q92z)
-- [ ] Decisions doc published as private artifact; decisions recorded in doc + beans
+- [ ] Decisions doc published as private artifact (done, updated through Q40); Q22–Q40 answers pending, then flip 20 draft beans
