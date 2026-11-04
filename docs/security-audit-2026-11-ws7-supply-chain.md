@@ -192,18 +192,18 @@ presentation in full. There is no analytics in this repo.
 
 ## 8. What needs Dan's decision
 
-Appended to `docs/security-audit-2026-11-decisions.md` as Q22–Q25:
+Appended to `docs/security-audit-2026-11-decisions.md` as Q26–Q29:
 
-1. **Q22 gate colour.** Land R7-1 (`cargo update` after pinning `avail-rust`)
+1. **Q26 gate colour.** Land R7-1 (`cargo update` after pinning `avail-rust`)
    and R7-2 (drop `reqwest 0.11`) on the branch now so the gate is green at PR
    time, or keep the audit rule (no production change on the branch) and
    accept a red gate until the remediation bean lands. browserid-ng chose to
    land the bumps.
-2. **Q23 non-root container** (W7-12): coordinated change with a storage
+2. **Q27 non-root container** (W7-12): coordinated change with a storage
    chown on the hobby host; mingo-side beans.
-3. **Q24 required checks on `main`**: add `test` and `supply-chain` next to
+3. **Q28 required checks on `main`**: add `test` and `supply-chain` next to
    `ip-approval-gate`.
-4. **Q25 `avail-rust` pin by rev** (W7-3): pin and bump by hand, or keep
+4. **Q29 `avail-rust` pin by rev** (W7-3): pin and bump by hand, or keep
    tracking `main` with the lockfile as the pin.
 
 ## 9. Remediation items (for WS9)

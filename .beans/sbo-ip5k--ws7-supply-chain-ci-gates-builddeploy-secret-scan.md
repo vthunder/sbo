@@ -5,7 +5,7 @@ status: completed
 type: task
 priority: normal
 created_at: 2026-11-03T08:06:40Z
-updated_at: 2026-11-04T20:51:10Z
+updated_at: 2026-11-04T20:51:38Z
 parent: sbo-ax7t
 blocked_by:
     - sbo-dl2l
@@ -28,4 +28,4 @@ In scope from the mingo repo: only the sbo-daemon deployable — `~/src/mingo/de
 
 ## Summary of Changes
 
-Done 2026-11-04 (report `docs/security-audit-2026-11-ws7-supply-chain.md`). Added `.github/workflows/test.yml` and `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks; SHA-pinned actions), `.github/dependabot.yml` (actions only), `.cargo/audit.toml`, `deny.toml`, `.gitleaks.toml`, `crates/sbo-daemon/tests/audit_2026_11_ws7.rs` (1 pass, 1 ignored: W7-5). Scanners on localtest: 41 RUSTSEC vulns (34 after reasoned zkvm-only ignores), all closable by `cargo update` + deleting the unused `reqwest 0.11` in sbo-core; cargo-deny licenses/sources/bans green; gitleaks clean over 514 commits. Findings W7-1..W7-14: no CI (W7-1), advisories (W7-2), avail-rust by branch (W7-3), two browserid-core revs (W7-4), config.toml 0644 with the TurboDA key (W7-5, ignored test), unused reqwest 0.11 holding rustls 0.21 (W7-6, Medium), unlicensed zkvm-methods (W7-7), mingo deploy workflow actions by tag (W7-8, Medium), ssh-keyscan TOFU (W7-9), :latest/public GHCR (W7-10), floating bases + short SBO_REV (W7-11), container runs as root (W7-12, Medium), auth request id logged (W7-13), /tmp/sbo-debug symlink-followable (W7-14). Decisions Q22–Q25 appended. Infra-side items for mingo/sandmill-infra task beans: W7-8, W7-9, W7-11, W7-12, required checks on main.
+Done 2026-11-04 (report `docs/security-audit-2026-11-ws7-supply-chain.md`). Added `.github/workflows/test.yml` and `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks; SHA-pinned actions), `.github/dependabot.yml` (actions only), `.cargo/audit.toml`, `deny.toml`, `.gitleaks.toml`, `crates/sbo-daemon/tests/audit_2026_11_ws7.rs` (1 pass, 1 ignored: W7-5). Scanners on localtest: 41 RUSTSEC vulns (34 after reasoned zkvm-only ignores), all closable by `cargo update` + deleting the unused `reqwest 0.11` in sbo-core; cargo-deny licenses/sources/bans green; gitleaks clean over 514 commits. Findings W7-1..W7-14: no CI (W7-1), advisories (W7-2), avail-rust by branch (W7-3), two browserid-core revs (W7-4), config.toml 0644 with the TurboDA key (W7-5, ignored test), unused reqwest 0.11 holding rustls 0.21 (W7-6, Medium), unlicensed zkvm-methods (W7-7), mingo deploy workflow actions by tag (W7-8, Medium), ssh-keyscan TOFU (W7-9), :latest/public GHCR (W7-10), floating bases + short SBO_REV (W7-11), container runs as root (W7-12, Medium), auth request id logged (W7-13), /tmp/sbo-debug symlink-followable (W7-14). Decisions Q26–Q29 appended (WS4 holds Q22–Q25). Infra-side items for mingo/sandmill-infra task beans: W7-8, W7-9, W7-11, W7-12, required checks on main.

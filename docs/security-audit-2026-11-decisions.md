@@ -20,7 +20,7 @@
 | WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q22, Q23. |
 | WS6 crypto core / verification | sbo-iye5 | Running (Q7, Q19 settled); D1–D6, D8–D10, D24, D30 otherwise ready. |
-| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q22–Q25. |
+| WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q26–Q29. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
 | WS9 ledger + remediation beans | sbo-q92z | Blocked on WS2–WS8. |
 
@@ -398,7 +398,7 @@ discarded.
 **Recommendation: (a).** One rule for both sides; HLC-less writes are the
 legacy case anyway.
 
-### Q22. WS7: supply-chain gate is red until the bumps land (W7-2, W7-6)
+### Q26. WS7: supply-chain gate is red until the bumps land (W7-2, W7-6)
 
 The new `supply-chain.yml` fails on main today: 34 RUSTSEC advisories, all of
 which close with R7-1 (`cargo update`, after pinning `avail-rust` by rev) and
@@ -413,7 +413,7 @@ the audit rule keeps off the branch.
 **Recommendation: (a).** Nothing a deployed binary links stays vulnerable, and
 a green gate on the first PR is what makes people keep it.
 
-### Q23. WS7: daemon container runs as root (W7-12, Medium)
+### Q27. WS7: daemon container runs as root (W7-12, Medium)
 
 `/data` holds the checkpoint and attestor secret keys, the state index and the
 unix socket, all root-owned; any RCE in the daemon is uid 0 in the namespace.
@@ -427,7 +427,7 @@ so it is coordinated with sandmill-infra (same shape as browserid-ng Q9).
 
 **Recommendation: (a).**
 
-### Q24. WS7: required status checks on `main` (W7-1)
+### Q28. WS7: required status checks on `main` (W7-1)
 
 Branch protection on `vthunder/sbo` requires only the external
 `ip-approval-gate`. The new `test` and `supply-chain` workflows are not
@@ -437,9 +437,9 @@ required, so a red run does not block a merge.
   infra task bean).
 - (b) Advisory only.
 
-**Recommendation: (a)**, once Q22 makes the gate green.
+**Recommendation: (a)**, once Q26 makes the gate green.
 
-### Q25. WS7: `avail-rust` tracked by branch (W7-3, Low)
+### Q29. WS7: `avail-rust` tracked by branch (W7-3, Low)
 
 Three manifests pin `avail-rust` to `branch = "main"`; the lockfile holds the
 commit, but every `cargo update` moves it (the dry run jumps `de07cce1` to
