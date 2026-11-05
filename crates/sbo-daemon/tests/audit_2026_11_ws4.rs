@@ -624,12 +624,10 @@ async fn d20_ipc_socket_is_owner_only() {
 
 // ───────────────────────────── D7: domain self-cert ─────────────────────────────
 
-/// AUDIT-2026-11 D7: fails today. Identity spec Rule 4: a `domain.v1` whose
-/// self-certification evidence is present but does not verify MUST be
-/// rejected. Validation never looks at it (the sync path only logs a warning),
-/// so the write is valid.
+/// AUDIT-2026-11 D7 (fixed, `sbo-c46r`): Identity spec Rule 4: a `domain.v1`
+/// whose self-certification evidence is present but does not verify MUST be
+/// rejected, at validation time.
 #[test]
-#[ignore]
 fn d7_domain_with_failing_self_cert_is_invalid() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();

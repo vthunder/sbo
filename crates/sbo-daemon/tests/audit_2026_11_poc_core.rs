@@ -174,9 +174,8 @@ fn poc_d5_stranger_takes_over_a_rootless_repo() {
 // certify `sys` — a forged trust root.
 // ===========================================================================
 
-#[test]
-#[ignore] // AUDIT-2026-11 D7 PoC: failing self-cert is accepted today
-fn poc_d7_failing_self_cert_domain_is_accepted() {
+#[test] // AUDIT-2026-11 D7: inverted by `sbo-c46r`; the failing self-cert is now rejected
+fn poc_d7_failing_self_cert_domain_is_rejected() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     // Permit domain creation so we isolate the self-cert gap, not policy.
@@ -187,9 +186,11 @@ fn poc_d7_failing_self_cert_domain_is_accepted() {
     let pol = signed(&sys, "/sys/policies/", "root", Some("policy.v2"), planted);
     assert!(is_valid(&validate_message(&pol, &db, dir.path(), &ctx(&db))));
 
-    // Evidence object present but garbage: the self-cert cannot verify.
+    // Evidence object present but garbage: the self-cert cannot verify. (Planted
+    // directly in state: the write gate itself would refuse the garbage proof.)
     let ev = signed(&sys, "/sys/dnssec/", "evil.example", Some("dnssec.v1"), b"not-a-proof");
-    let _ = validate_message(&ev, &db, dir.path(), &ctx(&db));
+    let stored = sbo_daemon::validate::message_to_stored_object(&ev, 1, Some(&db), [7u8; 32], &ctx(&db)).unwrap();
+    db.put_object(&stored).unwrap();
 
     let attacker = SigningKey::generate();
     let jwt = sbo_core::jwt::create_domain(&attacker, "evil.example").unwrap();
@@ -200,8 +201,8 @@ fn poc_d7_failing_self_cert_domain_is_accepted() {
 
     let r = validate_message(&dom, &db, dir.path(), &ctx(&db));
     assert!(
-        is_valid(&r),
-        "PoC FAILED TO REPRODUCE — the domain with failing self-cert was rejected: {r:?}",
+        !is_valid(&r),
+        "D7 REGRESSION — the domain with failing self-cert was accepted: {r:?}",
     );
 }
 

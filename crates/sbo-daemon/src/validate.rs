@@ -690,6 +690,21 @@ pub fn validate_message(
         }
     }
 
+    // 2.7. Domain self-certification (Identity Spec §Domain Objects, Validation
+    // Rule 4). A `domain.v1` MAY carry DNSSEC self-certification; when the
+    // evidence is present it MUST verify at this block's inclusion time, and a
+    // domain whose self-certification is present but fails MUST be rejected.
+    // Absence of evidence falls back to a plain self-signed domain object.
+    // AUDIT-2026-11 D7: this used to be a warn-only check in the apply path.
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DOMAIN_SCHEMA) {
+        if let Err(reason) = check_domain_self_cert(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason,
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
@@ -714,6 +729,41 @@ pub fn validate_message(
             }
         }
     }
+}
+
+/// Content-Schema of a repository root-of-trust domain object.
+const DOMAIN_SCHEMA: &str = "domain.v1";
+
+/// Resolve and verify a `domain.v1` write's DNSSEC self-certification
+/// (Identity Spec Validation Rule 4). The evidence is the message's own
+/// `Auth-Evidence` (`inline:` or `ref:<sbo-path>`), else the conventional
+/// `/sys/dnssec/<domain>` object as-of this block. `Ok(())` when no evidence
+/// resolves (plain self-signed domain); `Err` when evidence is present but
+/// cannot be verified — including when the block carries no inclusion time,
+/// since the RRSIG window cannot be checked (fail closed).
+fn check_domain_self_cert(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let domain = msg.id.as_str();
+    let evidence = match msg.auth_evidence.as_deref() {
+        Some(inline) if inline.starts_with("inline:") => {
+            Some(parse_auth_evidence(inline).map_err(|e| format!("Domain {domain}: bad inline Auth-Evidence: {e}"))?)
+        }
+        Some(reference) if reference.starts_with("ref:") => {
+            let target = reference.trim_start_matches("ref:");
+            Some(fetch_evidence_object(state, target).ok_or_else(|| {
+                format!("Domain {domain}: Auth-Evidence ref {target} does not resolve")
+            })?)
+        }
+        Some(other) => return Err(format!("Domain {domain}: unrecognized Auth-Evidence form: {other}")),
+        None => fetch_evidence_object(state, &format!("/sys/dnssec/{domain}")),
+    };
+    let Some(raw) = evidence else {
+        return Ok(());
+    };
+    let Some(t) = l2.inclusion_time else {
+        return Err(format!("Domain {domain}: self-certification present but block has no inclusion time"));
+    };
+    sbo_core::attribution::verify_domain_self_cert(&msg.signing_key.to_string(), &raw, domain, t)
+    .map_err(|e| format!("Domain {domain}: self-certification failed: {e}"))
 }
 
 /// Whether the root policy (`/sys/policies/root`) is present in `state`.
