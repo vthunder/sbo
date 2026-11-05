@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: Documents that the reference indexer serves no completeness proof for listings (S17) and what a client must do meanwhile. New §Hostile-indexer threats: proof containers and verifiers are a security boundary; checked length arithmetic (W3-6, W3-9), proof-shape validation before indexing (W3-8), total verifiers. Client Conformance item 2 names the device presentation and the authoring-instant exception.
+
 ## Abstract
 
 This specification defines the **read side** of SBO: how clients derive trustworthy state, and how they use **indexers** — off-chain services that provide feeds, search, reputation scoring, and other derived views — **without trusting them**.
@@ -50,6 +54,10 @@ Verifiable queries answer over **confirmed** state (see [Confirmed vs Tip](./SBO
 
 Objective enumerations are **completeness-verifiable**: a **subtree proof** (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#subtree-proof)) proves the *full* membership of a path prefix at `state_root`, so a client can confirm an indexer omitted nothing under, e.g., `/spaces/general/`. This is the read-side analogue of the censorship-resistance the DA layer gives writes: an indexer cannot silently hide an object that exists on chain.
 
+### Completeness proofs are not served
+
+**Gap (2026-11 audit, S17).** The reference indexer (`sbo-daemon`'s HTTP surface) serves an inclusion proof for a single object (`GET /v1/object?proof=1`, SBOQ format) but **no completeness proof for a listing**: `GET /v1/list` returns objects and no subtree proof. A client reading a listing from the reference indexer today therefore has authenticity per item (if it fetches each item's proof) but **no protection against omission**, objective query or not; it is trusting the indexer for completeness exactly as the trust model says it must not. Until subtree proofs are served, a client that needs completeness MUST obtain it another way: replay the chain itself, enumerate from a snapshot it has verified against a trusted root, or cross-check several indexers (which detects, but does not prove, omission). Indexer implementations SHOULD serve a subtree proof with every enumeration response, and a client SHOULD refuse to treat an unproven enumeration as complete. This section is removed when the reference indexer serves them.
+
 This guarantee is **inherently limited to objective queries.** A *subjective* view — a ranked feed, a relevance-ordered search, a reputation leaderboard — selects and orders by criteria no proof can capture, so an indexer **can** omit or down-rank an item undetectably. That is the nature of an open algorithm market, not a defect. The defenses are structural, not cryptographic: use multiple competing indexers, cross-check, or fall back to the objective enumeration the subtree proof *can* verify. A client SHOULD treat any ranked/filtered result as advisory and retain the ability to enumerate the underlying objective set.
 
 ## Query Categories (non-normative)
@@ -83,7 +91,7 @@ A client discovers what is available via a node's [sync-point manifest](./SBO%20
 A conforming client computes canonical state deterministically and never delegates that computation. It MUST:
 
 1. **Replay deterministically.** Apply DA blocks in order under SBO validity; given the same chain, all conforming clients reach the same canonical state.
-2. **Verify attribution at inclusion time.** Check each write's `Auth-Cert` and DNSSEC evidence to the **pinned DNS root KSK**, valid at the write's block inclusion time (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)). Honor the pinned trust anchors (`/sys/trust/dns-root`, `/sys/trust/brokers`; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
+2. **Verify attribution at inclusion time.** Check each write's `Auth-Cert` device presentation and DNSSEC evidence to the **pinned DNS root KSK**, valid at the write's block inclusion time — with the one exception that the presentation's assertion is judged at the HLC-bounded authoring instant (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#the-authoring-instant-assertion-only)). Honor the pinned trust anchors (`/sys/trust/dns-root`, `/sys/trust/brokers`; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
 3. **Evaluate policy deterministically**, including attestation-defined roles and `attested`/`not_attested` conditions resolved at inclusion time (see the [Policy Specification](./SBO%20Policy%20Specification.md#attestation-defined-roles)).
 4. **Resolve references with bounded hops.** Owner/name resolution and attestation in-force checks follow the Identity and Attestation rules, enforcing hop limits; an unresolved owner yields an unauthorized (disregarded) write.
 5. **Distinguish tip from confirmed** per the Content Specification, and surface which view a result reflects.
@@ -116,7 +124,17 @@ These are implementations of the specifications, not additional protocol, and ar
 ## Security Considerations
 
 - **A malicious indexer cannot forge or launder state** — inclusion proofs and client-side validity checks catch fabricated or invalid objects, and a forged state root fails the freshness check against the client's own root or a trusted checkpoint.
-- **A malicious indexer can selectively omit from subjective views.** Ranked and filtered results are not completeness-verifiable; mitigate by cross-checking indexers and retaining the objective enumeration path (subtree proofs).
+- **A malicious indexer can selectively omit from subjective views.** Ranked and filtered results are not completeness-verifiable; mitigate by cross-checking indexers and retaining the objective enumeration path (subtree proofs). Until the reference indexer serves subtree proofs, it can omit from **objective** enumerations too (see [Completeness proofs are not served](#completeness-proofs-are-not-served)).
+
+### Hostile-indexer threats
+
+Everything an indexer returns — object bytes, proofs, manifests, snapshots, checkpoint lists — is **attacker-controlled input** to the client (threat model adversary A3), and a plain-HTTP indexer makes any on-path party that attacker. A client's proof parsers and verifiers are therefore a security boundary in their own right: a bug that lets a malformed proof crash or hang the client is a denial of service any indexer, or anyone between the client and an indexer, can trigger at will. The 2026-11 audit found two of these in the reference client, both fuzz-discovered, and the requirements below are what a conforming client MUST meet so that they cannot recur:
+
+1. **Length arithmetic in proof containers is checked and bounded.** The SBOQ inclusion-proof container (served for `?proof=1`) and the SBOP proof container carry length headers (`Object-Length`, `Receipt-Length`). A client MUST parse them as canonical integers, MUST bound them by the container size and by a protocol maximum (the Wire Format `MAX_MESSAGE_BYTES` is a suitable bound for an embedded object), and MUST compute every offset with checked arithmetic. `obj_start + Object-Length` wrapping past a bounds check into a slice panic (W3-6), or `(Receipt-Length + 2) / 3 * 4` overflowing, is a client crash on one HTTP response. A container with no blank-line terminator (W3-9) is a rejection, not an out-of-bounds read.
+2. **Proof shape is validated before it is indexed.** A non-existence proof for a missing top-level object legitimately arrives with its first step's `segment` as `null`, which some encoders turn into an **empty path-segment list**; a verifier that indexes `path_segments[idx]` without checking `idx < len` panics (W3-8). A verifier MUST treat every proof as possibly inconsistent with the path it claims to prove: step count versus segment count, `null` segments only where the format allows them, sibling maps that are well-formed JSON objects with hash-shaped values, and the object bytes (when embedded) hashing to the claimed `object_hash` — and MUST reject rather than index on any mismatch. The same holds for subtree proofs (nested maps of bounded depth) and for checkpoint and manifest documents.
+3. **Verifiers are total functions.** For any byte string, a proof parser or verifier returns `Ok(verified)` or `Err(reason)`; it never panics, never allocates in proportion to a declared length before validating it, and never loops in proportion to anything but the input size. Fuzzing the parsers (`proof_parse`, `trie_proof`) is the acceptance test.
+4. **A verified proof is still only a claim about a root.** Passing the checks above establishes that the proof is consistent with `state_root`; whether `state_root` is one the client trusts is the separate [freshness](#verifiable-queries) check, and an indexer that serves a consistent proof against a root of its own invention has proven nothing.
+5. **Transport does not help.** TLS to an indexer authenticates the indexer, not its honesty; the rules above apply to a trusted operator's indexer as much as to a stranger's, because an indexer is an acceleration, never an authority.
 - **Checkpoint trust is inherited, not created here.** A client that accepts a checkpoint root to avoid replay inherits that checkpoint's trust model (ZK proof, committee, optimistic, or trusted indexer; see the State Commitment Specification). Maximum assurance comes from independent replay.
 - **Tip is untrusted and local.** Decisions with security weight (acting on a moderation or membership state) should read confirmed, proven state — not the optimistic tip.
 

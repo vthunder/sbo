@@ -41,7 +41,7 @@ and a browser SPA) that depends on these crates as a pinned git dependency.
 | `sbo-capture` | Client-side capture of browserid certificates + DNSSEC auth-evidence |
 | `sbo-daemon` | Daemon library (sync engine, validation, mempool overlay, IPC, prover) |
 | `sbo-wasm` | WASM client kit (build SBO message payloads in the browser) |
-| `sbo-zkvm` | RISC Zero guest program for ZK validity proofs |
+| `sbo-zkvm` | **Experimental**, feature-gated (`zkvm`): RISC Zero guest program for ZK validity proofs. Carries no validity claim today — see [ZK Validity Proofs](#zk-validity-proofs). |
 | `sbo-cli` | The `sbo` CLI binary's crate |
 
 ## Quick Start
@@ -214,8 +214,10 @@ The daemon supports three modes of operation:
 | Mode | Flag | Description | Use Case |
 |------|------|-------------|----------|
 | **Full** | (default) | Executes all blocks, computes state | Standard operation |
-| **Light** | `--light` | Verifies ZK proofs, trusts proven state | Resource-constrained environments |
-| **Prover** | `--prover` | Generates ZK proofs for state transitions | Serving light clients |
+| **Light** | `--light` | **Experimental.** Verifies ZK proofs, trusts proven state | Development of the proof system only |
+| **Prover** | `--prover` | **Experimental.** Generates ZK proofs for state transitions | Development of the proof system only |
+
+> **Light and Prover modes are experimental and make no security claim.** They require the non-default `zkvm` feature, and the proofs they exchange do not yet attest SBO validity (see [ZK Validity Proofs](#zk-validity-proofs)). Run a **Full** node for anything that matters.
 
 ### Full Mode (Default)
 
@@ -236,12 +238,13 @@ Instead of executing blocks, light mode:
 2. Cryptographically verifies the proofs
 3. Trusts the proven state roots
 
-Benefits:
+Intended benefits (once the guest proves SBO validity):
 - Much lower CPU usage
 - Faster sync (skip execution)
-- Same security guarantees (ZK proofs are trustless)
+- Trustless verification
 
-Limitations:
+Limitations today:
+- **The proofs do not yet attest SBO validity**; a light node trusts whoever produced the receipt
 - Depends on prover nodes submitting proofs
 - Only stores state roots, not individual objects
 
@@ -294,11 +297,13 @@ See [ZK Validity Proofs](#zk-validity-proofs) for setup details.
 
 ## ZK Validity Proofs
 
-ZK proofs enable trustless verification of state transitions without re-executing all transactions.
+> **Experimental — feature-gated — no validity claim.** `sbo-zkvm` is built only with `--features zkvm` and is not part of any deployed node. Its receipts do **not** currently prove that an SBO state root was computed correctly: the guest discards the actions hash it computes, takes the trie witness as an independent input never derived from the block data, returns a zero data root when `header_data` is absent, and trusts any `prev_state_root` on the first proof (2026-11 audit D8/D49, Q19; tracked by `sbo-5rww`). What follows describes the **design target**, not a property of the current build.
 
-### What the Proofs Verify
+ZK proofs are intended to enable trustless verification of state transitions without re-executing all transactions.
 
-The zkVM guest program generates proofs that verify three key properties:
+### What the Proofs Are Designed to Verify
+
+The zkVM guest program is designed to generate proofs that verify three key properties (today it verifies only the first and parts of the third; see the note above):
 
 **1. Header Chain Correctness**
 - Each block's parent hash matches the previous block's hash

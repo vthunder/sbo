@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: One normative identity-comparison rule (exactly one `@`, lowercase A-label domain, byte-exact local part, canonical lowercase on chain; Q5). Bare-key owners removed: no `ed25519:<hex>` in `Owner`/`Creator`/`New-Owner`, no signer-key fallback, genesis anchor excepted (Q6). T1 operator impersonation stated plainly.
+
 ## Abstract
 
 This specification defines how identities are established, resolved, and controlled in SBO, and how `Owner`, `Creator`, and `New-Owner` references resolve to a controlling party.
@@ -53,12 +57,23 @@ A repository **without its own domain** (addressed only by a chain URI) cannot r
 | Form | Example | Meaning |
 |------|---------|---------|
 | Bare email | `alice@gmail.com` | An email-rooted identity, attributed directly |
-| Bare key | `ed25519:<hex>` | A key-rooted identity, authorized by direct signature |
 | Local name | `alice` | The record at `/sys/names/alice` in the current repository |
 | Cross-repo name | `avail:mainnet:13/alice` or an [SBO URI](./SBO%20URI%20Specification.md) | A name in another repository |
 | Null (delete) | `null:` | No owner (see the Core Specification) |
 
-The bare-key form is what `effective_owner` (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#verification-algorithm)) yields when a message carries neither `Owner` nor `Creator`: the effective owner is the signing key, which resolves directly to a key controller.
+**No bare-key owners.** A raw key (`ed25519:<hex>`) is **not** an identity reference. An explicit `Owner`, `Creator` or `New-Owner` carrying one is invalid, and there is no signer-key fallback: a message that carries neither `Owner` nor `Creator` has no owner and is invalid. Every write names an owner that is a name under `/sys/names/` or an email. Key-rooted *identities* remain (a `/sys/names/<name>` record of kind `identity.v1` resolves to its key, see below); what is gone is the ability to own objects by a key that has no name record. **The single exception is the genesis anchor**: the mode objects of the genesis submission (`/sys/names/sys`, and in Mode B the domain and `dnssec` objects; see the [Genesis Specification](./SBO%20Genesis%20Specification.md#bootstrap-window)) are self-certifying — `/sys/names/sys` is the record that creates the name it is owned by — and are validated structurally rather than by owner resolution. Rationale: a key-only owner has no record to rotate, recover, transfer or govern, and the fallback made every malformed owner silently become "the signer".
+
+### Identity comparison
+
+Two identity references are compared by one normative rule, shared with browserid-ng Protocol §5:
+
+1. An email reference contains **exactly one `@`**. A string with zero or several `@` is not an email; as an owner reference it is a local name only if it contains no `@` at all, otherwise it is malformed and the message is invalid.
+2. The **domain** (after the `@`) is compared as a **lowercased A-label**: IDNA/punycode form, ASCII, case-folded. `alice@Example.com` and `alice@example.com` are the same identity.
+3. The **local part** (before the `@`) is compared **byte-exact**. `Alice@example.com` and `alice@example.com` are different identities.
+4. The **canonical on-chain form** is the lowercase-domain form. A header (`Owner`, `Creator`, `New-Owner`, a `Path` segment or `ID` that carries an identity, a policy `to`, a warrant `grantor`/`grantee`) whose domain contains an uppercase letter is **invalid**, so that a path such as `/u/alice@Example.com/` cannot alias `/u/alice@example.com/` and the byte-exact path grammar and this comparison rule agree. Producers MUST lowercase the domain before signing; consumers MUST reject rather than normalize.
+5. Names (no `@`) are compared byte-exact under the Core identifier grammar.
+
+The same rule decides the authority check in attribution (the email's domain against a certificate issuer), subaddress ownership (`user+tag@d` against `user@d`), and policy identity matching.
 
 The canonical reference for an email-rooted identity is its **email**, which is globally unambiguous and browserid-resolvable from anywhere. Compact handle forms:
 
@@ -81,11 +96,11 @@ resolve_controller(ref, seen = {}):
     if ref is "null:":
         return NoController
 
-    if ref is a bare email:
+    if ref is a bare email (exactly one "@", lowercase domain):
         return EmailController(ref)            # proven via attribution
 
-    if ref is a bare key (algorithm-prefixed, e.g. ed25519:<hex>):
-        return KeyController(ref)              # direct signature; the signer-fallback owner
+    if ref looks like a key (algorithm-prefixed, e.g. ed25519:<hex>) or is malformed:
+        return Unresolved                      # bare-key owners are not references (genesis excepted)
 
     # ref names a record under /sys/names/
     if ref in seen:                            # cycle
@@ -117,13 +132,13 @@ Because every step is deterministic given the message, on-chain state, and the p
 
 ### The stored creator
 
-An object's durable **creator** — the author identity recorded as the object's immutable `creator` attribute (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie)) — is the author's *resolved controller*, not the (possibly ephemeral) signing key: the explicit `Creator` header, else the **attributed email** when the signer carries a valid attribution, else the signer's claimed name, else a stable encoding of the signing key. For an email-rooted author this keeps a single, stable creator across browserid key rotation; like authorization, it is pinned to the inclusion-time clock and so is deterministic on replay.
+An object's durable **creator** — the author identity recorded as the object's immutable `creator` attribute (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie)) — is the author's *resolved controller*, not the (possibly ephemeral) signing key: the explicit `Creator` header, else the **attributed email** when the signer carries a valid attribution, else the signer's claimed name; a message that yields none of these has no creator and is invalid (there is no signing-key encoding fallback). For an email-rooted author this keeps a single, stable creator across browserid key rotation; like authorization, it is pinned to the inclusion-time clock and so is deterministic on replay.
 
 ## The `/sys/names/` Namespace
 
 `/sys/names/<name>` records register names. A name record provides a stable, human-friendly handle, optionally points to a profile, and — for email-rooted names — anchors reputation and other claims to a stable subject even as the controlling email changes.
 
-A name record is an ordinary SBO object: its **controller is its `Owner`**, and updating or transferring it follows the normal authorization rules. Creating names is governed by the repository's policy (the default root policy grants `create` on `/sys/names/*` to everyone — first-come-first-served — and `update`/`delete` to the owner; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
+A name record is an ordinary SBO object: its **controller is its `Owner`**, and updating or transferring it follows the normal authorization rules. Creating names is governed by the repository's policy (the default root policy grants `create` on the `/sys/names/` container to everyone — first-come-first-served — and `update`/`delete` to the owner; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
 
 First-come name creation is exactly the **global `(path, id)` first-valid-write-wins** rule (see the [State Commitment](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie) and [Core](./SBO%20Specification.md#object-identity) specs): the first valid claimant of `/sys/names/<name>` owns the slot; no second creator can shadow it. This is no longer a name-specific rule — it is the same invariant every path obeys.
 
@@ -301,6 +316,7 @@ The provider decides how to authenticate a user before issuing a certificate. Th
 - **Non-SMTP names.** `alice@community.org` is an identifier in the repository's namespace; it need not receive mail. browserid certificates do not require SMTP for primary providers.
 - **Pseudonymity (to the public).** On chain, only `alice@community.org` appears; the backing identity is known only to the issuing provider. This is pseudonymity with a trusted de-anonymizer (the provider), not zero-knowledge pseudonymity.
 - **Ban the person, not the pseudonym.** Because the provider knows the backing identity, it can refuse to issue any `@<repo-domain>` name to that backing identity, defeating ban-evasion while preserving public pseudonymity.
+- **The operator can impersonate any member.** Stated plainly: until a member completes the [Sovereignty Upgrade](#sovereignty-upgrade-email--key-over-time), the community's provider can mint a certificate for `alice@community.org` to any key it likes, and the chain cannot tell that certificate from one Alice requested. A T1 identity is therefore exactly as trustworthy as its operator; the chain makes such impersonation **evident after the fact** (every certificate and its evidence are on chain, so a member can prove a write was not theirs) but not **preventable**. Members who need protection from their operator pin a key via the sovereignty upgrade, after which operator-minted certificates no longer authorize.
 - **Self-authenticating key rotation (optional, recommended).** Because the repository controls its own provider, it MAY sign each provider-key rotation with the previous key, from a pinned root. This makes the provider's key history self-authenticating and removes any residual reliance on live DNS for community-issued identities.
 
 ### Verification
@@ -404,6 +420,8 @@ This makes an identity pseudonymous even to the issuer, with no trusted de-anony
 ## Security Considerations
 
 - **Provider compromise.** A compromised provider can attribute a user's email to an attacker's key (the standard email-trust assumption). Multi-provider backing (roadmap) and T2 reduce reliance on any single provider.
+- **T1 operator impersonation.** A community that runs its own provider can impersonate any of its members until they complete the sovereignty upgrade (see [Community-Issued Identities](#community-issued-identities-t1)). This is a property of the design, not a bug: T1 trades operator trust for pseudonymity and ban-evasion resistance.
+- **Aliasing.** The single identity-comparison rule (lowercase A-label domain, byte-exact local part, canonical lowercase on chain) is what stops one person from holding two paths or two name records for what readers see as one address; a consumer that normalized instead of rejecting would reopen it.
 - **Name squatting.** First-come name creation means names are claimed by whoever registers first; deployments may use stricter `/sys/names/*` policies.
 - **DNSSEC dependence.** Attribution rests on DNSSEC and the pinned DNS root KSK; see the [Authorization Specification](./SBO%20Authorization%20Specification.md) for the trust analysis.
 

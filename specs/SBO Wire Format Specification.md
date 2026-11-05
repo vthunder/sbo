@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: Batch submissions are per-message with strict order and state threading (no atomicity). `Auth-Warrant` removed (never a header; the warrant lives in the `Auth-Cert` presentation). Signing content is the received header block minus `Signature`; unknown headers are valid iff signed and placed after the modelled headers; consumers never reserialize; `Critical` header; `X-` prefix for experimental headers. `ed25519`/`sha256` REQUIRED, `secp256k1`/`keccak256` reserved. Encoding rules restated as MUST-reject. Size bounds on `Content-Length`, the header block and the submission.
+
 ## Overview
 
 This document defines the canonical wire format for SBO (Simple Blockchain Objects) messages. It specifies exact byte-level encoding for envelopes, cryptographic formats, and signature computation. Conforming implementations MUST follow this specification exactly to ensure interoperability and signature verification across clients.
@@ -66,12 +70,16 @@ function parse_one(data: bytes, start: int) -> (headers, payload, end_pos):
         lines.append((key, value))
 
     # Payload length from Content-Length header (0 if absent)
-    content_length = int(headers.get("Content-Length", "0"))
+    content_length = parse_canonical_uint(headers.get("Content-Length", "0"))
+    if content_length > MAX_MESSAGE_BYTES or content_length > len(data) - pos:
+        reject("Content-Length out of bounds")   # checked, never wrapping
     payload = data[pos : pos + content_length]
     end_pos = pos + content_length
 
     return (headers, payload, end_pos)
 ```
+
+`parse_canonical_uint` accepts only the canonical decimal form (see [Validation Rules](#validation-rules)); `+5`, `007` and an empty value are rejected. The length arithmetic MUST be checked: a `Content-Length` larger than the bytes remaining in the submission, or larger than `MAX_MESSAGE_BYTES`, rejects the message before any slice is taken (see [Size Bounds](#size-bounds)).
 
 ---
 
@@ -100,27 +108,41 @@ function parse_batch(data: bytes) -> List[Message]:
     messages = []
     pos = 0
 
+    if len(data) > MAX_SUBMISSION_BYTES:
+        reject("submission too large")       # the whole submission is ignored
+
     while pos < len(data):
-        headers, payload, end_pos = parse_one(data, pos)
+        headers, payload, end_pos = parse_one(data, pos)   # rejects ⇒ whole submission ignored
         messages.append(Message(headers, payload))
         pos = end_pos
 
     return messages
 ```
 
-### Atomicity
+### Size Bounds
 
-Messages within a single DA submission are processed **atomically in submission order**:
+| Bound | Reference value | Applies to |
+|-------|-----------------|------------|
+| `MAX_MESSAGE_BYTES` | 2 MiB (2,097,152 bytes) | One message: header block + payload. `Content-Length` MUST NOT exceed it. |
+| `MAX_SUBMISSION_BYTES` | 4 MiB (4,194,304 bytes) | One DA submission after any transport decoding (e.g. gzip inflation). |
+| `MAX_HEADER_BLOCK_BYTES` | 64 KiB (65,536 bytes) | The header block of one message. |
 
-1. All messages in the batch are validated together
-2. If any message is invalid, the entire batch is rejected
-3. Valid batches are applied in message order within the batch
-4. Batches from different DA transactions are ordered by DA layer sequencing
+A DA layer's own submission limit, where lower, governs. Every length computation in a parser MUST be checked arithmetic: a `Content-Length` larger than the bytes remaining, a submission larger than `MAX_SUBMISSION_BYTES`, or an inflated size past the bound is a parse failure, never a wrap-around, an allocation of the declared size, or a panic. A parser is a total function over untrusted bytes: it returns either a message list or a rejection.
 
-This enables atomic multi-message operations such as:
-- Genesis: system identity + root policy
-- Collection creation with initial objects
-- Multi-object transfers
+### Per-Message Validation and Ordering
+
+Messages within a single DA submission are **not** atomic. The submission is one unit for *parsing*; after that each message is validated and applied on its own, in order. The rules:
+
+1. **Parse as a unit.** A submission that fails to parse (any message of it, or a size bound) is ignored whole. No message from it is applied.
+2. **Strict submission order, state threaded.** Messages are validated in the order they appear. Message N is validated against the state left by messages 1..N-1 of the same submission (and every earlier submission in DA order). An intra-submission dependency (a `Policy-Ref`, an `Auth-Evidence` `ref:`, a `_config` followed by the items it governs, a transfer followed by an update) is satisfied exactly when the earlier message was applied.
+3. **A rejected message is invisible.** An invalid message leaves state unchanged and is not visible to any later message, in the same submission or after it. Later messages that depended on it fail closed or fall back as if it had never been sent.
+4. **An LWW loser is valid.** A message that is valid but loses the write-model ordering (see the [Content Specification](./SBO%20Content%20Specification.md)) is applied with no effect on the current value; it is not a rejection and does not affect later messages' validity.
+5. **Index is the slot tiebreak.** Two valid creates of the same `(path, id)` in one submission are resolved by position: the lower message index wins, as in the State Commitment specification's *lower message index wins* rule.
+6. **Commitment per block.** `object_hash` is computed per message over the bytes as included on chain; the state root commits once per DA block, after every submission in it has been processed.
+7. **Genesis is not an exception.** The genesis submission follows the same per-message rules. Fail-closed bootstrap comes from the [Genesis Specification](./SBO%20Genesis%20Specification.md)'s strict rule (the mode objects first, in order, at the anchor; a root policy present by the end of the anchor submission; everything after it validated normally), not from atomicity.
+8. **No multi-message atomicity.** There is no all-or-nothing operation (no atomic collection-plus-items, no atomic multi-object transfer). A client that needs all of a set to land validates the set at submit time against the tip and submits in dependency order; submit-time validation is advisory (see [Validity Layers](./SBO%20Specification.md#validity-layers)), and replay validation is the only boundary.
+
+Submissions from different DA transactions are ordered by DA layer sequencing. The rationale for per-message semantics: atomicity buys nothing without transactional execution, and it would let one expired credential in a shared submission veto every other writer's message and every evidence refresh batched with it. The residual (an I/O failure mid-block half-applying a block on one node) is an implementation defect, not a protocol state.
 
 ### Example: Genesis Batch
 
@@ -147,7 +169,7 @@ Content-Hash: sha256:...
 Public-Key: ed25519:...
 Signature: ...
 
-{"grants":[{"to":"*","can":["create"],"on":"/sys/names/*"},...]}
+{"grants":[{"to":"*","can":["create"],"on":"/sys/names/"},...]}
 ```
 
 Note: The second message starts immediately after the first payload ends (no newline separator).
@@ -206,6 +228,7 @@ Optional headers appear after required headers, in alphabetical order:
 | `Content-Encoding` | enum | `utf-8`, `gzip`, or `base64` |
 | `Content-Schema` | string | Payload schema identifier (e.g., `nft.v1`) |
 | `Creator` | identity ref | Original creator (defaults to signer) |
+| `Critical` | comma-separated header names | Headers a consumer MUST understand to accept this message (see [Unknown Headers](#unknown-headers)) |
 | `HLC` | `<physical>.<counter>` | Author hybrid logical clock — ordering key for the write model (see the [Content Specification](./SBO%20Content%20Specification.md#author-clock-hlc)) |
 | `Owner` | identity ref | Current owner (defaults to creator) |
 | `Policy-Ref` | SBO URI | Reference to governing policy object |
@@ -213,6 +236,20 @@ Optional headers appear after required headers, in alphabetical order:
 | `Proof` | base64 | Proof data for bridge unlocks |
 | `Proof-Type` | string | Type of proof (e.g., `burn`) |
 | `Related` | JSON array | Related object references (see below) |
+
+There is no `Auth-Warrant` header. The agent warrant travels inside the `Auth-Cert` device presentation (see the [Authorization Specification](./SBO%20Authorization%20Specification.md)); a message carrying an `Auth-Warrant` line is treated as carrying an unknown header (below), and nothing reads it.
+
+### Unknown Headers
+
+A consumer MAY encounter headers it does not model. The rule is **sign what was sent, ignore what you do not understand**:
+
+- An unknown header is valid **if and only if** it is inside the signed header block (it precedes `Public-Key`, so the signature covers it) **and** it is placed after every modelled header listed in the canonical order (slot 27 below, between `Critical` and `Auth-Cert`). Unknown headers are sorted among themselves in byte order of their names.
+- An unknown header that is **not** covered by the signature (a line after `Signature`, or any line a relay appended) makes the message **invalid**. This is what keeps the received bytes, the signing content and `object_hash` in agreement: nothing can be injected into an accepted message without the signer's key.
+- A consumer that does not model a header **keeps its bytes** (for signature verification, hashing, storage and forwarding) and **ignores its meaning**.
+- `Critical` lists header names (comma-separated, no spaces) whose meaning a consumer must apply to accept the message. A consumer that does not model every header named in `Critical` MUST reject the message. A header not named in `Critical` is safe to skip. A semantics change that an old client cannot safely skip is either a `Critical` header or an `SBO-Version` bump.
+- Experimental headers use the `X-` prefix (`X-Mingo-Draft`). They are signed like any other header, ignored by consumers that do not know them, and several can be live on one chain at once. A name without the `X-` prefix is reserved for this specification.
+
+Canonical order is a **producer** rule. A consumer checks it on the headers it models and on the placement of unknown headers after them; it never reorders or rewrites anything.
 
 ### Canonical Header Order
 
@@ -243,12 +280,14 @@ For signature computation, headers MUST appear in this order:
 23. `Proof-Type` (if present)
 24. `Registry-Path` (if present)
 25. `Related` (if present)
-26. `Auth-Cert` (if present)
-27. `Auth-Evidence` (if present)
-28. `Public-Key`
-29. `Signature`
+26. `Critical` (if present)
+27. unknown and `X-` headers (if present), in byte order of name
+28. `Auth-Cert` (if present)
+29. `Auth-Evidence` (if present)
+30. `Public-Key`
+31. `Signature`
 
-`Auth-Cert` and `Auth-Evidence` precede `Public-Key`, so they are inside the signed header block: the signer commits to its own authentication certificate and DNSSEC evidence, and neither can be stripped or substituted.
+`Auth-Cert` and `Auth-Evidence` precede `Public-Key`, so they are inside the signed header block: the signer commits to its own authentication certificate and DNSSEC evidence, and neither can be stripped or substituted. `Auth-Warrant` is not in the order and is not a header (see above).
 
 ---
 
@@ -262,37 +301,42 @@ Cryptographic values use a prefix to identify the algorithm:
 algorithm:value
 ```
 
-### Supported Signature Algorithms
+### Signature Algorithms
 
-| Identifier | Curve | Signing Hash | Key Size | Signature Size |
-|------------|-------|--------------|----------|----------------|
-| `secp256k1` | secp256k1 | SHA-256 | 33 bytes (compressed) | 64 bytes (r‖s) |
-| `ed25519` | Ed25519 | SHA-512 (built-in) | 32 bytes | 64 bytes |
+| Identifier | Status | Curve | Signing Hash | Key Size | Signature Size |
+|------------|--------|-------|--------------|----------|----------------|
+| `ed25519` | **REQUIRED** | Ed25519 | SHA-512 (built-in) | 32 bytes | 64 bytes |
+| `secp256k1` | Reserved | secp256k1 | SHA-256 | 33 bytes (compressed) | 64 bytes (r‖s) |
 
-### Supported Hash Algorithms
+### Hash Algorithms
 
-| Identifier | Algorithm | Output Size |
-|------------|-----------|-------------|
-| `sha256` | SHA-256 | 32 bytes |
-| `keccak256` | Keccak-256 | 32 bytes |
+| Identifier | Status | Algorithm | Output Size |
+|------------|--------|-----------|-------------|
+| `sha256` | **REQUIRED** | SHA-256 | 32 bytes |
+| `keccak256` | Reserved | Keccak-256 | 32 bytes |
+
+`ed25519` and `sha256` are the only algorithms a conforming implementation MUST support, and the only ones valid on the wire in SBO Protocol v0.5. `secp256k1` and `keccak256` are **reserved** identifiers: their encoding is fixed here so a future version can enable them without ambiguity, but a message that uses them today is invalid (Validation Rule 11). Ed25519 verification MUST reject non-canonical scalars (`S ≥ L`).
 
 ### Encoding Rules
 
 | Element | Format |
 |---------|--------|
-| Hex encoding | Lowercase, no `0x` prefix |
-| secp256k1 public key | SEC1 compressed (33 bytes = 66 hex chars) |
+| Hex encoding | Lowercase, no `0x` prefix. Uppercase or mixed-case hex is invalid. |
+| Integers (`Content-Length`) | Canonical decimal: ASCII digits only, no sign, no leading zeros (`0` alone is the only value that starts with `0`), no whitespace. |
 | ed25519 public key | Raw public key (32 bytes = 64 hex chars) |
+| secp256k1 public key (reserved) | SEC1 compressed (33 bytes = 66 hex chars) |
 | Signatures | Raw bytes (64 bytes = 128 hex chars) |
 | Hashes | Raw bytes (32 bytes = 64 hex chars) |
+
+These are MUST-reject rules, not formatting advice: a value that is not in the stated form makes the message invalid (Validation Rules 10 and 12). Accepting `+5`, `007` or uppercase hex would let two byte strings carry one meaning, which breaks the one-hash-per-message property that `object_hash` depends on.
 
 ### Examples
 
 ```
 Content-Hash: sha256:7d0a4b3c8f2e1d6a5b9c4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b
-Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
 Public-Key: ed25519:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
 Signature: 1a2b3c4d5e6f...  (no prefix, algorithm from Public-Key)
+Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a   (reserved form; invalid in v0.5)
 ```
 
 ---
@@ -301,31 +345,29 @@ Signature: 1a2b3c4d5e6f...  (no prefix, algorithm from Public-Key)
 
 ### Signed Content
 
-The signature covers all header bytes **excluding the `Signature` header**, plus the trailing blank line.
+The **signing content** is the header block **as received**, minus the `Signature` line, plus the trailing blank line: every header line that precedes `Signature`, in the bytes in which it arrived, including any unknown or `X-` headers. The signer commits to exactly the bytes it sent. There is no canonicalization step on the consumer side.
+
+Only the producer serializes, once, when it signs. The canonical order is what the producer MUST emit; a consumer checks that the modelled headers it sees are in that order (Validation Rule 2) and that unknown headers sit after them, and otherwise treats the header block as opaque bytes.
 
 ### Algorithm
 
 ```
 function compute_signature(message, private_key):
-    # 1. Build canonical header block without Signature
-    canonical = ""
-    for header in CANONICAL_ORDER:
+    # 1. Serialize the header block in canonical order, without Signature
+    #    (the only place in the protocol where a header block is built)
+    block = ""
+    for header in CANONICAL_ORDER:            # unknown/X- headers in their slot, byte order
         if header == "Signature":
             continue  # Skip entirely
         if header in message.headers:
-            canonical += header + ": " + message.headers[header] + "\n"
-    canonical += "\n"  # Blank line
+            block += header + ": " + message.headers[header] + "\n"
+    block += "\n"  # Blank line
 
-    # 2. Hash the canonical bytes
-    if key_algorithm(private_key) == "secp256k1":
-        hash = sha256(canonical.as_bytes())
-    else if key_algorithm(private_key) == "ed25519":
-        # Ed25519 handles hashing internally
-        return ed25519_sign(private_key, canonical.as_bytes())
-
-    # 3. Sign the hash
-    return ecdsa_sign(private_key, hash)
+    # 2. Sign the bytes (Ed25519 hashes internally)
+    return ed25519_sign(private_key, block.as_bytes())
 ```
+
+(The reserved `secp256k1` form would sign `sha256(block)` with ECDSA; it is not valid in v0.5.)
 
 ### Verification Algorithm
 
@@ -344,19 +386,31 @@ function verify_message(message):
     if actual != expected:
         return INVALID("Content-Hash mismatch")
 
-    # 4. Reconstruct canonical header block (without Signature)
-    canonical = reconstruct_canonical(headers, exclude=["Signature"])
-    canonical += "\n"  # Blank line
+    # 4. Check header placement on the received bytes (no reconstruction)
+    if not modelled_headers_in_canonical_order(headers):
+        return INVALID("Non-canonical header order")
+    if any unknown header precedes a modelled header, or follows Signature:
+        return INVALID("Unsigned or misplaced header")
+    if any header named in headers.get("Critical") is not modelled:
+        return INVALID("Critical header not understood")
 
-    # 5. Verify signature
+    # 5. Signing content = received header block minus the Signature line
+    signed = received_header_bytes(message, exclude_line="Signature")
+    # (ends with the blank line; identical bytes to what the signer built)
+
+    # 6. Verify signature
     key_algo, public_key = parse_prefixed(headers["Public-Key"])
     signature = hex_decode(headers["Signature"])
 
-    if not verify_signature(key_algo, public_key, canonical, signature):
+    if not verify_signature(key_algo, public_key, signed, signature):
         return INVALID("Signature verification failed")
 
     return VALID
 ```
+
+### Consumers Never Reserialize
+
+**Bytes in, bytes out.** A consumer (node, indexer, client, relay, snapshot or proof builder) verifies the signature over the bytes it received, computes `object_hash` over the bytes it received (see the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-hash)), stores those bytes, and forwards those same bytes. It MUST NOT rebuild a header block from a parsed structure for any of these purposes: a parsed structure holds only the headers that consumer models, so two consumers modelling different subsets would disagree on the signature and the hash. Because an accepted message is one whose received bytes verify, the raw bytes, the signing content and the canonical serialization coincide for every accepted message by construction.
 
 ### Payload Integrity
 
@@ -436,7 +490,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 42
 Content-Hash: sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b
-Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Public-Key: ed25519:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
 Signature: 1a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f901a2b3c4d5e6f70819203a4b5c6d7e8f9
 
 {"name":"Sunset #1","artist":"alice"}
@@ -468,7 +522,7 @@ Type: object
 Content-Type: application/json
 Content-Length: 42
 Content-Hash: sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b
-Public-Key: secp256k1:02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a
+Public-Key: ed25519:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
 
 ```
 
@@ -489,21 +543,27 @@ A message is **invalid** and MUST be rejected if:
 7. Unknown `SBO-Version` (forward compatibility)
 8. `Action` is not a known value
 9. `Type` is not `object` or `collection`
-10. Hex values contain non-hex characters or wrong length
-11. Algorithm prefix is unknown or unsupported
+10. Hex values contain non-hex characters, uppercase characters, or wrong length
+11. Algorithm prefix is unknown, reserved (`secp256k1`, `keccak256`) or otherwise unsupported
+12. `Content-Length` (or any integer-valued header) is not in canonical decimal form (`+5`, `007`, ` 5`, empty)
+13. `Content-Length` exceeds `MAX_MESSAGE_BYTES` or the bytes remaining in the submission, the header block exceeds `MAX_HEADER_BLOCK_BYTES`, or the submission exceeds `MAX_SUBMISSION_BYTES`
+14. A header name appears more than once
+15. A header appears after `Signature`, or an unknown header appears before a modelled header (it is outside the signed, canonical placement)
+16. A header named in `Critical` is not modelled by the consumer
 
-A message SHOULD be accepted with warnings if:
+A message MUST be accepted (its meaning ignored where unknown) if:
 
-1. Unknown optional headers are present (ignore them)
+1. Unknown or `X-` headers are present, signed, placed after the modelled headers, and not named in `Critical` (keep their bytes, ignore their meaning)
 2. Unknown relationship types in `Related` (pass through)
 
 ---
 
 ## Future Extensions
 
-- Additional signature algorithms can be added with new prefixes
-- Additional hash algorithms can be added with new prefixes
-- New optional headers can be added (will be ignored by older clients)
+- Additional signature algorithms can be added with new prefixes (`secp256k1` is reserved); enabling one is an `SBO-Version` bump
+- Additional hash algorithms can be added with new prefixes (`keccak256` is reserved); enabling one is an `SBO-Version` bump
+- New optional headers can be added; signed and placed after the modelled headers they are ignored by older clients, unless named in `Critical`, in which case older clients reject the message
+- Experimental headers use the `X-` prefix and need no specification change
 - `SBO-Version` will increment for breaking changes
 
 ---
@@ -515,8 +575,8 @@ See `test-vectors/wire-format-v0.1.json` for canonical test cases including:
 - Minimal valid message
 - Message with all optional headers
 - Each action type (post, move, transfer, delete)
-- Both signature algorithms (secp256k1, ed25519)
-- Both hash algorithms (sha256, keccak256)
+- `ed25519` signatures and `sha256` hashes; reserved `secp256k1`/`keccak256` prefixes rejected
+- Non-canonical integers and uppercase hex rejected; unsigned unknown headers rejected; signed `X-` headers accepted
 - Edge cases (empty payload, unicode in headers, max sizes)
 
 ---

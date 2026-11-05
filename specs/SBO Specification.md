@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: The owner is a principal; every write, the owner's included, is policy-evaluated and the default owner permissions are an explicit root-policy grant (Q13). `.` and `..` are not valid identifiers (Q24). Identifiers are ASCII only; the percent-encoding sentence is dropped (Q37). Validity Layers states that submit-time gates are advisory and replay validation is the only boundary (S20).
+
 ## Overview
 The Simple Blockchain Object (SBO) is a minimal data model and envelope format for posting and updating structured objects to a blockchain or data availability layer in a way that supports replication, verification, and mutability. This version assumes a simple base layer with ordered transaction inclusion and no smart contract logic.
 
@@ -41,17 +45,22 @@ IDs, path segments, and creator names share the same syntax rules:
 
 **Length:** 1-256 characters
 
-**Case sensitivity:** IDs are case-sensitive. `Foo` and `foo` are different.
+**Case sensitivity:** IDs are case-sensitive. `Foo` and `foo` are different. (The one exception is the domain part of an email-rooted identity reference, which is compared as a lowercased A-label and is canonical in lowercase on chain; see the [Identity Specification](./SBO%20Identity%20Specification.md#identity-comparison).)
 
-**Unicode:** Not allowed directly. Use percent-encoding for non-ASCII characters (e.g., `café` → `caf%C3%A9`).
+**ASCII only.** Identifiers are ASCII: no byte outside the grammar below is allowed, and there is no escaping or percent-encoding mechanism (`%` is not an identifier character). Non-ASCII names are an application concern (a display name in the payload mapped to an ASCII id), or, if internationalized addresses are adopted later, IDNA-style `xn--` A-labels as a specification note; they are never raw UTF-8 on the wire.
+
+**Dot segments.** The ids `.` and `..` are **not valid** (they are filesystem path traversal, and an implementation that mirrors state to a filesystem must never be able to escape its root). An id otherwise MAY contain `.` (`example.com`, `v1.2`).
 
 **Grammar (ABNF):**
 ```
 id       = 1*256id_char
 id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~" / "@" / "+" / ":"
+         ; with id != "." and id != ".."
 segment  = id
 path     = "/" *(segment "/")
 ```
+
+An id and a collection name share this grammar, so `/c/x` (an object `x` at `/c/`) and `/c/x/y` (an object `y` in collection `/c/x/`) may both exist; the [State Commitment Specification](./SBO%20State%20Commitment%20Specification.md#object-versus-container) commits to both, and a filesystem mirror MUST choose a collision-free layout (it is a view, never the authoritative state).
 
 **Parsing object references:**
 ```
@@ -116,7 +125,7 @@ Another-Header: value
 | `Content-Type` | MIME type of payload (required if payload present) |
 | `Content-Length` | Size of the payload in bytes (required if payload present) |
 | `Content-Hash` | Hash of payload with algorithm prefix (required if payload present) |
-| `Public-Key` | Public key with algorithm prefix, e.g. `secp256k1:02a1b2...` |
+| `Public-Key` | Public key with algorithm prefix, e.g. `ed25519:a1b2c3...` |
 | `Signature` | Signature bytes in lowercase hex |
 
 **Note:** Content headers (`Content-Type`, `Content-Length`, `Content-Hash`) are required when a payload is present. For `Type: object`, payload is always required. For `Type: collection`, payload is optional (used for metadata like name, description).
@@ -198,6 +207,8 @@ SBO distinguishes two layers of validity, because they have fundamentally differ
 
 - **Envelope validity (Layer 1)** is self-contained and deterministic. It depends only on the message bytes and on prior on-chain state: well-formedness (see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)), a correct `Signature` over the canonical headers, a matching `Content-Hash`, and conformance to the applicable policy evaluated over keys and objects already on chain. Layer 1 is therefore *objective*: every client that replays the chain computes the same result, from genesis, forever. SBO is a based design — writers post directly to the data-availability layer and nothing SBO-aware gatekeeps inclusion — so Layer 1 is established by clients on replay, not enforced by a privileged operator. Its objectivity comes from determinism, not from a sequencer.
 
+- **Submit-time gates are advisory; replay validation is the only boundary.** Because SBO is based, a node's `/v1/submit` endpoint, a wallet's pre-check, a relay's filter and any other check performed *before* inclusion are conveniences for the writer: they can reject early, refresh evidence, or check live revocation status, but they are not part of the protocol's definition of validity and are not trusted by any other party. Anyone can submit to the data-availability layer directly, bypassing every such gate. The only validation that determines state is the deterministic replay validation every reader performs on the included bytes (Layer 1 and Layer 2 below). Consequently a rule that cannot be evaluated deterministically from the chain (wall-clock freshness, live DNS, revocation lists, rate limits) is by construction a submit-time rule, and the specifications call it out as such wherever it appears; nothing a submit gate does can make an invalid message valid or an included message invalid.
+
 - **Attribution (Layer 2)** binds a signing key to an *identity* — for example, an email address controlled through an external identity provider. Attribution concerns data that originates outside the chain (the provider's keys), so it does not become objective for free. SBO makes it objective by requiring that the evidence be **self-authenticating against a single on-chain anchor** and carried in (or referenced from) the replayable record — see [Attribution Capture](#attribution-capture). Until that evidence is present a message's attribution is unverifiable, and clients MUST NOT assume any inclusion-time party verified it; each reader establishes attribution itself from the captured evidence. With the evidence present, attribution too is a deterministic function of on-chain data, and all correct clients converge.
 
 #### Attribution Capture
@@ -218,9 +229,9 @@ See the [SBO Authorization Specification](./SBO%20Authorization%20Specification.
 
 ### Object Ownership and Authorization
 
-Ownership of an object is determined by the `Owner` header, which references an identity record as specified in the [Identity Specification](./SBO%20Identity%20Specification.md). If `Owner` is absent, the owner is the creator.
+Ownership of an object is determined by the `Owner` header, which references an identity record as specified in the [Identity Specification](./SBO%20Identity%20Specification.md). If `Owner` is absent, the owner is the creator. The owner is a **principal**, not a bypass: being the owner is what lets a signer match a policy's `to: "owner"` grants, and nothing more. Every write — including an owner's own update, transfer or delete — is evaluated against the governing policy (deny, grants, restrictions, default deny; see the [Policy Specification](./SBO%20Policy%20Specification.md#evaluation-order)). A policy that carries no owner grant for an action denies the owner that action. The permissions owners have by default come from an explicit `{"to": "owner", …}` grant in the root policy, inherited down the path hierarchy, which a deployer may narrow or remove.
 
-A message is **authorized** to act on an object when its signer resolves to the object's owner. Resolution proceeds in two steps:
+A message is **authorized** to act on an object when its signer resolves to the object's owner *and* the governing policy admits the action. Ownership resolution proceeds in two steps:
 
 1. **Attribution (Layer 2):** the signing key (`Public-Key`) is bound to an identity via the evidence carried in the message (see [Attribution Capture](#attribution-capture)). For email-rooted identities the `Auth-Cert` certificate binds the signing key to an email address.
 2. **Ownership resolution (Layer 1 over on-chain state):** the resolved identity is matched against the object's `Owner`. Ownership references may be indirect — an owner naming an identity (e.g. `alice@community.org`) resolves through that identity's record under `/sys/names/` to its controlling identity, and so on, until it grounds in a directly-controlled identity. An object is writable by whoever controls the identity at the end of this chain. See the [Identity Specification](./SBO%20Identity%20Specification.md) for resolution and grounding rules.
@@ -237,12 +248,12 @@ In the rules below, "the current owner" means a signer authorized per [Object Ow
 - Object creation is governed by the policy of the nearest ancestor collection object with a policy reference.
 - Object updates are governed by the policy of the object itself.
 - May only set or update `Policy-Ref` if the object is owned by the creator of the object.
-- Only the current owner may post updates to the object, unless forbidden by the object's policy.
+- Only the current owner may post updates to the object, unless the policy grants `update` to others; the owner's own update is itself subject to the policy (an owner grant is required, and `deny`/`restrictions` apply to the owner).
 
 #### transfer
 - Transfer may modify `owner`, `path`, and/or `id` (at least one required).
 - A transfer preserves the object's `creator`; only `owner`, `path`, and/or `id` change. The object's content (and therefore its `object_hash`) is carried unchanged from source to destination.
-- Only the current owner may transfer the object, unless allowed by the object's policy.
+- Only the current owner may transfer the object, unless allowed by the object's policy; the owner's own transfer is subject to the policy like any other action.
 - Transfers are governed by the policy of the object itself.
 - If `New-Path` or `New-ID` is specified:
   - Only valid if the destination slot `(New-Path, New-ID)` is occupied by **no valid object** (a **global** check, not per-creator). The transfer preserves the object's immutable `creator`.
@@ -252,7 +263,7 @@ In the rules below, "the current owner" means a signer authorized per [Object Ow
 
 #### delete
 - Modeled as transfers to a null owner (`null:`).
-- Message must be signed by the current owner of the object.
+- Message must be signed by the current owner of the object, or by a signer the policy grants `delete`; the owner's delete is itself policy-evaluated.
 
 ### Policies
 
