@@ -200,71 +200,58 @@ fn poc_d7_failing_self_cert_domain_is_accepted() {
 }
 
 // ===========================================================================
-// PoC-4 (D21, High): an on-chain `Path: /../` escapes the filesystem mirror.
-// The grammar admits dot segments and the mirror join is verbatim, so the
-// write lands outside the repo directory. We replicate the exact join the
-// daemon's `write_object` performs (repo.path / path segments / id) and show
-// a file written above the repo root.
+// PoC-4 (D21, High) — INVERTED after the fix (Q24, sbo-vu8s): an on-chain
+// `Path: /../` used to escape the filesystem mirror because the grammar
+// admitted dot segments and the mirror join was verbatim. Now the grammar
+// rejects `.` / `..` at parse, and the mirror layout (`sbo_daemon::mirror`)
+// keeps every write under the repo root.
 // ===========================================================================
 
 #[test]
-#[ignore] // AUDIT-2026-11 D21 PoC: dot segments escape the mirror today
 fn poc_d21_path_dotdot_escapes_the_mirror() {
-    // The grammar accepts the hostile path and id (this is the root cause).
-    assert!(Path::parse("/../../").is_ok(), "grammar rejects /../ — fix already in?");
+    // The grammar rejects the hostile path and ids (the root cause is gone).
+    assert!(Path::parse("/../../").is_err(), "grammar must reject /../");
+    assert!(Path::parse("/a/../").is_err());
+    assert!(Path::parse("/./").is_err());
+    assert!(Id::new("..").is_err());
+    assert!(Id::new(".").is_err());
     assert!(Id::new("pwned").is_ok());
 
-    // Replicate write_object's mirror join exactly (sync.rs:1104-1112):
-    //   file_path = repo.path; for seg in path.trim_start_matches('/').split('/')
-    //       .filter(nonempty) { file_path.push(seg) }; file_path.push(id)
+    // Every mirror path the daemon can compute from grammar-valid input stays
+    // inside the repo root.
     let root = tempdir().unwrap();
     let repo_mirror = root.path().join("repo");
     std::fs::create_dir_all(&repo_mirror).unwrap();
-
-    // One `..` segment: the write climbs out of the repo mirror into its parent
-    // (`root`), landing as a sibling of the repo dir. More `..` climb further;
-    // one is enough to prove the escape and keeps the final equality exact.
-    let hostile_path = Path::parse("/../").unwrap().to_string();
-    let mut file_path = repo_mirror.clone();
-    for seg in hostile_path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
-        file_path.push(seg);
+    for (p, id) in [("/", "...x"), ("/a/", "..a"), ("/x.d/", "y"), ("/u/alice@example.com/", "n1")] {
+        let path = Path::parse(p).unwrap();
+        let file = sbo_daemon::mirror::write_object(&repo_mirror, &path, id, b"ok").unwrap();
+        let canon = file.canonicalize().unwrap();
+        assert!(canon.starts_with(repo_mirror.canonicalize().unwrap()), "{p}{id} escaped: {canon:?}");
     }
-    file_path.push("pwned");
-
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&file_path, b"escaped").unwrap();
-
-    // The written file resolves ABOVE the repo mirror directory.
-    let canon = file_path.canonicalize().unwrap();
-    let repo_canon = repo_mirror.canonicalize().unwrap();
-    assert!(
-        !canon.starts_with(&repo_canon),
-        "PoC FAILED TO REPRODUCE — the mirror write stayed inside {repo_canon:?}: {canon:?}",
-    );
-    // It is a sibling of the repo dir (root/pwned), proving the escape.
-    assert_eq!(canon, root.path().canonicalize().unwrap().join("pwned"));
 }
 
-/// D58 companion: an id and a collection name share one grammar, so once `/c/x`
-/// exists as a file the daemon cannot `create_dir_all` for `/c/x/y`; that error
-/// aborts `process_block` on this node mid-block (a one-node fork). We show the
-/// filesystem collision that triggers the abort.
+/// D58 companion — INVERTED after the fix: an object `/c/x` and a collection
+/// `/c/x/` no longer claim one filesystem entry (collections live in `<seg>.d/`
+/// directories), so a nested write after an object write succeeds, and the
+/// mirror is best-effort anyway (a failure logs; `process_block` goes on).
 #[test]
-#[ignore] // AUDIT-2026-11 D58 PoC: an id/collection collision stalls a block
 fn poc_d58_id_collection_collision_blocks_the_mirror() {
     let root = tempdir().unwrap();
     let mirror = root.path().join("repo");
-    std::fs::create_dir_all(mirror.join("c")).unwrap();
-    // Object /c/x — a file.
-    std::fs::write(mirror.join("c").join("x"), b"obj").unwrap();
-    // Later object /c/x/y needs /c/x to be a directory.
-    let err = std::fs::create_dir_all(mirror.join("c").join("x")).unwrap_err();
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::AlreadyExists,
-        "PoC: create_dir_all over a file must error (this is the ? that aborts the block)",
+    let c = Path::parse("/c/").unwrap();
+    let cx = Path::parse("/c/x/").unwrap();
+    // Object /c/x — a file; then object /c/x/y — needs a collection dir for x.
+    sbo_daemon::mirror::write_object(&mirror, &c, "x", b"obj").unwrap();
+    sbo_daemon::mirror::write_object(&mirror, &cx, "y", b"nested").unwrap();
+    // And an object literally named `x.d` next to the `x.d/` collection dir.
+    sbo_daemon::mirror::write_object(&mirror, &c, "x.d", b"dotd").unwrap();
+    assert_eq!(std::fs::read(sbo_daemon::mirror::object_file(&mirror, &c, "x")).unwrap(), b"obj");
+    assert_eq!(std::fs::read(sbo_daemon::mirror::object_file(&mirror, &cx, "y")).unwrap(), b"nested");
+    assert_eq!(std::fs::read(sbo_daemon::mirror::object_file(&mirror, &c, "x.d")).unwrap(), b"dotd");
+    // `a.b` and `a.tmp` no longer share a temp file.
+    assert_ne!(
+        sbo_daemon::mirror::temp_file(&sbo_daemon::mirror::object_file(&mirror, &c, "a.b")),
+        sbo_daemon::mirror::temp_file(&sbo_daemon::mirror::object_file(&mirror, &c, "a.tmp")),
     );
 }
 
