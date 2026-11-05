@@ -123,7 +123,7 @@ An object's durable **creator** — the author identity recorded as the object's
 
 `/sys/names/<name>` records register names. A name record provides a stable, human-friendly handle, optionally points to a profile, and — for email-rooted names — anchors reputation and other claims to a stable subject even as the controlling email changes.
 
-A name record is an ordinary SBO object: its **controller is its `Owner`**, and updating or transferring it follows the normal authorization rules. Creating names is governed by the repository's policy (the default root policy grants `create` on `/sys/names/*` to everyone — first-come-first-served — and `update`/`delete` to the owner; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
+A name record is an ordinary SBO object: its **controller is its `Owner`**, and updating or transferring it follows the normal authorization rules. Creating names is governed by the repository's policy (the default root policy grants `create` on the `/sys/names/` container to everyone — first-come-first-served — and `update`/`delete` to the owner; see the [Genesis Specification](./SBO%20Genesis%20Specification.md)).
 
 First-come name creation is exactly the **global `(path, id)` first-valid-write-wins** rule (see the [State Commitment](./SBO%20State%20Commitment%20Specification.md#object-identity-in-the-trie) and [Core](./SBO%20Specification.md#object-identity) specs): the first valid claimant of `/sys/names/<name>` owns the slot; no second creator can shadow it. This is no longer a name-specific rule — it is the same invariant every path obeys.
 

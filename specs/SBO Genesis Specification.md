@@ -163,8 +163,8 @@ Signature: <signature>
 
 {
   "grants": [
-    {"to": "*", "can": ["create"], "on": "/sys/names/*"},
-    {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
+    {"to": "*", "can": ["create"], "on": "/sys/names/"},
+    {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
     {"to": "owner", "can": ["*"], "on": "/$owner/**"}
   ]
 }
@@ -182,8 +182,8 @@ The recommended default root policy establishes:
 
 | Rule | Effect |
 |------|--------|
-| `{"to": "*", "can": ["create"], "on": "/sys/names/*"}` | Anyone can claim a new identity (first-come-first-served) |
-| `{"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"}` | Only the signer can modify their identity |
+| `{"to": "*", "can": ["create"], "on": "/sys/names/"}` | Anyone can claim a new identity (first-come-first-served) |
+| `{"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"}` | Only the signer can modify their identity |
 | `{"to": "owner", "can": ["*"], "on": "/$owner/**"}` | Users control their own namespace |
 
 This policy is recommended but not required. Deployers may use different policies for different governance models.

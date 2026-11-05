@@ -214,7 +214,7 @@ Root policy (`/sys/policies/root`), abbreviated:
     {"to": "owner", "can": ["post", "delete"], "on": "/spaces/**/$owner/**"},
     {"to": {"role": "moderator"}, "can": ["delete"], "on": "/spaces/**"},
     {"to": {"role": "admin"}, "can": ["create"], "on": "/cooks@example.org/attestations/**"},
-    {"to": "*", "can": ["create"], "on": "/sys/names/*"}
+    {"to": "*", "can": ["create"], "on": "/sys/names/"}
   ],
   "restrictions": [
     {"on": "/spaces/**", "require": {"not_attested": {"type": "ban", "by": "cooks@example.org"}}}
