@@ -45,6 +45,47 @@ impl std::fmt::Display for ValidationStage {
     }
 }
 
+/// Why a policy check did not pass. A `State` error is a failed read of the
+/// state the decision depends on (RocksDB error while listing attestations,
+/// resolving a policy, ...) and is reported as [`ValidationStage::State`] -- never
+/// as a plain denial, and never as an allow (D11: `not_attested` fails closed on
+/// a state-read error). `Denied` is an evaluated refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyError {
+    State(String),
+    Denied(String),
+}
+
+impl PolicyError {
+    fn stage(&self) -> ValidationStage {
+        match self {
+            PolicyError::State(_) => ValidationStage::State,
+            PolicyError::Denied(_) => ValidationStage::Policy,
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            PolicyError::State(r) | PolicyError::Denied(r) => r,
+        }
+    }
+
+    /// Turn this into the validation outcome, with `wrap` adding the caller's
+    /// context around the bare reason.
+    fn into_invalid(self, wrap: impl FnOnce(&str) -> String) -> ValidationResult {
+        ValidationResult::Invalid {
+            stage: self.stage(),
+            reason: wrap(self.reason()),
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 /// Context for the L2 attribution layer: the write's DA inclusion time and the
 /// pinned trust anchors. Threaded from the block being replayed.
 pub struct L2Context {
@@ -732,11 +773,10 @@ fn validate_post(
     if is_policy_write(msg) {
         if !root_policy_exists {
             tracing::debug!("Allowing policy write without root policy (genesis mode)");
-        } else if let Err(reason) = require_govern(state, msg, l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason),
-            };
+        } else if let Err(e) = require_govern(state, msg, l2) {
+            return e.into_invalid(|reason| {
+                format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason)
+            });
         } else if let Err(reason) = check_policy_delegation(state, msg) {
             // P2/P3/P4 delegation terms: version pin rules, descendant-constraint
             // template, and the no-pin restriction.
@@ -761,11 +801,8 @@ fn validate_post(
             tracing::debug!("Controller updating object {}:{}", msg.path, msg.id);
         } else {
             // Signer is not the controller - must check policy for update.
-            if let Err(reason) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
-                return ValidationResult::Invalid {
-                    stage: ValidationStage::Policy,
-                    reason,
-                };
+            if let Err(e) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
+                return e.into_invalid(|r| r.to_string());
             }
         }
     } else if !root_policy_exists {
@@ -774,11 +811,8 @@ fn validate_post(
         tracing::debug!("Allowing post without root policy (genesis mode)");
     } else {
         // New object creation into an empty slot - must check policy
-        if let Err(reason) = check_policy(state, msg, ActionType::Create, None, l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason,
-            };
+        if let Err(e) = check_policy(state, msg, ActionType::Create, None, l2) {
+            return e.into_invalid(|r| r.to_string());
         }
     }
 
@@ -796,6 +830,8 @@ fn is_name_claim_path(path: &SboPath) -> bool {
 /// point lookup, no per-creator scan); what remains name-specific is the
 /// authorization: a new claim on a primary-domain repo must control the mapped
 /// email (anti-hijack), and an update is controller-only (no policy override).
+/// On top of that the governing policy is evaluated for both creates and
+/// updates (Q14 (a) / D56), so name claims are not policy-free.
 fn validate_name_claim(
     msg: &Message,
     state: &dyn StateView,
@@ -830,6 +866,15 @@ fn validate_name_claim(
                 reason: format!("Name '{}' already claimed by {}: {}", msg.id.as_str(), owner_ref, reason),
             };
         }
+        // The governing policy is evaluated as well (Q14 (a) / D56): a name
+        // record is an ordinary object under policy, so `deny` and
+        // `not_attested` on `/sys/names/**` bind the controller too. The
+        // controller satisfies a `to: owner` grant via `signer_is_owner`.
+        if root_policy_exists {
+            if let Err(e) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
+                return e.into_invalid(|r| r.to_string());
+            }
+        }
         tracing::debug!("Controller updating name claim: {}", msg.id.as_str());
     } else {
         // New name claim. On a primary-domain repo a local name `<local>` governs
@@ -852,6 +897,13 @@ fn validate_name_claim(
                         ),
                     };
                 }
+            }
+            // After the anti-hijack check, the governing policy decides whether
+            // this signer may create under `/sys/names/` at all (Q14 (a) / D56):
+            // root-policy grants, `deny` and `not_attested` bans apply to name
+            // claims exactly as to any other create.
+            if let Err(e) = check_policy(state, msg, ActionType::Create, None, l2) {
+                return e.into_invalid(|r| r.to_string());
             }
         }
         tracing::debug!("New name claim: {}", msg.id.as_str());
@@ -917,15 +969,14 @@ fn validate_transfer(
     // subtree (reversibility), and owning a policy cannot be used to transfer it
     // out of governance. Ordinary objects keep the owner-or-policy rule below.
     if is_policy_object(&obj) {
-        if let Err(reason) = require_govern(state, msg, l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!(
+        if let Err(e) = require_govern(state, msg, l2) {
+            return e.into_invalid(|reason| {
+                format!(
                     "{:?} of policy object {} requires `govern` (from parent policy): {}",
                     if is_delete { ActionType::Delete } else { ActionType::Transfer },
                     msg.path, reason
-                ),
-            };
+                )
+            });
         }
     } else if l2_authorize(msg, state, l2, &owner_ref).is_err() {
         // The current owner may always act on the object; otherwise the object's
@@ -934,14 +985,13 @@ fn validate_transfer(
         // Specification.md §transfer, and is how a sys/admin role (granted
         // `transfer`/`delete` on `/**`) acts on objects it does not own.
         let action = if is_delete { ActionType::Delete } else { ActionType::Transfer };
-        if let Err(reason) = check_policy(state, msg, action, Some(&owner_ref), l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!(
+        if let Err(e) = check_policy(state, msg, action, Some(&owner_ref), l2) {
+            return e.into_invalid(|reason| {
+                format!(
                     "Signer does not control owner {} and policy denies {:?}: {}",
                     owner_ref, action, reason
-                ),
-            };
+                )
+            });
         }
     }
 
@@ -987,13 +1037,12 @@ fn validate_transfer(
         // so a move into `/u/$owner/**` succeeds when the object lands in its
         // owner's namespace, for both self-moves and admin filing.
         let owner_after = new_owner.clone().unwrap_or_else(|| owner_ref.clone());
-        if let Err(reason) =
+        if let Err(e) =
             check_policy_at(state, msg, &dest_path, ActionType::Create, Some(&owner_after), l2)
         {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!("Destination {} does not admit object: {}", dest_path, reason),
-            };
+            return e.into_invalid(|reason| {
+                format!("Destination {} does not admit object: {}", dest_path, reason)
+            });
         }
     }
 
@@ -1414,7 +1463,7 @@ mod dnssec_repro_tests {
         let requester = resolve_controller(&subject, &name_lookup(&db), DEFAULT_HOP_LIMIT, None);
         let source = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(issuer.clone()) };
         assert!(
-            attested_subject_matches(&db, &l2, &requester, &source),
+            attested_subject_matches(&db, &l2, &requester, &source).unwrap(),
             "by-qualified moderator attestation under /u/ must resolve"
         );
 
@@ -1422,7 +1471,7 @@ mod dnssec_repro_tests {
         let other = SigningKey::generate().public_key().to_string();
         let wrong = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(other) };
         assert!(
-            !attested_subject_matches(&db, &l2, &requester, &wrong),
+            !attested_subject_matches(&db, &l2, &requester, &wrong).unwrap(),
             "an attestation by a different issuer must not satisfy the role"
         );
     }
@@ -1762,7 +1811,7 @@ fn check_policy(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     check_policy_at(state, msg, &msg.path, action, owner, l2)
 }
 
@@ -1776,7 +1825,7 @@ fn check_policy_at(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     check_policy_resolving_at(state, msg, target, target, action, owner, l2)
 }
 
@@ -1815,7 +1864,7 @@ fn is_policy_object(obj: &StoredObject) -> bool {
 /// fast-path is deliberately NOT consulted here — owning a policy object must not
 /// let you rewrite/relocate it without `govern`, else first-writer-owns would
 /// re-introduce self-governing capture.
-fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), String> {
+fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), PolicyError> {
     // Pin-aware (P2): a pinned policy's governance resolves against the version
     // its EXISTING object pinned, so a later ancestor amendment cannot reach in
     // (the sovereignty property). Unpinned/create → the current latest parent.
@@ -1835,12 +1884,12 @@ fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Resul
 fn governing_parent_policy(
     state: &dyn StateView,
     msg: &Message,
-) -> Result<(sbo_core::policy::Policy, String), String> {
+) -> Result<(sbo_core::policy::Policy, String), PolicyError> {
     let parent = parent_container_path(&msg.path);
     let parent_entry = match state.resolve_policy_entry(&parent) {
         Ok(Some(e)) => e,
-        Ok(None) => return Err("No applicable parent policy found".to_string()),
-        Err(e) => return Err(format!("Error resolving parent policy: {e}")),
+        Ok(None) => return Err(PolicyError::Denied("No applicable parent policy found".to_string())),
+        Err(e) => return Err(PolicyError::State(format!("Error resolving parent policy: {e}"))),
     };
     let latest_hash = parent_entry.content_hash.clone();
 
@@ -1955,18 +2004,18 @@ fn check_policy_resolving_at(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     // Resolve the applicable policy by walking up the path hierarchy
     let policy = match state.resolve_policy(resolve_at) {
         Ok(Some(p)) => p,
         Ok(None) => {
             // No policy found - deny by default
             // This shouldn't happen if root policy exists, but fail closed
-            return Err("No applicable policy found".to_string());
+            return Err(PolicyError::Denied("No applicable policy found".to_string()));
         }
         Err(e) => {
             tracing::error!("Error resolving policy: {}", e);
-            return Err(format!("Error resolving policy: {}", e));
+            return Err(PolicyError::State(format!("Error resolving policy: {}", e)));
         }
     };
     evaluate_policy_for(state, msg, &policy, match_target, action, owner, l2)
@@ -1985,7 +2034,7 @@ fn evaluate_policy_for(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     let target = match_target;
     // Resolve the actor's identity (name if available, otherwise key-based)
     let actor = resolve_creator(msg, Some(state), l2);
@@ -2028,7 +2077,19 @@ fn evaluate_policy_for(
         Some(email) => Controller::Email(email),
         None => Controller::Key(msg.signing_key.to_string()),
     };
-    let is_attested = |source: &AttestedSource| attested_subject_matches(state, l2, &requester, source);
+    // A failed state read while answering an attestation question is recorded
+    // here and turned into a `State` error after evaluation (D11): the policy
+    // engine's callback is a plain bool, so the error cannot travel through it.
+    // The bool returned for a failed read is irrelevant -- the write is refused
+    // either way -- `false` just keeps `attested` roles from matching.
+    let attestation_read_error: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let is_attested = |source: &AttestedSource| match attested_subject_matches(state, l2, &requester, source) {
+        Ok(matched) => matched,
+        Err(e) => {
+            attestation_read_error.borrow_mut().get_or_insert(e);
+            false
+        }
+    };
 
     // The repo's primary domain scopes resolution-based name matching in the
     // evaluator: a bare grant name `<local>` resolves to `<local>@<primary_domain>`,
@@ -2037,7 +2098,12 @@ fn evaluate_policy_for(
     let pd = primary_domain(state);
 
     // Evaluate the policy
-    match evaluate(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
+    let outcome = evaluate(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref());
+    if let Some(e) = attestation_read_error.into_inner() {
+        tracing::error!("Cannot evaluate attestation condition for {:?} on {}: {}", action, target_path, e);
+        return Err(PolicyError::State(format!("Cannot evaluate attestation condition: {e}")));
+    }
+    match outcome {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",
@@ -2055,7 +2121,7 @@ fn evaluate_policy_for(
                 actor,
                 reason
             );
-            Err(reason)
+            Err(PolicyError::Denied(reason))
         }
     }
 }
@@ -2076,19 +2142,22 @@ fn evaluate_policy_for(
 /// `by`-qualified role — moderators — and every `not_attested{by}` ban). All
 /// inputs are on-chain and inclusion-time-pinned, so the decision is
 /// deterministic on replay.
+///
+/// A failed state read is an `Err` (D11): the caller refuses the write rather
+/// than treating an unreadable attestation set as "no attestation".
 fn attested_subject_matches(
     state: &dyn StateView,
     l2: &L2Context,
     requester: &Controller,
     source: &AttestedSource,
-) -> bool {
+) -> Result<bool, String> {
     let lookup = name_lookup(state);
     let pd = primary_domain(state);
     let t = l2.inclusion_time.unwrap_or(0);
     let candidates = state
         .list_objects_by_schema("attestation.v1")
-        .unwrap_or_default();
-    candidates.into_iter().any(|obj| {
+        .map_err(|e| format!("cannot list attestations: {e}"))?;
+    Ok(candidates.into_iter().any(|obj| {
         if obj.content_schema.as_deref() != Some("attestation.v1") {
             return false;
         }
@@ -2113,7 +2182,7 @@ fn attested_subject_matches(
             }
         }
         resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) == *requester
-    })
+    }))
 }
 
 /// Create a StoredObject from a Message

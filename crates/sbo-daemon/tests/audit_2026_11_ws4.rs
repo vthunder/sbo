@@ -170,11 +170,10 @@ fn d57_owner_transfer_out_of_denied_path_is_invalid() {
 
 // ───────────────────────────── D56 / Q14: name claims ─────────────────────────────
 
-/// AUDIT-2026-11 D56: fails today. `/sys/names/` claims take a dedicated path
-/// that never evaluates the root policy: a `deny` on `/sys/names/**` does not
-/// stop a claim.
+/// AUDIT-2026-11 D56 (fixed, sbo-hw7b): `/sys/names/` claims evaluate the
+/// governing policy after the anti-hijack check, so a `deny` on
+/// `/sys/names/**` stops a claim.
 #[test]
-#[ignore]
 fn d56_name_claim_evaluates_root_policy() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -281,11 +280,9 @@ fn d11_ban_is_enforced_with_healthy_state() {
     assert!(!is_valid(&r), "banned writer must be rejected, got {r:?}");
 }
 
-/// AUDIT-2026-11 D11: fails today. `attested_subject_matches` does
-/// `list_objects_by_schema(..).unwrap_or_default()`, so a state-read error
-/// makes `not_attested` treat a banned writer as un-banned.
+/// AUDIT-2026-11 D11 (fixed, sbo-slsm): a state-read error while listing
+/// attestations is a `State` failure, never "not banned".
 #[test]
-#[ignore]
 fn d11_not_attested_fails_closed_on_state_read_error() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();

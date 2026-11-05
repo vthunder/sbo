@@ -44,8 +44,8 @@ pub fn genesis(signing_key: &SigningKey) -> Vec<u8> {
     // 2. Root policy (unchanged - still JSON)
     let policy_payload = serde_json::json!({
         "grants": [
-            {"to": "*", "can": ["create"], "on": "/sys/names/*"},
-            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
+            {"to": "*", "can": ["create"], "on": "/sys/names/"},
+            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/$owner/**"}
         ]
     });
@@ -165,8 +165,8 @@ pub fn genesis_with_domain(
     let (dnssec_grant, dnssec_restriction) = dnssec_self_auth_policy_entries();
     let policy_payload = serde_json::json!({
         "grants": [
-            {"to": "*", "can": ["create"], "on": "/sys/names/*"},
-            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
+            {"to": "*", "can": ["create"], "on": "/sys/names/"},
+            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/$owner/**"},
             dnssec_grant
         ],
@@ -291,14 +291,14 @@ pub fn genesis_with_domain_and_restriction(
     let (dnssec_grant, dnssec_restriction) = dnssec_self_auth_policy_entries();
     let policy_payload = serde_json::json!({
         "grants": [
-            {"to": "*", "can": ["create"], "on": "/sys/names/*"},
-            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/*"},
+            {"to": "*", "can": ["create"], "on": "/sys/names/"},
+            {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/$owner/**"},
             dnssec_grant
         ],
         "restrictions": [
             {
-                "on": "/sys/names/*",
+                "on": "/sys/names/",
                 "require": {
                     "schema": "identity.v1",
                     "require_payload_signed_by": { "path": "/sys/domains/*" }
@@ -374,7 +374,7 @@ pub fn post(signing_key: &SigningKey, path: &str, id: &str, payload: &[u8]) -> V
 }
 
 /// Claim a name at /sys/names/<name> (self-signed identity)
-/// This should succeed with root policy's {"to": "*", "can": ["create"], "on": "/sys/names/*"}
+/// This should succeed with root policy's {"to": "*", "can": ["create"], "on": "/sys/names/"}
 pub fn claim_name(signing_key: &SigningKey, name: &str) -> Vec<u8> {
     let public_key = signing_key.public_key();
 
