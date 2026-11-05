@@ -279,6 +279,17 @@ impl StateDb {
             .map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
+    /// The [`PolicyEntry`] indexed at exactly `path` (no ancestor walk, no root
+    /// fallback). Lets a caller that overlays pending policies (the daemon's
+    /// mempool overlay) run the ancestor walk itself.
+    pub fn get_policy_entry_at(&self, path: &crate::message::Path) -> Result<Option<PolicyEntry>, DbError> {
+        let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        match self.db.get_cf(&cf, path.to_string().as_bytes()).map_err(|e| DbError::RocksDb(e.to_string()))? {
+            Some(bytes) => Ok(Some(decode_policy_entry(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve policy by walking up the path hierarchy (see [`resolve_policy_entry`]).
     pub fn resolve_policy(&self, path: &crate::message::Path) -> Result<Option<Policy>, DbError> {
         Ok(self.resolve_policy_entry(path)?.map(|e| e.policy))
