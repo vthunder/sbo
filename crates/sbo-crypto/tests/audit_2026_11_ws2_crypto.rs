@@ -92,7 +92,7 @@ fn trie_vectors_builder_verifier_and_helper_agree() {
 
         let r_helper = hex::encode(compute_trie_root(&objs));
 
-        let mut partial = PartialTrie::new([0u8; 32]);
+        let mut partial = PartialTrie::new(sbo_crypto::trie::empty_root());
         for (s, h) in &objs {
             partial.insert(s, *h);
         }

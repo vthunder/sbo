@@ -56,10 +56,10 @@
       "root": "40e0aeec7d58ba3c161170ee3b4ec50693ebcc7bc79be5cfd9f08147ad2fcc6d"
     },
     {
-      "description": "empty state",
+      "description": "empty state: node_hash of the empty node, no zero sentinel (Q41)",
       "id": "TRIE-04",
       "objects": [],
-      "root": "0000000000000000000000000000000000000000000000000000000000000000"
+      "root": "6f2225cc7ae0ab19bcc845b3d7cb4bdb2eef095a1a86ea18071fe8538bc33d8c"
     },
     {
       "description": "object at [a] and object at [a,b] coexist (object-versus-container); order-independent",

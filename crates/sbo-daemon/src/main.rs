@@ -495,7 +495,7 @@ impl RepoApi for DaemonState {
         let (block, root) = db
             .get_latest_state_root()
             .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?
-            .unwrap_or((repo.head, [0u8; 32]));
+            .unwrap_or((repo.head, sbo_core::empty_root()));
         Ok(StateRootView {
             block,
             state_root: hex::encode(root),
@@ -517,7 +517,7 @@ impl RepoApi for DaemonState {
         let (block, root) = db
             .get_latest_state_root()
             .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?
-            .unwrap_or((repo.head, [0u8; 32]));
+            .unwrap_or((repo.head, sbo_core::empty_root()));
         // On-chain checkpoint objects (if any have been published).
         let checkpoints = db
             .list_objects_by_path_prefix("/sys/checkpoints/")
@@ -1795,7 +1795,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                                     );
                                 } else {
                                     // Use real state roots and objects from process_block result
-                                    let pre_root = result.pre_state_root.unwrap_or([0u8; 32]);
+                                    let pre_root = result.pre_state_root.unwrap_or(sbo_core::empty_root());
                                     let post_root = result.post_state_root;
 
                                     p.add_block(

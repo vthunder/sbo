@@ -161,10 +161,10 @@ fn verify_proof(
     // Check we have state roots for the claimed blocks
     // Note: get_state_root_at_block(N) returns state AFTER block N was processed
     // So for prev_state_root (state BEFORE block_from), we need block_from - 1
-    // For genesis (block_from == 0 or first proof), prev_state_root should be [0; 32]
+    // For genesis (block_from == 0 or first proof), prev_state_root is the empty root
     #[allow(unused_variables)] // Used in zkvm feature
     let pre_root = if sbop.block_from == 0 {
-        Some([0u8; 32]) // Genesis starts with empty state
+        Some(sbo_core::empty_root()) // Genesis starts with empty state
     } else {
         state_db.get_state_root_at_block(sbop.block_from - 1)
             .map_err(|e| crate::DaemonError::State(format!("Failed to get pre-state root: {}", e)))?
@@ -211,12 +211,12 @@ fn verify_proof(
                         }
 
                         // Verify state roots match what we computed
-                        // Note: For bootstrap proofs (first proof in chain), the prover uses [0; 32] as
+                        // Note: For bootstrap proofs (first proof in chain), the prover uses the empty root as
                         // prev_state_root. We accept this if we don't have state at block_from - 1
                         // (meaning we also started syncing from this point).
                         if let Some(our_pre_root) = pre_root {
-                            // Allow bootstrap proofs where prev_state_root is [0; 32]
-                            let is_bootstrap_proof = output.prev_state_root == [0u8; 32];
+                            // Allow bootstrap proofs where prev_state_root is the empty root
+                            let is_bootstrap_proof = output.prev_state_root == sbo_core::empty_root();
                             if !is_bootstrap_proof && output.prev_state_root != our_pre_root {
                                 tracing::warn!(
                                     "Journal prev_state_root {} doesn't match our state {}",
@@ -225,7 +225,7 @@ fn verify_proof(
                                 );
                                 return Ok(false);
                             }
-                            if is_bootstrap_proof && our_pre_root != [0u8; 32] {
+                            if is_bootstrap_proof && our_pre_root != sbo_core::empty_root() {
                                 // Bootstrap proof but we have different pre-state
                                 // This is acceptable if we're both starting from same point
                                 tracing::debug!(
@@ -478,7 +478,7 @@ impl SyncEngine {
             return Ok(BlockProcessResult {
                 tx_count: 0,
                 pre_state_root: None,
-                post_state_root: [0u8; 32],
+                post_state_root: sbo_core::empty_root(),
                 block_data: Vec::new(),
                 has_genesis: false,
                 state_witness: StateTransitionWitness::default(),
@@ -546,7 +546,7 @@ impl SyncEngine {
             "pre_trie.root_hash() = {}",
             hex::encode(&pre_state_root[..8])
         );
-        let pre_state_root_opt = if pre_state_root == [0u8; 32] { None } else { Some(pre_state_root) };
+        let pre_state_root_opt = if pre_state_root == sbo_core::empty_root() { None } else { Some(pre_state_root) };
 
         // Track touched objects for witness generation
         let mut touched_objects = TouchedObjects::default();
@@ -891,7 +891,7 @@ impl SyncEngine {
         }
 
         // Track the post-state root and genesis status for the result
-        let mut post_state_root = [0u8; 32];
+        let mut post_state_root = sbo_core::empty_root();
         let mut has_genesis = false;
 
         for uri in uris {
@@ -907,7 +907,7 @@ impl SyncEngine {
                         // Fall back to transition root
                         let prev_root = state_db.get_state_root_at_block(block_number.saturating_sub(1))
                             .unwrap_or(None)
-                            .unwrap_or([0u8; 32]);
+                            .unwrap_or(sbo_core::empty_root());
                         let actions_data = block_number.to_le_bytes();
                         compute_transition_root(prev_root, &actions_data)
                     }

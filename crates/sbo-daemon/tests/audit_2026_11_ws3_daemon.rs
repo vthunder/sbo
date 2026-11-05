@@ -48,11 +48,11 @@ proptest! {
         if cert.is_none() { prop_assert!(out.is_empty()); }
     }
 
-    /// Snapshot: the root of an empty object set is zero; decoding junk gzip
+    /// Snapshot: the root of an empty object set is the empty root; decoding junk gzip
     /// (or valid gzip of junk JSON) is an error, never a panic.
     #[test]
     fn snapshot_decode_is_total(junk in prop::collection::vec(any::<u8>(), 0..128)) {
-        prop_assert_eq!(compute_snapshot_root(&[]), [0u8; 32]);
+        prop_assert_eq!(compute_snapshot_root(&[]), sbo_core::empty_root());
         prop_assert!(decode_snapshot_payload(&junk).is_err() || junk.is_empty());
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(&junk).unwrap();

@@ -311,8 +311,12 @@ impl BlockProofOutput {
     /// Current protocol version
     pub const VERSION: u32 = 1;
 
-    /// Empty state root (for genesis)
-    pub const EMPTY_STATE_ROOT: [u8; 32] = [0u8; 32];
+    /// Empty state root (for genesis): `sbo_crypto::trie::empty_root()`,
+    /// i.e. `sha256(0x01 || {"children":{}})` (State Commitment v2, Q41).
+    pub const EMPTY_STATE_ROOT: [u8; 32] = [
+        0x6f, 0x22, 0x25, 0xcc, 0x7a, 0xe0, 0xab, 0x19, 0xbc, 0xc8, 0x45, 0xb3, 0xd7, 0xcb, 0x4b, 0xdb,
+        0x2e, 0xef, 0x09, 0x5a, 0x1a, 0x86, 0xea, 0x18, 0x07, 0x1f, 0xe8, 0x53, 0x8b, 0xc3, 0x3d, 0x8c,
+    ];
 
     /// Empty data root (for blocks with no DA proof)
     pub const EMPTY_DATA_ROOT: [u8; 32] = [0u8; 32];
@@ -321,7 +325,7 @@ impl BlockProofOutput {
 impl Default for BlockProofInput {
     fn default() -> Self {
         Self {
-            prev_state_root: [0u8; 32],
+            prev_state_root: BlockProofOutput::EMPTY_STATE_ROOT,
             block_number: 0,
             block_hash: [0u8; 32],
             parent_hash: [0u8; 32],
@@ -341,6 +345,12 @@ impl Default for BlockProofInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pinned constant is the trie's empty root (Q41 (a)).
+    #[test]
+    fn empty_state_root_is_the_trie_empty_root() {
+        assert_eq!(BlockProofOutput::EMPTY_STATE_ROOT, sbo_crypto::trie::empty_root());
+    }
 
     #[test]
     fn test_app_lookup_serialization() {
