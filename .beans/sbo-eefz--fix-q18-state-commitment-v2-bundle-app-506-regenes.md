@@ -28,3 +28,21 @@ Depends on: **Q33, Q39 (open)**; Q2, Q6, Q8, Q13, Q18 settled. Blocks: D3, D4, Q
 ## Decision
 
 Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).
+
+## Summary of Changes (sbo-side, 2026-11-05)
+
+- Migration note: `docs/state-commitment-v2-migration.md` (v1 -> v2 table,
+  the bundled items Q2/Q6/Q8/Q13/Q18/Q33/Q39 plus D3/D4 with their effect on
+  genesis and policies, the regenesis procedure for mingo / app 506, and the
+  residual empty-root divergence between spec text and implementation).
+- Spec version: `specs/SBO State Commitment Specification.md` already
+  carries the v2 changelog entry from the specs group; nothing further to
+  bump. The umbrella "SBO Protocol v0.5" marker is left alone.
+- D4 / W3-4 landed in `sbo-39qi` (same branch).
+
+Still open, not doable in this repo:
+- Survey app 506 policies (Q13 owner admission, Q39 stray keys): needs the
+  live chain (q4-batch-survey / WS8-WS9).
+- New genesis batch in mingo (v7) and the regenesis / re-sync of
+  da.sandmill.org: mingo-side and infra tasks.
+
