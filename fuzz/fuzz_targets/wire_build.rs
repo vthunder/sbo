@@ -26,7 +26,10 @@ fn id_from(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() || bytes.len() > 64 {
         return None;
     }
-    Some(bytes.iter().map(|b| ID_CHARS[(*b as usize) % ID_CHARS.len()] as char).collect())
+    let s: String = bytes.iter().map(|b| ID_CHARS[(*b as usize) % ID_CHARS.len()] as char).collect();
+    // The grammar is stricter than the alphabet (no `.`/`..`, identity rule
+    // for `@`, audit 2026-11 Q5/Q24): only hand the builder a valid id.
+    Id::new(&s).ok().map(|_| s)
 }
 
 fuzz_target!(|input: Input| {

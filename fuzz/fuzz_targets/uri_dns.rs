@@ -32,7 +32,11 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Some((l, d)) = parse_email(&s) {
         assert!(!l.is_empty() && !d.is_empty());
-        assert_eq!(format!("{l}@{d}"), s);
-        assert!(!l.contains('@'));
+        // Q5 (audit 2026-11): exactly one `@`, the local part byte-exact, the
+        // domain compared and returned as a lowercase A-label.
+        let (sl, sd) = s.split_once('@').expect("Some ⇒ one @");
+        assert_eq!(l, sl);
+        assert_eq!(d, sd.to_ascii_lowercase());
+        assert!(!l.contains('@') && !d.contains('@'));
     }
 });

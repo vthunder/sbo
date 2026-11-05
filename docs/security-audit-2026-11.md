@@ -443,3 +443,57 @@ the named decision in `docs/security-audit-2026-11-decisions.md`.
 Before deploying anything from groups 1, 3 or 7, re-sync a scratch node
 from app 506 on localtest and compare its state root with da.sandmill.org's;
 group 3 changes the root by design and ships only with the regenesis.
+
+## 6. Remediation status (2026-11-05)
+
+Dan accepted every recommendation for Q22–Q40 on 2026-11-05 (Q32 revised to
+(c), sign-what-was-sent, after discussion; Q41, the empty-state root,
+surfaced during remediation and was decided (a) the same day). The
+remediation landed on `audit-2026-11` the same day in two waves of
+file-disjoint agent groups, each in its own worktree, merged by the
+coordinator with a full workspace run after every merge.
+
+**Landed in this repository (54 remediation beans + 13 spec-edit beans,
+all `completed`):** wire integrity (D1, D2, D3, W3-6/8/9/10, W6-1, Q32,
+Q35); identity rule and one grammar (Q5, D13, D54, Q36, D14, D21/D58);
+policy engine (D10, W3-1/W3-2, Q38, Q40, D24, D9/W3-5); daemon HTTP/IPC
+surface (W5-1/3/6/7, Q15, Q30, Q31, D18/W5-4/W5-9, D50/W5-5/W3-7, Q22,
+W7-5/W7-14/W4-3, Q34); daemon policy enforcement (D56, D11/W4-1, D12,
+D22/S10, Q23, Q25, D15); bootstrap anchors and fast-sync (D7, W6-5, D6/S4,
+D33/Q16, D26/D27/D34); state-commitment v2 (D4/W3-4, Q41); the regenesis
+bundle's sbo side (W3-3/Q39, Q6, D57/Q13, D5/D23/S19/Q7/Q33); supply chain
+(Q26/Q29, R7-1, R7-2, W7-3/4/7); all spec edits (§1 spec-only items and the
+decided parts of Q1–Q41).
+
+**Test state:** `cargo test --workspace` on localtest: 663 pass / 0 fail /
+6 ignored (was 518 / 0 / 94 at audit close). The six remaining ignores are
+generators and live-network tests (`generate_conformance_vectors`,
+`write_mingo_genesis_v6_fixture`, `capture_browserid_chain_to_file`,
+`live_capture_*`) plus `poc_d10_inner_evaluate_cycle`, which pins the inner
+evaluator and is superseded by the parse-time rejection. Every
+`AUDIT-2026-11` acceptance test is un-ignored and passing; every WS8 PoC is
+inverted to assert rejection. `cargo audit` and `cargo deny check` are
+green (one new advisory, RUSTSEC-2026-0344, ignored under the Q19 rule with
+review 2027-02-01). The fuzz workspace builds on nightly against the
+vendored `dnssec-prover`.
+
+**Not done here (open beans):** the mingo-side regenesis (`sbo-eefz`,
+in-progress: genesis v7 batch, app 506 policy survey, da.sandmill.org
+re-sync; builder requirements are on the bean); infra beans that execute
+in mingo, sandmill-infra or GitHub settings (`sbo-33xa` with the deploy-time
+config changes, `sbo-ju44`, `sbo-9zs4`, `sbo-9oq0`); the launchd fuzz job
+(`sbo-kcyq`); deferred `sbo-5rww`, `sbo-7bl8`, `sbo-wn15`; the Q37 route-2
+spec note (`sbo-8j2t`, draft).
+
+**Behaviour changes a deployer must know** (also on `sbo-33xa` and
+`sbo-eefz`): HTTP public mode is derived from a non-loopback bind and needs
+`SBO_HTTP_ALLOWED_ORIGINS` and `SBO_HTTP_BEARER_TOKENS`; `/v1/dnssec` and
+the `/auth` popup are gone; the live root policy's `/sys/names/*` grant
+matches nothing under the container-only rule; bare-key owners and the
+signer fallback are gone, so every write carries an `Owner`; the state root,
+`object_hash`, the trie format and the empty root all change, and the
+genesis batch order is strict, so the live chain needs the regenesis before
+this daemon serves it; the filesystem mirror layout is `<seg>.d/`;
+`dnssec-prover` is vendored under `vendor/` with one added function; a
+fast-synced node no longer authorizes under a superseded pinned policy
+ancestor (needs full replay; follow-up noted on `sbo-syib`).
