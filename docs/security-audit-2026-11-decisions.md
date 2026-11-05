@@ -480,6 +480,21 @@ and the assertion is a 64-bit bearer.
 **Recommendation: (a).** Dead surface is the cheapest surface to secure;
 the device-cert model made this flow obsolete.
 
+History (asked by Dan 2026-11-05): the six IPC commands landed 2025-12-18
+(443da50) for a pre-browserid "sign request" login: an app submitted a
+request, the user ran `sbo auth pending|approve|reject`, and the CLI signed
+a nested-JWT assertion with the keyring; `sbo auth test-request|test-poll`
+(f009007) was the only app-side caller. The three HTTP routes landed
+2025-12-23 (2bc5dfe) from the web-auth demo design
+(mingo `docs/plans/2024-12-22-web-auth-demo-design.md`): a planned
+`navigator.sbo.request()` shim plus hidden iframe on `wallet.sandmill.org`
+that would POST `/auth/request` and poll `/auth/status/:id`; the shim,
+iframe and demo page were never built. On 2026-06-23 (4de7d7f, "delete
+browserid-clone auth") the `sbo auth` CLI commands, the nested-JWT code and
+the sbo-auth-demo crate were removed because browserid-ng owns auth; the
+daemon-side queue and routes were left behind. Nothing has called them
+since.
+
 ### Q32. Unknown headers versus a raw-bytes `object_hash` (WS6 W6-4, Medium)
 
 The Wire spec says unknown headers are ignored, and the signature covers
