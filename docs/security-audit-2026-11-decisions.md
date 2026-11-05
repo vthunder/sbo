@@ -1,6 +1,6 @@
 # Security audit 2026-11: open decisions
 
-> **Status: Q1–Q40 settled (Q1–Q21 on 2026-11-04, Q22–Q40 on 2026-11-05).** Product and design
+> **Status: Q1–Q40 settled (Q1–Q21 on 2026-11-04, Q22–Q40 on 2026-11-05); Q41 open (surfaced during remediation).** Product and design
 > calls that remediation depends on, collected from each workstream as it
 > lands. Each item: what was found, the options, and a recommendation.
 > Reply per item number; answers are recorded here and in the affected
@@ -796,3 +796,20 @@ posture, and the cost is one line in every signer.
 ## 4. Next
 
 Audit phase complete. Dan answers Q22–Q40; each answer flips the named `draft` beans to `todo` and is recorded here and in the bean. Remediation proceeds in the ledger's §5 order; the PR from `audit-2026-11` opens when Dan says.
+
+### Q41. Empty-state root: sentinel or hashed empty node (remediation, sbo-39qi)
+
+The State Commitment spec v2 text (specs group) says the empty-state root is
+`node_hash({"children":{}})`; the trie implementation, the pinned test
+`empty_trie_conventions`, vector TRIE-04, the daemon genesis path and the
+zkVM guest all keep the all-zero 32-byte sentinel. Surfaced 2026-11-05 while
+landing D4; documented in `docs/state-commitment-v2-migration.md`.
+
+- (a) Code follows the spec: empty root = hash of the empty node. Root-changing,
+  but it rides the same regenesis as D3/D4; touches trie, sync, zkvm guest,
+  TRIE-04.
+- (b) Spec follows the code: define the all-zero sentinel as the empty root.
+
+**Recommendation: (a).** One hashing rule with no special case, and the
+regenesis is already paid for. Sentinel roots are also indistinguishable
+from "no commitment yet" in a header, which (a) removes.
