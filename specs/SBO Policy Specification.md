@@ -13,7 +13,7 @@ Draft
 
 ## Changelog
 
-- **v0.5 (2026-11, audit)**: Documented the shipped delegation model (S12): the `govern` action, `pin`, `descendant_constraint` (`allowed_grants`, `mandated_restrictions`, `forbid_pinning`), and the `dnssec_proof` and `require_payload_signed_by` conditions. Validation on write is normative: role cycles reject, unknown keys anywhere in the document reject (Q39), pattern syntax is checked, and the wildcard cap applies (Q38); role resolution is bounded at evaluation (Q17). Owner is a principal like any other (Q13).
+- **v0.5 (2026-11, audit)**: Documented the shipped delegation model (S12): the `govern` action, `pin`, `descendant_constraint` (`allowed_grants`, `mandated_restrictions`, `forbid_pinning`), and the `dnssec_proof` and `require_payload_signed_by` conditions. Validation on write is normative: role cycles reject, unknown keys anywhere in the document reject (Q39), pattern syntax is checked, and the wildcard cap of 32 applies (Q38); role resolution is bounded at evaluation (Q17). Owner is a principal like any other (Q13).
 
 ## Overview
 
@@ -297,7 +297,7 @@ Example: a root policy that lets an admin role install community policies anywhe
 
 ### Wildcard cap
 
-A path pattern (`on`, `deny`) or id pattern (`id`) MUST contain at most **8 wildcards**, counting each `*` and each `**` as one. A pattern with more is a syntax error and the policy is rejected at write time (Validation Rule 2). The bound exists so that matching cost is a stated size limit, like the 256-character id limit: a conforming matcher MUST run in time polynomial in the pattern and path lengths (a memoised, O(wildcards × segments) matcher is the reference; a backtracking matcher is exponential in the number of wildcards and is not conforming even under the cap). The same cap applies to warrant `path:` scopes (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#wildcard-cap)).
+A path pattern (`on`, `deny`) MUST contain at most **32 wildcard segments** (each `*` or `**` segment counts as one), and an id pattern (`id`) at most **32 `*` characters**. Path patterns MUST be absolute (start with `/`). A pattern with more is a syntax error and the policy is rejected at write time (Validation Rule 2). The bound exists so that matching cost is a stated size limit, like the 256-character id limit: a conforming matcher MUST run in time polynomial in the pattern and path lengths (a memoised, O(wildcards × segments) matcher is the reference; a backtracking matcher is exponential in the number of wildcards and is not conforming even under the cap). The same cap applies to warrant `path:` scopes (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#wildcard-cap)).
 
 ### Policy variables
 
@@ -461,9 +461,9 @@ the exact form would need a disjunction the language does not have.
 - Role membership is resolved at evaluation time
 - Circular role references are invalid (policy must be rejected at write time, Validation Rule 3)
 - Unknown identity names result in no match (not an error)
-- A reference to a role that the policy does not define matches nothing
+- A reference to a role that the policy does not define is rejected at write time (Validation Rule 3)
 
-**Bounded resolution.** Rejecting cycles on write is necessary but not sufficient (a policy admitted by an older implementation, or a very long acyclic chain, must not crash an evaluator). Evaluation therefore MUST also be bounded on its own: an evaluator keeps a visited set of roles along the current resolution path and stops at a **maximum nesting depth of 16** roles (`{"role": …}` inside `{"role": …}`, counting `any` lists as transparent). A role reference that would revisit a role already on the path, or exceed the depth, resolves to **no match** (fail closed), never to a panic or an unbounded loop. The write-time rule rejects any policy whose role graph has a cycle or a nesting depth greater than 16, so a valid policy never reaches the evaluation guard.
+**Bounded resolution.** Rejecting cycles on write is necessary but not sufficient (a policy admitted by an older implementation, or a very long acyclic chain, must not crash an evaluator). Evaluation therefore MUST also be bounded on its own: an evaluator keeps a visited set of roles along the current resolution path and stops at a **maximum nesting depth of 32** (`{"role": …}` inside `{"role": …}`, with each `any` list counting as a level). A role reference that would revisit a role already on the path, or exceed the depth, resolves to **no match** (fail closed), never to a panic or an unbounded loop. The write-time rule rejects any policy whose role graph has a cycle or a nesting depth greater than 32, or references a role it does not define, so a valid policy never reaches the evaluation guard.
 
 Example with inheritance:
 ```json
@@ -521,8 +521,8 @@ This policy:
 A `policy.v2` document is validated **when it is written** (after the [`govern`](#govern-installing-a-policy) check and before it is applied), by every node, as part of consensus. The write is invalid, and the policy never becomes a governing policy, if any rule fails:
 
 1. Policy must be valid JSON, and a JSON object
-2. All path patterns and id patterns must be syntactically valid, including the [wildcard cap](#wildcard-cap) (at most 8 wildcards per pattern)
-3. Role references must not be circular, and role nesting must not exceed depth 16 (see [Role Resolution](#role-resolution))
+2. All path patterns and id patterns must be syntactically valid, including the [wildcard cap](#wildcard-cap) (at most 32 wildcard segments per path pattern, 32 `*` per id pattern; absolute paths)
+3. Role references must not be circular, and every referenced role must be defined, and role nesting must not exceed depth 32 (see [Role Resolution](#role-resolution))
 4. Identity references in roles, `to` fields and `any` lists must be valid syntax, of a known kind (`"owner"`, `"*"`, name, email, `{"key"}`, `{"role"}`, `{"any"}`, `{"attested"}`)
 5. Actions must be from the defined set (or `"*"`); `govern` must be spelled explicitly
 6. Requirement conditions must use known condition types, and every `fields` condition must carry a `pointer` and at least one comparison
@@ -531,7 +531,7 @@ A `policy.v2` document is validated **when it is written** (after the [`govern`]
 
 Invalid policies must be rejected. A policy write that fails validation leaves the previously governing policy in force (per-message semantics: the rejected message is invisible). Because validation is part of consensus, these rules are **consensus-changing**: a chain created before strict parsing (rule 7) was in force cannot adopt it on a client upgrade alone; the reference deployment adopts it at its `state-commitment/v2` regenesis, after surveying every existing policy for stray keys.
 
-A second implementation may be held to all of the above by the conformance vectors (`conformance/` suites `policy`): a cyclic policy, a `max_sise` restriction, a nine-wildcard pattern and an unknown grant key are each a rejected write.
+A second implementation may be held to all of the above by the conformance vectors (`conformance/` suites `policy`): a cyclic policy, a `max_sise` restriction, a 33-wildcard pattern and an unknown grant key are each a rejected write.
 
 ---
 

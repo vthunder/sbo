@@ -13,7 +13,7 @@ Draft
 
 ## Changelog
 
-- **v0.5 (2026-11, audit)**: The browserid-ng four-object **device presentation** carried in `Auth-Cert` is the one normative attributed credential (Q1/S1); the single-JWT `Auth-Cert` and the `Auth-Warrant` header are retired. `sign:sbo:<action>` scope grammar documented. An empty scope list authorizes nothing (Q40). Wildcard cap of 8 on `path:` scopes with a polynomial matcher (Q38). The assertion is judged at the authoring instant bounded by a capped `W`; everything else at inclusion time (Q9). Owner references are never bare keys outside genesis (Q6).
+- **v0.5 (2026-11, audit)**: The browserid-ng four-object **device presentation** carried in `Auth-Cert` is the one normative attributed credential (Q1/S1); the single-JWT `Auth-Cert` and the `Auth-Warrant` header are retired. `sign:sbo:<action>` scope grammar documented. An empty scope list authorizes nothing (Q40). Wildcard cap of 32 on `path:` scopes with a polynomial matcher (Q38). The assertion is judged at the authoring instant bounded by a capped `W`; everything else at inclusion time (Q9). Owner references are never bare keys outside genesis (Q6).
 
 ## Abstract
 
@@ -124,7 +124,7 @@ Evaluation is deterministic (offline-replayable): **OR within a dimension** (any
 
 ### Wildcard cap
 
-A `path:` scope MUST contain at most **8 wildcards** (each `*` and each `**` counts as one). A scope exceeding the cap is a malformed scope and the write is UNAUTHORIZED; a submitting node SHOULD reject such a presentation at its submit gate. The matcher MUST run in time polynomial in the pattern and path lengths (the memoised matcher shared with the [Policy Specification](./SBO%20Policy%20Specification.md#wildcard-cap); a backtracking matcher is exponential in the wildcard count and does not conform even under the cap). The cap is a size bound a second implementation can be held to, like the 256-character identifier limit; the polynomial requirement is what makes it a bound on work rather than on syntax alone.
+A `path:` scope MUST contain at most **32 wildcard segments** (each `*` or `**` segment counts as one). A scope exceeding the cap is a malformed scope and the write is UNAUTHORIZED; a submitting node SHOULD reject such a presentation at its submit gate. The matcher MUST run in time polynomial in the pattern and path lengths (the memoised matcher shared with the [Policy Specification](./SBO%20Policy%20Specification.md#wildcard-cap); a backtracking matcher is exponential in the wildcard count and does not conform even under the cap). The cap is a size bound a second implementation can be held to, like the 256-character identifier limit; the polynomial requirement is what makes it a bound on work rather than on syntax alone.
 
 ### On-behalf writes
 
