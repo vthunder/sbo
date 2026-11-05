@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-04T21:31:36Z
-updated_at: 2026-11-05T11:12:24Z
+updated_at: 2026-11-05T11:31:30Z
 parent: sbo-ax7t
 blocking:
     - sbo-xypz
@@ -47,3 +47,14 @@ Still open, not doable in this repo:
   da.sandmill.org: mingo-side and infra tasks.
 
 - [ ] Q41 (a): empty-state root follows the spec (sbo-flzk)
+
+## Requirements for the mingo v6/v7 genesis builder (from the 2026-11 remediation, sbo-3q6x/sbo-yd72/sbo-2jtp)
+
+- Submission order: Mode A = sys identity, root policy; Mode B = dnssec evidence, domain, sys, root (Q33 (b)); everything after the root policy is validated normally.
+- _config objects must precede the community policy in the submission: once the community policy governs the subtree it does not grant sys govern, so a later _config is refused.
+- Root grant on name claims must be on: "/sys/names/" (container), never "/sys/names/*"; the live v5 grant matches nothing under the container-only rule.
+- Every post-root message carries Owner: sys (or a name/email). Bare-key owners and the signer fallback are gone; sbo-cli/sbo-wasm builders without Owner now produce invalid writes.
+- Root policy carries {"to":"owner","can":["update","transfer","delete"],"on":"/**"}; community policies resolve nearest-ancestor so each must carry its own owner grants (live cooks/woodworking/homelab grant owners update only).
+- Policies: no unknown keys (Q39), absolute patterns, defined roles, at most 32 wildcards per pattern, role depth at most 32. Identity/domain JWTs need typ identity.v1/domain.v1.
+- State roots change (D3/D4/Q41 empty root 6f2225cc...); genesisHash is over the submission bytes. Reference fixture: crates/sbo-core/tests/fixtures/mingo-genesis-v6.wire (test keys, Mode A, 13 messages). Migration note: docs/state-commitment-v2-migration.md.
+- /sys/trust/dns-root is not in the live genesis; until posted, the IANA library anchors apply (D6 fallback).
