@@ -1,9 +1,8 @@
 //! Security audit 2026-11, WS2 — conformance RUNNER for `sbo-types`.
 //!
-//! `sbo-types` carries a second `Id` / `Path` / `Action` grammar (re-exported
-//! by sbo-core as `sbo_core::Id` etc. and used by the zkVM guest) next to the
-//! one in `sbo-core::message`. Both must agree with the spec grammar in
-//! `conformance/identifiers.json`.
+//! `sbo-types` is THE `Id` / `Path` / `Action` grammar (Q36): sbo-core::message
+//! and sbo-wasm re-export it, the zkVM guest uses it directly. It must agree
+//! with the spec grammar in `conformance/identifiers.json`.
 
 use sbo_types::action::Action;
 use sbo_types::id::Id;
@@ -34,27 +33,8 @@ fn judge(suite: &str, results: Vec<(String, bool, bool, String)>, expected_fail:
     assert!(fixed.is_empty(), "{suite}:\n{}", fixed.join("\n"));
 }
 
-const EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 W2-1: sbo-types' grammar predates `@`, `+` and `:`; it
-    // rejects every email-rooted identity, agent identity and namespaced id
-    // that sbo-core::message accepts (D30).
-    ("ID-OK-03", "W2-1"),
-    ("ID-OK-04", "W2-1"),
-    ("ID-OK-05", "W2-1"),
-    ("ID-OK-06", "W2-1"),
-    ("PATH-OK-03", "W2-1"),
-    // AUDIT-2026-11 D21: `.` / `..` accepted.
-    ("ID-REJ-07", "D21"),
-    ("ID-REJ-08", "D21"),
-    ("PATH-REJ-04", "D21"),
-    ("PATH-REJ-05", "D21"),
-    // AUDIT-2026-11 W2-1: sbo-types' `Action::parse` lowercases its input and
-    // admits `create` / `update`, which are not wire actions.
-    ("ACT-REJ-01", "W2-1"),
-    ("ACT-REJ-02", "W2-1"),
-    ("ACT-REJ-03", "W2-1"),
-    ("ACT-REJ-04", "W2-1"),
-];
+/// Empty since Q36 (audit 2026-11): sbo-types IS the grammar.
+const EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn identifier_vectors_sbo_types_grammar() {

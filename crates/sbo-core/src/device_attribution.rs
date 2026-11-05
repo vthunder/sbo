@@ -257,9 +257,12 @@ pub fn verify_device_attribution_with_provider_keys(
     // (grantee) by the access cert's issuer — or that issuer is a pinned broker.
     // The grantor check is what makes the cross-issuer split safe: issuer X can
     // only attribute to an identity in a domain it is authoritative for.
+    // Domain membership follows the one identity rule (Q5 / D54): a malformed
+    // reference (`a@x@evil`, no `@`) is in no domain, and the domain compares
+    // as a lowercase A-label.
     let check_authority = |identity: &str, iss: &str| -> Result<(), AttributionError> {
-        let domain = identity.split('@').nth(1).unwrap_or("");
-        if domain != iss && !anchors.is_broker(iss) {
+        let domain = crate::identity::domain_of(identity).unwrap_or_default();
+        if !crate::identity::in_domain(identity, iss) && !anchors.is_broker(iss) {
             return Err(AttributionError::IssuerNotAuthorized {
                 iss: iss.to_string(),
                 domain: domain.to_string(),

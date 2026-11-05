@@ -85,30 +85,46 @@ where
         // **wins over browserid** (the sovereignty upgrade): resolve through it.
         // Outside the primary domain (or with no record) the email stays
         // browserid-rooted, exactly as before.
+        //
+        // The one identity rule (Q5 / D13 / D54, `sbo_types::identity`):
+        // exactly one `@`, both parts non-empty, domain compared as a lowercase
+        // A-label, local part byte-exact. A malformed reference (`a@b@c`,
+        // `@x`, `a@`) is no identity at all and resolves to nothing; the
+        // controller we return carries the canonical (lowercase-domain) form
+        // so two spellings of one identity compare equal.
         if current.contains('@') {
-            if let (Some(pd), Some((local, domain))) =
-                (primary_domain, current.split_once('@'))
-            {
-                if domain == pd && !local.is_empty() {
-                    match lookup(local) {
+            let canonical = match crate::identity::canonical(&current) {
+                Some(c) => c,
+                None => return Controller::Unresolved,
+            };
+            current = canonical;
+            let local: Option<String> = match primary_domain {
+                Some(pd) if crate::identity::in_domain(&current, pd) => {
+                    crate::identity::split(&current).ok().map(|(l, _)| l.to_string())
+                }
+                _ => None,
+            };
+            if let Some(local) = local {
+                {
+                    match lookup(&local) {
                         // A key-rooted record is the identity's on-chain control
                         // policy and wins over browserid (the sovereignty upgrade):
                         // resolve through it to the pinned key.
                         Some(NameRecord::KeyRooted(_)) => {
-                            current = local.to_string();
+                            current = local;
                             continue;
                         }
                         // Email-rooted back to this SAME canonical email: the record
                         // merely affirms browserid auth for `<local>@<domain>`. Follow-
                         // ing it would loop email→local→email forever (→ Unresolved),
                         // so terminate here at the browserid email controller.
-                        Some(NameRecord::EmailRooted(ref o)) if o == &current => {
+                        Some(NameRecord::EmailRooted(ref o)) if crate::identity::identity_eq(o, &current) => {
                             return Controller::Email(current);
                         }
                         // Email-rooted to a DIFFERENT owner (e.g. an external parent
                         // email): follow the indirection.
                         Some(NameRecord::EmailRooted(_)) => {
-                            current = local.to_string();
+                            current = local;
                             continue;
                         }
                         // No record: a plain browserid-attributable email.
@@ -175,7 +191,7 @@ pub fn is_authorized(
 ) -> bool {
     match controller {
         Controller::Key(k) => signer_key == k,
-        Controller::Email(e) => attributed_email == Some(e.as_str()),
+        Controller::Email(e) => attributed_email.is_some_and(|a| crate::identity::identity_eq(a, e)),
         Controller::None | Controller::Unresolved => false,
     }
 }

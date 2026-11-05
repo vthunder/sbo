@@ -16,8 +16,13 @@ pub fn id_char() -> impl Strategy<Value = char> {
 }
 
 /// A grammar-valid id (short, so paths stay readable in failure output).
+/// Drawn from the full charset, then filtered by the grammar's structural
+/// rules (no `.`/`..`, at most one `@` and then a lowercase-domain identity
+/// reference; Q5 / Q24).
 pub fn id_str() -> impl Strategy<Value = String> {
-    prop::collection::vec(id_char(), 1..12).prop_map(|v| v.into_iter().collect())
+    prop::collection::vec(id_char(), 1..12)
+        .prop_map(|v| v.into_iter().collect::<String>())
+        .prop_filter("structurally valid id", |s| Id::new(s).is_ok())
 }
 
 /// An id made only of the "safe" subset (no `.`-only forms, no `@`): what

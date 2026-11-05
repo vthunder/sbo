@@ -51,9 +51,11 @@ IDs, path segments, and creator names share the same syntax rules:
 
 **Dot segments.** The ids `.` and `..` are **not valid** (they are filesystem path traversal, and an implementation that mirrors state to a filesystem must never be able to escape its root). An id otherwise MAY contain `.` (`example.com`, `v1.2`).
 
+**Identity references:** An identifier containing `@` is an identity reference and follows the Identity Specification's comparison rule: exactly one `@`, a non-empty local part and a non-empty domain, and the domain in lowercase. `alice@Example.com` is not a valid identifier; `alice@example.com` is. The local part is case-sensitive like any identifier.
+
 **Grammar (ABNF):**
 ```
-id       = 1*256id_char
+id       = 1*256id_char        ; but not "." or "..", and at most one "@"
 id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~" / "@" / "+" / ":"
          ; with id != "." and id != ".."
 segment  = id

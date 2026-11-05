@@ -193,12 +193,11 @@ pub fn is_dns_uri(uri: &str) -> bool {
 }
 
 /// Parse an email address into (user, domain)
-pub fn parse_email(email: &str) -> Option<(&str, &str)> {
-    let (user, domain) = email.split_once('@')?;
-    if user.is_empty() || domain.is_empty() {
-        return None;
-    }
-    Some((user, domain))
+pub fn parse_email(email: &str) -> Option<(&str, String)> {
+    // The one identity rule (Q5 / D54): exactly one `@`, both parts non-empty.
+    // The domain is returned in its comparison form (lowercase A-label, D13).
+    let (user, domain) = crate::identity::split(email).ok()?;
+    Some((user, domain.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -293,8 +292,10 @@ mod tests {
 
     #[test]
     fn test_parse_email() {
-        assert_eq!(parse_email("alice@example.com"), Some(("alice", "example.com")));
-        assert_eq!(parse_email("user@sub.domain.org"), Some(("user", "sub.domain.org")));
+        assert_eq!(parse_email("alice@example.com"), Some(("alice", "example.com".to_string())));
+        assert_eq!(parse_email("user@sub.domain.org"), Some(("user", "sub.domain.org".to_string())));
+        assert_eq!(parse_email("alice@EXAMPLE.com"), Some(("alice", "example.com".to_string())));
+        assert_eq!(parse_email("a@mingo.place@evil"), None);
         assert_eq!(parse_email("invalid"), None);
         assert_eq!(parse_email("@domain.com"), None);
         assert_eq!(parse_email("user@"), None);

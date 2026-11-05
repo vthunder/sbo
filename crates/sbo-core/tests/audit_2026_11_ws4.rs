@@ -9,7 +9,6 @@ use sbo_core::message::{Id, Path};
 /// on-chain `Path: /../../` or `ID: ..` escapes the repo directory. The core
 /// grammar says nothing about dot segments; a filesystem mirror needs them out.
 #[test]
-#[ignore]
 fn d21_dot_segments_are_not_valid_ids() {
     assert!(Id::new("..").is_err(), "'..' must not be a valid id");
     assert!(Id::new(".").is_err(), "'.' must not be a valid id");

@@ -297,7 +297,7 @@ fn generate_sboq_text(
 ) -> Result<Option<String>, String> {
     match db.generate_trie_proof_auto(path, id) {
         Ok(Some((creator, trie_proof))) => {
-            let object_file_path = repo.path.join(path_str.trim_start_matches('/')).join(id_str);
+            let object_file_path = sbo_daemon::mirror::object_file(&repo.path, path, id.as_str());
             let object_bytes = std::fs::read(&object_file_path).ok();
             let sboq = sbo_core::proof::SboqMessage {
                 version: "0.2".to_string(),
@@ -2135,7 +2135,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 Ok(Some((creator, trie_proof))) => {
                     // Read the object file from disk
                     // Object path is: repo_path / sbo_path (without leading /) / id
-                    let object_file_path = repo.path.join(path.trim_start_matches('/')).join(&id);
+                    let object_file_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_path, sbo_id.as_str());
                     let object_bytes = match std::fs::read(&object_file_path) {
                         Ok(bytes) => Some(bytes),
                         Err(e) => {
@@ -2224,12 +2224,19 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
 
                 // Scan /sys/names/ directory
                 // Structure: /sys/names/<name> (file) or /sys/names/<name>/<object_id> (directory)
-                let names_path = repo.path.join("sys").join("names");
+                let names_path = sbo_daemon::mirror::collection_dir(&repo.path, &sbo_core::message::Path::parse("/sys/names/").unwrap());
                 if names_path.exists() {
                     if let Ok(entries) = std::fs::read_dir(&names_path) {
                         for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                            let raw = entry.file_name().to_string_lossy().to_string();
                             let entry_path = entry.path();
+                            // Decode the mirror layout: object files vs `<seg>.d/` dirs.
+                            let decoded = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                sbo_daemon::mirror::object_id_from_file_name(&raw)
+                            } else {
+                                raw.strip_suffix(sbo_daemon::mirror::COLLECTION_SUFFIX).map(String::from)
+                            };
+                            let Some(name) = decoded else { continue };
 
                             // Try to find identity content - either direct file or file in directory
                             let content = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -2321,7 +2328,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Try to read the identity file
-                let identity_path = repo.path.join("sys").join("names").join(&name);
+                let identity_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_core::message::Path::parse("/sys/names/").unwrap(), &name);
                 if identity_path.exists() {
                     if let Ok(content) = std::fs::read(&identity_path) {
                         if let Ok(msg) = sbo_core::wire::parse(&content) {
@@ -2413,12 +2420,19 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Scan /sys/domains/ directory
-                let domains_path = repo.path.join("sys").join("domains");
+                let domains_path = sbo_daemon::mirror::collection_dir(&repo.path, &sbo_core::message::Path::parse("/sys/domains/").unwrap());
                 if domains_path.exists() {
                     if let Ok(entries) = std::fs::read_dir(&domains_path) {
                         for entry in entries.flatten() {
-                            let domain_name = entry.file_name().to_string_lossy().to_string();
+                            let raw = entry.file_name().to_string_lossy().to_string();
                             let entry_path = entry.path();
+                            // Decode the mirror layout: object files vs `<seg>.d/` dirs.
+                            let decoded = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                sbo_daemon::mirror::object_id_from_file_name(&raw)
+                            } else {
+                                raw.strip_suffix(sbo_daemon::mirror::COLLECTION_SUFFIX).map(String::from)
+                            };
+                            let Some(domain_name) = decoded else { continue };
 
                             // Try to read domain content
                             let content = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -2489,7 +2503,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Try to read the domain file
-                let domain_path = repo.path.join("sys").join("domains").join(&domain_name);
+                let domain_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_core::message::Path::parse("/sys/domains/").unwrap(), &domain_name);
                 if domain_path.exists() {
                     if let Ok(content) = std::fs::read(&domain_path) {
                         if let Ok(msg) = sbo_core::wire::parse(&content) {

@@ -218,22 +218,20 @@ fn generate_conformance_vectors() {
     vectors.push(vec_entry("W-INJ-02", "the listed `Attestation` header injected after signing", &injected_known, false, "Core §Signature Scope (I2)"));
 
     // ---- identifiers in headers (I5, Q5) ----
-    let mut m = base.clone();
-    m.id = Id::new("..").unwrap();
-    m.sign(&key);
-    vectors.push(vec_entry("W-ID-01", "ID is `..`", &text(&wire::serialize(&m)), false, "I5 / D21"));
-    let mut m = base.clone();
-    m.path = Path::parse("/communities/../").unwrap();
-    m.sign(&key);
-    vectors.push(vec_entry("W-ID-02", "Path contains a `..` segment", &text(&wire::serialize(&m)), false, "I5 / D21"));
-    let mut m = base.clone();
-    m.owner = Some(Id::new("alice@example.com@evil").unwrap());
-    m.sign(&key);
-    vectors.push(vec_entry("W-ID-03", "Owner carries two `@`", &text(&wire::serialize(&m)), false, "Q5 / D54"));
-    let mut m = base.clone();
-    m.owner = Some(Id::new("alice@EXAMPLE.com").unwrap());
-    m.sign(&key);
-    vectors.push(vec_entry("W-ID-04", "Owner domain in uppercase (non-canonical on-chain form)", &text(&wire::serialize(&m)), false, "Q5: canonical lowercase domain"));
+    // The grammar now rejects these at `Id::new` (Q5 / Q24), so the hostile
+    // headers are produced textually, re-signed over the edited header lines.
+    let id_vec = |vid: &str, desc: &str, from: &str, to: &str, spec_ref: &str| {
+        let edited = base_wire.replacen(from, to, 1);
+        assert!(edited != base_wire, "{vid}: substitution did not apply");
+        let lines = header_lines_of(&edited);
+        let refs: Vec<(&str, &str)> = lines.iter().filter(|(n, _)| n != "Signature").map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        let resigned = sign_raw(&key, &refs, base.payload.as_deref().unwrap_or(&[]));
+        vec_entry(vid, desc, &resigned, false, spec_ref)
+    };
+    vectors.push(id_vec("W-ID-01", "ID is `..`", "ID: p1\n", "ID: ..\n", "I5 / D21"));
+    vectors.push(id_vec("W-ID-02", "Path contains a `..` segment", "Path: /communities/cooks/spaces/general/\n", "Path: /communities/../\n", "I5 / D21"));
+    vectors.push(id_vec("W-ID-03", "Owner carries two `@`", "Owner: alice@example.com\n", "Owner: alice@example.com@evil\n", "Q5 / D54"));
+    vectors.push(id_vec("W-ID-04", "Owner domain in uppercase (non-canonical on-chain form)", "Owner: alice@example.com\n", "Owner: alice@EXAMPLE.com\n", "Q5: canonical lowercase domain"));
 
     // ---- enumerations (I5) ----
     vectors.push(vec_entry("W-ENUM-01", "Type: Object (case)", &base_wire.replacen("Type: object\n", "Type: Object\n", 1), false, "Wire §Validation 9"));

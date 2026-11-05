@@ -932,14 +932,10 @@ impl SyncEngine {
         })
     }
 
-    /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`.
+    /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`
+    /// (collision-free layout, see `crate::mirror`).
     fn object_file_path(repo: &Repo, path: &sbo_core::message::Path, id: &str) -> std::path::PathBuf {
-        let mut p = repo.path.clone();
-        for component in path.to_string().trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
-            p.push(component);
-        }
-        p.push(id);
-        p
+        crate::mirror::object_file(&repo.path, path, id)
     }
 
     /// Apply a `transfer` (move / rename / re-own) or `delete` to state + mirror.
@@ -1052,12 +1048,15 @@ impl SyncEngine {
             .put_object(&moved)
             .map_err(|e| crate::DaemonError::Repo(format!("put_object failed: {}", e)))?;
 
-        // Move the mirror file (carry the original object's wire bytes).
+        // Move the mirror file (carry the original object's wire bytes). The
+        // mirror is best-effort (Q24): a failure here is logged, never fatal.
         let dest_file = Self::object_file_path(repo, &dest_path, dest_id.as_str());
-        if let Some(parent) = dest_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if let Err(e) = std::fs::rename(&src_file, &dest_file) {
+        let moved_ok = dest_file
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|_| std::fs::rename(&src_file, &dest_file));
+        if let Err(e) = moved_ok {
             tracing::warn!("Could not move mirror file {} -> {}: {}", src_file.display(), dest_file.display(), e);
         }
 
@@ -1096,23 +1095,6 @@ impl SyncEngine {
             sbo_core::message::Action::Transfer { .. } | sbo_core::message::Action::Delete
         ) {
             return self.apply_transfer_or_delete(repo, msg, l2, touched);
-        }
-
-        // Build path: repo_root / sbo_path / sbo_id
-        let mut file_path = repo.path.clone();
-
-        // Add path components (skip leading slash)
-        let path_str = msg.path.to_string();
-        for component in path_str.trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
-            file_path.push(component);
-        }
-
-        // Add the ID as filename
-        file_path.push(msg.id.as_str());
-
-        // Create parent directories
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)?;
         }
 
         // Serialize to wire format
@@ -1181,17 +1163,24 @@ impl SyncEngine {
             }
         }
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = file_path.with_extension("tmp");
-        std::fs::write(&temp_path, &wire_data)?;
-        std::fs::rename(&temp_path, &file_path)?;
-
-        tracing::debug!(
-            "Wrote object {}{} to {}",
-            msg.path,
-            msg.id,
-            file_path.display()
-        );
+        // Filesystem mirror (best-effort, Q24): the state DB and trie are
+        // authoritative; a mirror failure is logged and never aborts the
+        // block (D58). Layout is collision-free (`crate::mirror`).
+        match crate::mirror::write_object(&repo.path, &msg.path, msg.id.as_str(), &wire_data) {
+            Ok(file_path) => tracing::debug!(
+                "Wrote object {}{} to {}",
+                msg.path,
+                msg.id,
+                file_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                "Mirror write failed for {}{} under {} (state still applied): {}",
+                msg.path,
+                msg.id,
+                repo.path.display(),
+                e
+            ),
+        }
 
         // Update state DB (keyed by URI)
         let uri = repo.uri.to_string();
@@ -1220,7 +1209,7 @@ impl SyncEngine {
                 }
 
                 // If this is a name claim at /sys/names/, index pubkey -> name
-                if path_str.starts_with("/sys/names/") {
+                if msg.path.to_string().starts_with("/sys/names/") {
                     let pubkey = msg.signing_key.to_string();
                     let name = msg.id.as_str();
                     if let Err(e) = db.put_name_claim(&pubkey, name) {
