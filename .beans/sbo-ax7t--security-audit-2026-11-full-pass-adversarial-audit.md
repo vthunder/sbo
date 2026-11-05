@@ -5,7 +5,7 @@ status: in-progress
 type: epic
 priority: high
 created_at: 2026-11-03T08:05:09Z
-updated_at: 2026-11-05T08:40:47Z
+updated_at: 2026-11-05T10:16:15Z
 ---
 
 Full-pass security audit of the sbo repo (specs + reference implementation: sbo-core, sbo-crypto, sbo-types, sbo-rpc, sbo-avail, sbo-capture, sbo-daemon, sbo-cli, sbo-wasm, sbo-zkvm), run with the browserid-ng 2026-11 method: reviewer-then-skeptic, every confirmed finding encoded as an ignored test tagged `AUDIT-2026-11 <id>` whose un-ignoring is the acceptance test for the fix, post-verification severities, PoCs only against a local instance with fake keys. No production code changes during the audit.
@@ -27,3 +27,7 @@ Workstreams: WS1 threat model + spec review (first, alone) → WS2–WS8 in para
 - [x] WS8 PoCs (sbo-cka2)
 - [x] WS9 ledger + remediation beans (sbo-q92z)
 - [x] Decisions doc published as private artifact (done, updated through Q40); Q22–Q40 answers pending, then flip 20 draft beans
+
+## Remediation phase (started 2026-11-05)
+
+Dan: all Q22–Q40 decided as recommended; proceed with the changes on audit-2026-11. Wave 1 runs seven parallel agents in isolated worktrees (wire integrity xd6u→ch88→zom8→cusw→xypz; identity lv2x→3ao9→nepw→jijr→vu8s; policy core sla3,0qqq,hcqt,qfvj,db6p; daemon HTTP/IPC b4cx,d9pn,o2c0,xqo2,q11b,e4z9,hs4r,mux6; daemon enforcement hw7b,slsm,mlyp,wc85,zyny,5fja,prqd; anchors c46r,ospt,evne,uv8a,syib; spec edits). Wave 2 after wire lands: regenesis bundle eefz sbo-side (39qi, 2jtp, yd72, zzx7, 3q6x). Not done in this repo: infra beans 9oq0, 9zs4, 33xa, ju44 (mingo / sandmill-infra / GitHub settings), kcyq (launchd install on the dev box), eefz mingo-side genesis v7 and re-sync.
