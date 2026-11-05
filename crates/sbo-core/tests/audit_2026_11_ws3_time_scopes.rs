@@ -105,8 +105,12 @@ fn dim_value() -> impl Strategy<Value = String> {
 }
 
 /// Reference for `scopes_authorize`: OR within a dimension, AND across;
-/// `sign:sbo:<a>` ≡ `action:<a>`; `as:` is ignored; anything else rejects.
+/// `sign:sbo:<a>` ≡ `action:<a>`; `as:` is ignored; anything else rejects; an
+/// empty list authorizes nothing (Q40 (b)).
 fn reference_scopes(scopes: &[String], action: &str, path: &str, schema: Option<&str>) -> bool {
+    if scopes.is_empty() {
+        return false;
+    }
     let (mut acts, mut paths, mut schemas) = (vec![], vec![], vec![]);
     for s in scopes {
         match s.split_once(':') {
@@ -144,8 +148,10 @@ proptest! {
 
     /// Adding a scope in a NEW dimension never widens: if the write was not
     /// authorized before, it is not authorized after (scopes only narrow).
+    /// The base list is non-empty: an empty list authorizes nothing (Q40 (b)),
+    /// so the first scope is what brings a warrant to life, not a narrowing.
     #[test]
-    fn adding_a_scope_never_widens(base in prop::collection::vec((prop::sample::select(vec!["action", "path", "schema"]), dim_value()), 0..4), extra_dim in prop::sample::select(vec!["action", "path", "schema"]), extra in dim_value(), action in dim_value(), path in dim_value(), schema in prop::option::of(dim_value())) {
+    fn adding_a_scope_never_widens(base in prop::collection::vec((prop::sample::select(vec!["action", "path", "schema"]), dim_value()), 1..4), extra_dim in prop::sample::select(vec!["action", "path", "schema"]), extra in dim_value(), action in dim_value(), path in dim_value(), schema in prop::option::of(dim_value())) {
         let mk = |d: &str, v: &str| if d == "path" { format!("path:/{v}/") } else { format!("{d}:{v}") };
         let base: Vec<String> = base.iter().map(|(d, v)| mk(d, v)).collect();
         let p = format!("/{path}/");
@@ -280,7 +286,6 @@ proptest! {
 /// `path:/**/**/**/**/**/**/**/**/**/**/x` stalls every node that validates
 /// a write under it.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-2: fails today — warrant path-scope matching is exponential in the number of `**`
 fn w3_2_scope_path_glob_is_polynomial() {
     let scope = format!("path:/{}/zz/", vec!["**"; 10].join("/"));
     let path = format!("/{}/", vec!["a"; 24].join("/"));
@@ -326,12 +331,13 @@ fn d22_max_authoring_lag_has_a_protocol_maximum() {
     });
 }
 
-/// Observation for the ledger (no decision yet, see decisions doc Q22): a
-/// warrant with an EMPTY scope list authorizes every action on every path.
-/// Pinned as today's behaviour so a change is deliberate.
+/// Q40 (b), decided 2026-11-05: a warrant with an EMPTY scope list authorizes
+/// NOTHING — a ledger warrant must carry at least one `action:` / `sign:sbo:`
+/// scope. (Inverted from the pre-decision pin `empty_scopes_authorize_everything_today`.)
 #[test]
-fn empty_scopes_authorize_everything_today() {
-    assert!(scopes_authorize(&[], "delete", "/sys/policies/", Some("policy.v2")));
+fn empty_scopes_authorize_nothing() {
+    assert!(!scopes_authorize(&[], "delete", "/sys/policies/", Some("policy.v2")));
+    assert!(!scopes_authorize(&[], "post", "/u/alice/", None));
 }
 
 #[test]

@@ -32,6 +32,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 use crate::attribution::TrustAnchors;
 use crate::device_attribution::{verify_device_attribution, DeviceAttribution};
+use crate::policy::glob;
 use crate::uri::SboRawUri;
 use crate::resolve::{is_authorized, resolve_controller, Controller, NameRecord};
 use browserid_core::device::AccessPresentation;
@@ -217,25 +218,10 @@ fn scope_parts(scope: &str) -> Option<(&str, &str)> {
 }
 
 /// Segment glob match: `*` matches within one path segment, `**` matches any
-/// number of segments. Paths compare by `/`-split segments.
+/// number of segments. Paths compare by `/`-split segments. The matcher is the
+/// one memoised glob shared with policy patterns ([`crate::policy::glob`]).
 fn path_glob_matches(pattern: &str, path: &str) -> bool {
-    let pat: Vec<&str> = pattern.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-    let seg: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-    fn m(pat: &[&str], seg: &[&str]) -> bool {
-        match pat.first() {
-            None => seg.is_empty(),
-            Some(&"**") => {
-                // `**` consumes zero-or-more segments.
-                (0..=seg.len()).any(|k| m(&pat[1..], &seg[k..]))
-            }
-            Some(&p) => {
-                if seg.is_empty() { return false; }
-                let head_ok = p == "*" || p == seg[0];
-                head_ok && m(&pat[1..], &seg[1..])
-            }
-        }
-    }
-    m(&pat, &seg)
+    glob::segments_match(&glob::segments(pattern), &glob::segments(path))
 }
 
 /// Whether the warrant `scopes` authorize a write with the given `action`,
@@ -243,18 +229,29 @@ fn path_glob_matches(pattern: &str, path: &str) -> bool {
 /// OR within a dimension, AND across dimensions; a dimension with no scope is
 /// unconstrained. `as:` is recognized (identity selector, see
 /// [`warrant_effective_email`]) and does not constrain the write. An
-/// **unrecognized** dimension fails closed.
+/// **unrecognized** dimension fails closed, as does a `path:` scope with more
+/// than [`glob::MAX_WILDCARDS`] wildcard segments (audit 2026-11 Q38). An
+/// **empty** scope list authorizes NOTHING (Q40 (b)): a ledger warrant must
+/// carry at least one `action:` / `sign:sbo:` scope.
 pub fn scopes_authorize(
     scopes: &[String],
     action: &str,
     path: &str,
     content_schema: Option<&str>,
 ) -> bool {
+    if scopes.is_empty() {
+        return false;
+    }
     let (mut acts, mut paths, mut schemas) = (Vec::new(), Vec::new(), Vec::new());
     for sc in scopes {
         match scope_parts(sc) {
             Some(("action", v)) => acts.push(v),
-            Some(("path", v)) => paths.push(v),
+            Some(("path", v)) => {
+                if glob::segment_wildcards(v) > glob::MAX_WILDCARDS {
+                    return false; // over the spec's wildcard bound ⇒ fail closed
+                }
+                paths.push(v)
+            }
             Some(("schema", v)) => schemas.push(v),
             Some(("as", _)) => {} // identity selector — not a write constraint here
             // browserid signing grants (spec §5): `sign:sbo:<action>` names
@@ -554,11 +551,19 @@ mod tests {
         assert!(authorized_write_email(&attr, "delete", "/attestor/note", None).is_err());
         assert!(authorized_write_email(&attr, "post", "/elsewhere", None).is_err());
 
-        // Empty scopes are unconstrained (plain user write).
+        // An empty scope list authorizes nothing (Authorization Spec, Q40 (b)):
+        // a ledger warrant carries at least one `action:` / `sign:sbo:` scope.
         let user = attr_with(vec![], "alice@example.com");
-        assert_eq!(
-            authorized_write_email(&user, "post", "/anything", None).unwrap(),
-            "alice@example.com"
-        );
+        assert!(authorized_write_email(&user, "post", "/anything", None).is_err());
+    }
+
+    #[test]
+    fn scopes_over_the_wildcard_cap_fail_closed() {
+        let ok = format!("path:/{}/", vec!["**"; glob::MAX_WILDCARDS].join("/"));
+        assert!(scopes_authorize(&[ok], "post", "/a/", None));
+        let over = format!("path:/{}/", vec!["**"; glob::MAX_WILDCARDS + 1].join("/"));
+        assert!(!scopes_authorize(&[over.clone()], "post", "/a/", None));
+        // Even alongside a scope that would match on its own.
+        assert!(!scopes_authorize(&[over, "path:/a/".into()], "post", "/a/", None));
     }
 }

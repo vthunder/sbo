@@ -3,17 +3,14 @@
 //! serialization round-trips, and evaluation on a fixed message terminates
 //! with the same verdict for the policy and its round-tripped twin.
 //!
-//! Wildcard-heavy patterns are skipped at evaluation (W3-1: matching is
-//! exponential in the number of `**`/`*`; remove the guard with the fix).
+//! Matching is memoised and role resolution is bounded (W3-1 / D10 fixed under
+//! `sbo-0qqq` / `sbo-sla3`), so every policy that parses is evaluated; the
+//! parse itself rejects cycles, over-deep role chains and patterns over the
+//! wildcard cap.
 
 use libfuzzer_sys::fuzz_target;
 use sbo_core::message::Id;
 use sbo_core::policy::{check_descendant_constraint, evaluate, ActionType, Policy, PolicyResult, PolicyVars};
-
-fn wild(p: &Policy) -> bool {
-    let s = serde_json::to_string(p).unwrap();
-    s.matches('*').count() > 4 || p.roles.values().any(|m| !m.is_empty())
-}
 
 fuzz_target!(|data: &[u8]| {
     let s = sbo_fuzz::text(data);
@@ -21,7 +18,6 @@ fuzz_target!(|data: &[u8]| {
     let v = serde_json::to_value(&p).unwrap();
     let p2: Policy = serde_json::from_value(v.clone()).expect("serialized policy deserializes");
     assert_eq!(serde_json::to_value(&p2).unwrap(), v, "policy JSON round trip unstable");
-    if wild(&p) { return; }
     let msg = sbo_fuzz::envelope("/u/alice/posts/", "p1", br#"{"v":1}"#.to_vec(), 1);
     let vars = PolicyVars { owner: Some("alice"), user: Some("alice"), email: Some("alice@example.com"), name: Some("alice"), };
     for act in [ActionType::Create, ActionType::Update, ActionType::Delete, ActionType::Govern] {

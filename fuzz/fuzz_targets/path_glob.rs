@@ -2,8 +2,10 @@
 //! WS3: the three glob matchers (`PathPattern`, `IdPattern`,
 //! `scopes_authorize`'s `path:` glob) agree with a reference implementation,
 //! and `scopes_authorize` is OR-within / AND-across. Input: NUL-separated
-//! `pattern \0 path \0 idpattern \0 id \0 scope...`. Patterns with more than
-//! three wildcards are skipped (W3-1 / W3-2: exponential; lift with the fix).
+//! `pattern \0 path \0 idpattern \0 id \0 scope...`. The matchers are memoised
+//! (W3-1 / W3-2 fixed under `sbo-0qqq`), so wildcard-heavy inputs are exercised
+//! too; a `path:` scope over the spec's wildcard cap fails closed by design, so
+//! the scope assertions only run under the cap.
 
 use libfuzzer_sys::fuzz_target;
 use sbo_core::authorize::scopes_authorize;
@@ -47,20 +49,21 @@ fuzz_target!(|data: &[u8]| {
     let path = parts.next().unwrap_or("");
     let idpat = parts.next().unwrap_or("");
     let id = parts.next().unwrap_or("");
-    // Object ids are ASCII by grammar; `glob_match` slices the subject by byte
-    // index and would panic on a multi-byte char (unreachable in production).
-    if !id.is_ascii() { return; }
     let scopes: Vec<String> = parts.map(String::from).collect();
     let vars = PolicyVars::default();
     if let Ok(p) = Path::parse(path) {
-        if pattern.matches('*').count() <= 3 && !pattern.contains('$') {
+        if !pattern.contains('$') {
             assert_eq!(PathPattern::new(pattern).matches(&p, &vars), reference_path(pattern, path), "PathPattern {pattern:?} vs {path:?}");
         }
     }
-    if idpat.matches('*').count() <= 3 && !idpat.contains('$') {
+    if !idpat.contains('$') {
         assert_eq!(IdPattern::new(idpat).matches(id, &vars), reference_glob(idpat, id), "IdPattern {idpat:?} vs {id:?}");
     }
-    if scopes.iter().all(|sc| sc.matches('*').count() <= 3) {
+    let under_cap = |sc: &String| match sc.strip_prefix("path:") {
+        Some(v) => sbo_core::policy::glob::segment_wildcards(v) <= sbo_core::policy::glob::MAX_WILDCARDS,
+        None => true,
+    };
+    if scopes.iter().all(under_cap) {
         let r = scopes_authorize(&scopes, "post", path, Some("post.v1"));
         // Fail-closed shape: any scope with an unknown dimension (or a bare
         // `sign:` that is not `sign:sbo:`) ⇒ false.

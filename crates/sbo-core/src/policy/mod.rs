@@ -4,6 +4,7 @@ mod types;
 mod evaluate;
 mod path;
 mod delegation;
+pub mod glob;
 
 pub use types::{Policy, Grant, Restriction, Identity, AttestedSource, ActionType, Requirements, FieldCondition, SchemaRequirement, PolicyPin, DescendantConstraint};
 pub use evaluate::{evaluate, extract_namespace_owner, action_covered_by, PolicyResult};

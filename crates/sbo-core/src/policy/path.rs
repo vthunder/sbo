@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::message::Path;
+use super::glob;
 
 /// The dynamic identity values a policy pattern may interpolate. All are
 /// **literal references** (the strings as written in headers / claimed by the
@@ -51,48 +52,15 @@ impl PathPattern {
         result
     }
 
-    /// Match a resolved pattern against a path string
-    fn match_pattern(pattern: &str, path: &str) -> bool {
-        let pattern_parts: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
-        Self::match_parts(&pattern_parts, &path_parts)
+    /// The pattern text as written (variables unsubstituted).
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
-    fn match_parts(pattern: &[&str], path: &[&str]) -> bool {
-        match (pattern.first(), path.first()) {
-            // Both empty = match
-            (None, None) => true,
-
-            // Pattern empty but path not = no match
-            (None, Some(_)) => false,
-
-            // ** matches zero or more segments
-            (Some(&"**"), _) => {
-                // Try matching ** with 0, 1, 2, ... segments
-                for i in 0..=path.len() {
-                    if Self::match_parts(&pattern[1..], &path[i..]) {
-                        return true;
-                    }
-                }
-                false
-            }
-
-            // Path empty but pattern not (unless **)
-            (Some(_), None) => false,
-
-            // * matches exactly one segment
-            (Some(&"*"), Some(_)) => Self::match_parts(&pattern[1..], &path[1..]),
-
-            // Exact match required
-            (Some(p), Some(s)) => {
-                if *p == *s {
-                    Self::match_parts(&pattern[1..], &path[1..])
-                } else {
-                    false
-                }
-            }
-        }
+    /// Match a resolved pattern against a path string (memoised segment glob,
+    /// see [`super::glob`]).
+    fn match_pattern(pattern: &str, path: &str) -> bool {
+        glob::segments_match(&glob::segments(pattern), &glob::segments(path))
     }
 }
 
@@ -124,23 +92,12 @@ impl IdPattern {
         if let Some(v) = vars.user { pattern = pattern.replace("$user", v); }
         if let Some(v) = vars.email { pattern = pattern.replace("$email", v); }
         if let Some(v) = vars.name { pattern = pattern.replace("$name", v); }
-        glob_match(&pattern, id)
+        glob::chars_match(&pattern, id)
     }
-}
 
-/// `*` matches any run of characters (including none); everything else is literal.
-fn glob_match(pattern: &str, s: &str) -> bool {
-    match pattern.find('*') {
-        None => pattern == s,
-        Some(i) => {
-            let (head, rest) = (&pattern[..i], &pattern[i + 1..]);
-            if !s.starts_with(head) {
-                return false;
-            }
-            let s = &s[head.len()..];
-            // Try every split point for the `*`.
-            (0..=s.len()).any(|j| glob_match(rest, &s[j..]))
-        }
+    /// The pattern text as written (variables unsubstituted).
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
