@@ -82,7 +82,6 @@ proptest! {
 /// Expected: inflation is capped (e.g. 16 MiB) and an over-cap blob is
 /// dropped as undecodable.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-7: fails today — gzip inflation of chain data is unbounded
 fn w3_7_gzip_inflation_is_capped() {
     const CAP: usize = 16 << 20;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());

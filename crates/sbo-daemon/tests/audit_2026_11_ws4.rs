@@ -549,11 +549,11 @@ fn d15_enforcing_gate_stays_gated_without_claims() {
 
 // ───────────────────────────── D20: IPC socket mode ─────────────────────────────
 
-/// AUDIT-2026-11 D20: fails today. The IPC socket is bound with the process
-/// umask (typically 0755), so any local user can issue every command
-/// (`RepoAdd` to any directory, `Shutdown`, `ApproveSignRequest`).
+/// AUDIT-2026-11 D20 (Q22 a): the IPC socket is chmod 0600 right after the
+/// bind (it used to inherit the process umask, typically 0755), so only the
+/// daemon's own uid can issue commands (`RepoAdd` to any directory,
+/// `Shutdown`, `Submit`).
 #[tokio::test]
-#[ignore]
 async fn d20_ipc_socket_is_owner_only() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempdir().unwrap();

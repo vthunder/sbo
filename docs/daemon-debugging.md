@@ -24,7 +24,7 @@ Use `-d` / `--debug` for development/troubleshooting features:
 
 | Flag | Description |
 |------|-------------|
-| `save-raw-block` | Save raw block data to `/tmp/sbo-debug/` |
+| `save-raw-block` | Save raw block data to `~/.sbo/debug/` (owner-only; never `/tmp`) |
 
 ```bash
 sbo-daemon start -d save-raw-block

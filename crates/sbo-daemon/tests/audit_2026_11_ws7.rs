@@ -18,7 +18,6 @@ fn mode(path: &std::path::Path) -> u32 {
 /// local user. The checkpoint and attestor key files in the deployment are
 /// chmod 600 by entrypoint.sh; the config file never is.
 #[test]
-#[ignore] // AUDIT-2026-11 W7-5: fails today (config.toml is created 0644)
 fn w7_5_sample_config_holding_the_turbo_da_key_is_owner_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

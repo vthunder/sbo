@@ -218,7 +218,15 @@ impl RpcClient {
         let block_hash = header.hash();
 
         // === DEBUG: Save block data to files (only with --debug save-raw-block) ===
-        if self.debug_save_raw {
+        // W4-3: dumps live under the daemon's own data dir, in a directory
+        // created owner-only and refused if it is a symlink; files are opened
+        // O_NOFOLLOW. Never the fixed, world-writable /tmp path.
+        let debug_dir = crate::config::Config::sbo_dir().join("debug");
+        if self.debug_save_raw
+            && prepare_debug_dir(&debug_dir)
+                .map_err(|e| tracing::warn!("raw-block debug dump skipped: {e}"))
+                .is_ok()
+        {
             // Note: We fetch the EXTENDED matrix rows (2*original_rows) for debug purposes.
             // The RPC returns an interleaved matrix where:
             //   - Even rows (0, 2, 4, ...) contain original data
@@ -240,8 +248,6 @@ impl RpcClient {
                 }
             }
 
-            let debug_dir = std::path::Path::new("/tmp/sbo-debug");
-            let _ = std::fs::create_dir_all(debug_dir);
 
             // 1. Save header as JSON
             let header_path = debug_dir.join(format!("block_{}_header.json", block_number));
@@ -257,12 +263,14 @@ impl RpcClient {
                 rows,
                 app_lookup_index.iter().map(|i| format!("{{\"app_id\":{},\"start\":{}}}", i.app_id, i.start)).collect::<Vec<_>>().join(",")
             );
-            let _ = std::fs::write(&header_path, &header_json);
+            if let Ok(mut f) = open_debug_file(&header_path) {
+                let _ = f.write_all(header_json.as_bytes());
+            }
 
             // 2. Save ALL matrix rows as raw scalars (32 bytes each, big-endian)
             // Note: This saves the extended matrix (2*original rows)
             let matrix_path = debug_dir.join(format!("block_{}_matrix.bin", block_number));
-            if let Ok(mut f) = std::fs::File::create(&matrix_path) {
+            if let Ok(mut f) = open_debug_file(&matrix_path) {
                 let _ = f.write_all(&cols.to_le_bytes());
                 let _ = f.write_all(&extended_rows.to_le_bytes());
                 for (_row_idx, row) in &debug_all_rows {
@@ -275,7 +283,7 @@ impl RpcClient {
 
             // 3. Save the app_lookup index
             let lookup_path = debug_dir.join(format!("block_{}_lookup.bin", block_number));
-            if let Ok(mut f) = std::fs::File::create(&lookup_path) {
+            if let Ok(mut f) = open_debug_file(&lookup_path) {
                 let _ = f.write_all(&app_lookup_size.to_le_bytes());
                 let _ = f.write_all(&(app_lookup_index.len() as u32).to_le_bytes());
                 for item in app_lookup_index.iter() {
@@ -284,7 +292,7 @@ impl RpcClient {
                 }
             }
 
-            tracing::info!("Saved debug files to /tmp/sbo-debug/ for block {}", block_number);
+            tracing::info!("Saved debug files to {} for block {}", debug_dir.display(), block_number);
         }
 
         // Fetch rows via Kate RPC (max 64 rows per call) - only needed rows for actual processing
@@ -356,11 +364,20 @@ impl RpcClient {
                 );
             }
 
-            // Try gzip decompression
+            // Try gzip decompression — capped (W3-7 / D50): chain data is
+            // attacker-authored; an over-cap blob is dropped, never inflated.
             if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-                let mut decoder = GzDecoder::new(data.as_slice());
+                let cap = sbo_rpc::MAX_INFLATED_BYTES;
+                let mut decoder = GzDecoder::new(data.as_slice()).take(cap as u64 + 1);
                 let mut decompressed = Vec::new();
                 if decoder.read_to_end(&mut decompressed).is_ok() {
+                    if decompressed.len() > cap {
+                        tracing::warn!(
+                            "Block {} app_id={}: dropping gzip blob of {} bytes that inflates past the {}-byte cap",
+                            block_number, app_id, data.len(), cap
+                        );
+                        continue;
+                    }
                     if self.verbose_decode {
                         tracing::info!(
                             "Block {} app_id={}: decompressed {} -> {} bytes",
@@ -603,3 +620,46 @@ impl RpcClient {
 
 // Decode functions are provided by sbo_rpc crate
 
+/// Create the raw-block debug directory owner-only; refuse a symlink or a
+/// non-directory in its place (W4-3).
+fn prepare_debug_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("{} is a symlink", dir.display()),
+        )),
+        Ok(m) if !m.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("{} is not a directory", dir.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = dir.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(dir)
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::create_dir(dir)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Open (create/truncate) a debug dump file owner-only, never following a
+/// symlink at the path.
+fn open_debug_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    opts.open(path)
+}

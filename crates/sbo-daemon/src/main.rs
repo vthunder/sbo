@@ -101,7 +101,7 @@ impl VerboseFlags {
 /// Debug flags for development/troubleshooting
 #[derive(Clone, Default)]
 pub struct DebugFlags {
-    /// Save raw block data (header, matrix, lookup) to /tmp/sbo-debug/
+    /// Save raw block data (header, matrix, lookup) to `<sbo dir>/debug/` (owner-only, W4-3)
     pub save_raw_block: bool,
 }
 
@@ -634,13 +634,30 @@ impl RepoApi for DaemonState {
         // objects AHEAD of the client's messages — they validate and stage
         // through the same pipeline, and the client's own attribution check
         // below then sees the fresh copy in the overlay.
+        //
+        // W5-9: issuers come from `capture_issuers`, which refuses a
+        // presentation that is not internally consistent (envelope key ==
+        // access-key, assertion/warrant signatures, audience/grantee joins)
+        // BEFORE any live capture, and the batch is capped at
+        // `MAX_ISSUERS_PER_SUBMIT` distinct issuers. Each capture runs inside
+        // this handler, so public mode's per-source spend limiter bounds
+        // them too.
         let mut issuers: Vec<String> = Vec::new();
         for m in &client_messages {
-            for d in sbo_daemon::evidence::required_issuers(m) {
+            let named = sbo_daemon::evidence::capture_issuers(m)
+                .map_err(|e| ApiError::bad_request(format!("Attribution: {e}")))?;
+            for d in named {
                 if !issuers.contains(&d) {
                     issuers.push(d);
                 }
             }
+        }
+        if issuers.len() > sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT {
+            return Err(ApiError::bad_request(format!(
+                "submit names {} issuers; at most {} per submit",
+                issuers.len(),
+                sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT
+            )));
         }
         let deadline = now + sbo_daemon::evidence::DEFAULT_MARGIN_SECS;
         let stale = sbo_daemon::evidence::stale_issuers(&overlay, &issuers, deadline);
@@ -882,7 +899,7 @@ async fn checkpoint_if_due(
                         let wire = build_checkpoint_wire(
                             key,
                             head,
-                            &hex::encode(root),
+                            &sbo_daemon::trust::format_state_root(&root),
                             prev_checkpoint.as_deref(),
                             now,
                         );
@@ -997,14 +1014,17 @@ async fn attest_if_due(
         // attested. If we have no root at or before `block` (bootstrapped past it),
         // we cannot independently vouch → skip. Mismatch → divergence alarm.
         let our_root = match state_db.get_state_root_at_or_before(block) {
-            Ok(Some((_, r))) => hex::encode(r),
+            Ok(Some((_, r))) => r,
             Ok(None) => continue,
             Err(e) => {
                 tracing::warn!("attest: root lookup for block {block} failed: {e}");
                 continue;
             }
         };
-        if our_root != cp_root {
+        // Compare by value: the checkpoint may carry `sha256:<hex>` (spec) or
+        // bare hex (pre-Q34); an unparseable root never matches.
+        if sbo_daemon::trust::parse_state_root(cp_root) != Some(our_root) {
+            let our_root = sbo_daemon::trust::format_state_root(&our_root);
             tracing::error!(
                 "attest: DIVERGENCE at block {block}: checkpoint root {cp_root} != our root {our_root}; not attesting"
             );
@@ -1012,7 +1032,14 @@ async fn attest_if_due(
             continue;
         }
 
-        let wire = build_attestation_wire(key, attestor, block, &our_root, now);
+        // Emit the spec form (`sha256:<hex>`, Q34 a).
+        let wire = build_attestation_wire(
+            key,
+            attestor,
+            block,
+            &sbo_daemon::trust::format_state_root(&our_root),
+            now,
+        );
         // Route through the ordered finality-gated queue (bean sbo-hy4r).
         queue.enqueue(wire).await;
         tracing::info!("queued checkpoint-attestation.v1 for block {block}");
@@ -1073,6 +1100,7 @@ fn build_attestation_wire(
 
 /// Load the checkpoint-authority signing key from a JSON file `{"secret_key":"<hex>"}`.
 fn load_checkpoint_key(path: &std::path::Path) -> anyhow::Result<sbo_core::crypto::SigningKey> {
+    Config::assert_private_key_file(path)?;
     let bytes = std::fs::read(path)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
     let hex_key = v

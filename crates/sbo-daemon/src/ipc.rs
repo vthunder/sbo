@@ -147,6 +147,25 @@ impl IpcServer {
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|e| crate::DaemonError::Ipc(format!("Failed to bind socket: {}", e)))?;
 
+        // D20 / W5-8 (Q22 a): every command needs only socket access, so the
+        // socket is owner-only (and its directory owner-only) right after the
+        // bind — the process umask gave it 0755. Same-uid callers (the CLI)
+        // keep full access. The window between bind and chmod is closed by
+        // never accepting a connection before this point.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| crate::DaemonError::Ipc(format!("Failed to chmod socket: {}", e)))?;
+            if let Some(parent) = self.socket_path.parent() {
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                {
+                    tracing::warn!("could not make {} owner-only: {}", parent.display(), e);
+                }
+            }
+        }
+
         tracing::info!("IPC server listening on {}", self.socket_path.display());
 
         loop {

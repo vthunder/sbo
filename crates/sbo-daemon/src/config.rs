@@ -409,13 +409,50 @@ impl Config {
     pub fn load(path: &Path) -> crate::Result<Self> {
         let mut config = if path.exists() {
             let content = std::fs::read_to_string(path)?;
-            toml::from_str::<Self>(&content)
-                .map_err(|e| crate::DaemonError::Config(format!("Failed to parse config: {}", e)))?
+            let parsed = toml::from_str::<Self>(&content)
+                .map_err(|e| crate::DaemonError::Config(format!("Failed to parse config: {}", e)))?;
+            // W7-5: the file is where the TurboDA key goes. A world/group
+            // readable config that actually holds a credential is refused; a
+            // credential-free one (the container image's, which takes its key
+            // from the environment) only warns.
+            if let Some(mode) = file_mode(path) {
+                if mode & 0o077 != 0 {
+                    let holds_secret = parsed.turbo_da.api_key.is_some()
+                        || !parsed.turbo_da.repos.is_empty()
+                        || !parsed.http.bearer_tokens.is_empty();
+                    if holds_secret {
+                        return Err(crate::DaemonError::Config(format!(
+                            "{} is mode {:o} but holds credentials; chmod 600 it",
+                            path.display(),
+                            mode
+                        )));
+                    }
+                    tracing::warn!(
+                        "{} is mode {:o}; chmod 600 it before putting an api_key in it",
+                        path.display(),
+                        mode
+                    );
+                }
+            }
+            parsed
         } else {
             Self::default()
         };
         config.apply_env_overrides();
         Ok(config)
+    }
+
+    /// Assert that a secret-key file (`[checkpoint] key_file`, `[attest]
+    /// key_file`) is owner-only before it is read (W7-14).
+    pub fn assert_private_key_file(path: &Path) -> crate::Result<()> {
+        match file_mode(path) {
+            Some(mode) if mode & 0o077 != 0 => Err(crate::DaemonError::Config(format!(
+                "key file {} is mode {:o}; it must be 0600",
+                path.display(),
+                mode
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Overlay secrets/overrides from the environment so they need not live in a
@@ -483,7 +520,7 @@ impl Config {
         }
     }
 
-    /// Save config to file
+    /// Save config to file (owner-only: it may hold the TurboDA key).
     pub fn save(&self, path: &Path) -> crate::Result<()> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| crate::DaemonError::Config(format!("Failed to serialize config: {}", e)))?;
@@ -491,7 +528,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        write_private(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -648,7 +685,7 @@ verify_objects = true
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        write_private(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -663,6 +700,42 @@ verify_objects = true
     pub fn config_path() -> PathBuf {
         Self::sbo_dir().join("config.toml")
     }
+}
+
+/// The file's permission bits, or `None` off unix / when unreadable.
+fn file_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Write `content` to `path` created (or truncated) owner-only, never
+/// following a symlink at `path`.
+pub fn write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        // The mode above applies only on create; an existing file keeps its
+        // bits, so pin them.
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(content)
 }
 
 #[cfg(test)]

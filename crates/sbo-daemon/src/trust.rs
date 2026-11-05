@@ -97,10 +97,27 @@ pub fn claim_from_message(msg: &sbo_core::message::Message) -> Option<ObservedCl
     let payload = msg.payload.as_ref()?;
     let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let block = v.get("block")?.as_u64()?;
-    let root_hex = v.get("state_root")?.as_str()?;
-    let root_vec = hex::decode(root_hex).ok()?;
-    let state_root: [u8; 32] = root_vec.as_slice().try_into().ok()?;
+    let state_root = parse_state_root(v.get("state_root")?.as_str()?)?;
     Some(ObservedClaim { kind, block, state_root, signing_key: msg.signing_key.clone() })
+}
+
+/// Parse a `state_root` as it appears on the wire. The State Commitment spec
+/// writes it `sha256:<hex>` (Q34 a); bare hex is accepted during migration
+/// (what the checkpointer emitted before this change). `None` for anything
+/// else, including another algorithm prefix.
+pub fn parse_state_root(s: &str) -> Option<[u8; 32]> {
+    let hex_part = match s.split_once(':') {
+        Some(("sha256", h)) => h,
+        Some(_) => return None,
+        None => s,
+    };
+    let v = hex::decode(hex_part).ok()?;
+    v.as_slice().try_into().ok()
+}
+
+/// The spec wire form of a state root: `sha256:<hex>`.
+pub fn format_state_root(root: &[u8; 32]) -> String {
+    format!("sha256:{}", hex::encode(root))
 }
 
 /// The anchor a fast-sync client loaded provisionally and must verify on chain
@@ -118,8 +135,7 @@ pub struct PendingAnchor {
 
 impl PendingAnchor {
     pub fn root_bytes(&self) -> Result<[u8; 32]> {
-        let v = hex::decode(&self.state_root).context("decode anchor root")?;
-        v.as_slice().try_into().map_err(|_| anyhow!("anchor root not 32 bytes"))
+        parse_state_root(&self.state_root).ok_or_else(|| anyhow!("anchor root is not sha256:<hex> / 32-byte hex"))
     }
 
     pub fn policy(&self) -> Result<TrustPolicy> {
@@ -338,7 +354,7 @@ mod tests {
         use sbo_core::message::{Action, Id, Message, ObjectType, Path};
         let payload = serde_json::to_vec(&serde_json::json!({
             "block": block,
-            "state_root": hex::encode(root),
+            "state_root": format_state_root(&root),
         }))
         .unwrap();
         let mut msg = Message {

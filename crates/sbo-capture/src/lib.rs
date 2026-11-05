@@ -80,7 +80,12 @@ pub struct BrokerClient {
 impl BrokerClient {
     /// Construct a client for a broker base URL (e.g. `https://id.sandmill.org`).
     pub fn new(base_url: impl Into<String>) -> Result<Self, CaptureError> {
-        let http = reqwest::Client::builder().cookie_store(true).build()?;
+        // No redirects: the operator-chosen broker URL must answer itself;
+        // a bounce would carry the session cookie to another host (W7-14).
+        let http = reqwest::Client::builder()
+            .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,

@@ -106,7 +106,16 @@ pub fn write_snapshot(
     Ok(meta)
 }
 
-/// Read + decompress a snapshot file into its full payload.
+/// Hard ceiling on a snapshot's inflated size (D50 / W5-5). A snapshot comes
+/// from an untrusted serving node (or a local file of unknown provenance) and
+/// gzip inflates ~1000:1, so the decoder never reads past this many bytes
+/// however large the stream claims to be. A manifest's `uncompressed_bytes`
+/// (itself bounded by this) tightens it per fetch via
+/// [`decode_snapshot_payload_capped`].
+pub const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Read + decompress a snapshot file into its full payload (inflate capped at
+/// [`MAX_SNAPSHOT_BYTES`]).
 pub fn read_snapshot_payload(path: &Path) -> Result<SnapshotPayload> {
     let gz = std::fs::read(path)?;
     decode_snapshot_payload(&gz)
@@ -114,16 +123,36 @@ pub fn read_snapshot_payload(path: &Path) -> Result<SnapshotPayload> {
 
 /// Decode gzip-compressed snapshot bytes into a [`SnapshotPayload`], tolerating
 /// the legacy format/1 where the payload was a bare `Vec<StoredObject>`.
+/// Inflation is capped at [`MAX_SNAPSHOT_BYTES`]; an over-cap stream is an
+/// error and is never materialized.
 pub fn decode_snapshot_payload(gz: &[u8]) -> Result<SnapshotPayload> {
-    let mut dec = flate2::read::GzDecoder::new(gz);
-    let mut json = Vec::new();
-    dec.read_to_end(&mut json)?;
+    decode_snapshot_payload_capped(gz, MAX_SNAPSHOT_BYTES)
+}
+
+/// [`decode_snapshot_payload`] with an explicit inflate cap (clamped to
+/// [`MAX_SNAPSHOT_BYTES`]) — the manifest's advertised `uncompressed_bytes`
+/// when fetching from a node.
+pub fn decode_snapshot_payload_capped(gz: &[u8], cap: usize) -> Result<SnapshotPayload> {
+    let json = inflate_capped(gz, cap.min(MAX_SNAPSHOT_BYTES))?;
     if let Ok(payload) = serde_json::from_slice::<SnapshotPayload>(&json) {
         return Ok(payload);
     }
     // Legacy format/1: a bare object array.
     let objects: Vec<StoredObject> = serde_json::from_slice(&json)?;
     Ok(SnapshotPayload { objects, policy_versions: Vec::new() })
+}
+
+/// Inflate a gzip stream, reading at most `cap + 1` bytes and refusing any
+/// stream that would exceed `cap`. The output buffer is sized once up front so
+/// the peak allocation is `cap`, not a doubling `Vec` chasing a bomb.
+pub fn inflate_capped(gz: &[u8], cap: usize) -> Result<Vec<u8>> {
+    let mut dec = flate2::read::GzDecoder::new(gz).take(cap as u64 + 1);
+    let mut out = Vec::with_capacity(cap.saturating_add(1));
+    dec.read_to_end(&mut out)?;
+    if out.len() > cap {
+        anyhow::bail!("gzip stream inflates past the {cap}-byte cap; refusing");
+    }
+    Ok(out)
 }
 
 /// Read + decompress a snapshot file into its object set (convenience).

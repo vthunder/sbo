@@ -43,6 +43,104 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(30);
 /// presentations at the submit gate.
 const MAX_ENTRIES: usize = 1024;
 
+/// Cap on a fetched status-list body (W5-4): a list is a small JWS.
+const MAX_LIST_BYTES: usize = 64 * 1024;
+
+/// The host of an `https://…` URI (port stripped).
+fn uri_host(uri: &str) -> Option<&str> {
+    let rest = uri.strip_prefix("https://")?;
+    let hostport = rest.split(['/', '?', '#']).next()?;
+    let host = if let Some(stripped) = hostport.strip_prefix('[') {
+        stripped.split(']').next()?
+    } else {
+        hostport.split(':').next()?
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// Resolve the URI's host and require every address to be globally routable.
+/// Refuses literal and resolved loopback / private / link-local / ULA /
+/// unspecified / multicast / CGNAT addresses before any connection is made.
+/// Residual: this lookup and the client's own are distinct (a rebinding
+/// window); the no-redirect client and the host == authority binding bound it.
+pub async fn validate_status_host(uri: &str) -> Result<(), String> {
+    let host = uri_host(uri).ok_or_else(|| format!("status uri '{uri}' has no host"))?;
+    let rest = uri.strip_prefix("https://").unwrap_or(uri);
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let port: u16 = hostport
+        .rsplit_once(':')
+        .filter(|(h, _)| !h.contains(':') || h.ends_with(']'))
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(443);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolve status host '{host}': {e}"))?;
+    let mut any = false;
+    for addr in addrs {
+        any = true;
+        if !is_global_ip(addr.ip()) {
+            return Err(format!(
+                "status host '{host}' resolves to non-global address {}",
+                addr.ip()
+            ));
+        }
+    }
+    if !any {
+        return Err(format!("status host '{host}' did not resolve"));
+    }
+    Ok(())
+}
+
+/// Whether an IP is safe to fetch from: not loopback, private, link-local,
+/// unique-local, unspecified, multicast, broadcast, documentation or CGNAT.
+/// `std`'s `is_global` is unstable, so the non-global ranges are enumerated.
+pub fn is_global_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                // 100.64.0.0/10 carrier-grade NAT
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_global_ip(std::net::IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // fc00::/7 unique-local
+                || (seg0 & 0xfe00) == 0xfc00
+                // fe80::/10 link-local
+                || (seg0 & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Read a response body, refusing one that exceeds `cap` bytes (chunked
+/// bodies included — the cap is enforced on the stream, not Content-Length).
+pub async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > cap {
+            return Err(format!("body of {len} bytes exceeds the {cap}-byte cap"));
+        }
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if out.len() + chunk.len() > cap {
+            return Err(format!("body exceeds the {cap}-byte cap"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 struct CachedList {
     token: StatusListToken,
     fetched_at: Instant,
@@ -71,8 +169,11 @@ impl Default for StatusChecker {
 impl StatusChecker {
     pub fn new() -> Self {
         Self {
+            // No redirects (W5-4): a status URI must answer where it points;
+            // a bounce would defeat the host == authority and address checks.
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client"),
             lists: RwLock::new(HashMap::new()),
@@ -135,7 +236,7 @@ impl StatusChecker {
     ) -> Result<(), String> {
         for (label, r, authority) in refs {
             let token = self
-                .list_for(&r.uri, authority, keys)
+                .list_for(label, &r.uri, authority, keys)
                 .await
                 .map_err(|e| format!("{label} status unavailable (fail-closed): {e}"))?;
             if token.is_revoked(r.idx) {
@@ -147,6 +248,7 @@ impl StatusChecker {
 
     async fn list_for(
         &self,
+        label: &str,
         uri: &str,
         authority: &str,
         keys: &HashMap<String, AuthorityKey>,
@@ -163,7 +265,7 @@ impl StatusChecker {
                 return Err(format!("{reason} (cached failure)"));
             }
         }
-        match self.fetch_and_verify(uri, authority, keys).await {
+        match self.fetch_and_verify(label, uri, authority, keys).await {
             Ok(token) => {
                 self.failures.write().unwrap().remove(uri);
                 let mut lists = self.lists.write().unwrap();
@@ -193,6 +295,7 @@ impl StatusChecker {
 
     async fn fetch_and_verify(
         &self,
+        label: &str,
         uri: &str,
         authority: &str,
         keys: &HashMap<String, AuthorityKey>,
@@ -213,16 +316,31 @@ impl StatusChecker {
         if now < *inception || now > *expiration {
             return Err(format!("DNSSEC evidence for '{authority}' is outside its validity window"));
         }
-        let body = self
+        // W5-4 / D52: the status URI is attacker-authored (it rides in the
+        // presentation). Before any connection: the host must BE the
+        // credential's authority for the IdP-issued certs (a warrant's list
+        // host is signer-chosen and already IS the authority by construction,
+        // see `presentation_status_refs`), and it must resolve only to
+        // globally routable addresses — never loopback, private, link-local
+        // or metadata ranges (browserid-ng H1 class).
+        let host = uri_host(uri).ok_or_else(|| format!("status uri '{uri}' has no host"))?;
+        if label != "warrant" && !host.eq_ignore_ascii_case(authority) {
+            return Err(format!(
+                "{label} status uri host '{host}' is not the credential's authority '{authority}'"
+            ));
+        }
+        validate_status_host(uri).await?;
+        let resp = self
             .client
             .get(uri)
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("fetch {uri}: {e}"))?
-            .text()
+            .map_err(|e| format!("fetch {uri}: {e}"))?;
+        let body = read_capped(resp, MAX_LIST_BYTES)
             .await
             .map_err(|e| format!("read {uri}: {e}"))?;
+        let body = String::from_utf8_lossy(&body);
         let token =
             StatusListToken::parse(body.trim()).map_err(|e| format!("parse list at {uri}: {e}"))?;
         // The list's declared issuer must BE the chain object's own authority
@@ -320,5 +438,32 @@ mod tests {
     async fn no_refs_is_ok() {
         let checker = StatusChecker::new();
         assert!(checker.check_all(&[], &HashMap::new()).await.is_ok());
+    }
+
+    #[test]
+    fn uri_host_strips_port_and_path() {
+        assert_eq!(uri_host("https://idp.test/list"), Some("idp.test"));
+        assert_eq!(uri_host("https://idp.test:8443/list?x=1"), Some("idp.test"));
+        assert_eq!(uri_host("https://[::1]:8443/list"), Some("::1"));
+        assert_eq!(uri_host("http://idp.test/list"), None);
+    }
+
+    #[test]
+    fn non_global_addresses_are_rejected() {
+        use std::net::IpAddr;
+        for bad in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
+            assert!(!is_global_ip(bad.parse::<IpAddr>().unwrap()), "{bad}");
+        }
+        for good in ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(is_global_ip(good.parse::<IpAddr>().unwrap()), "{good}");
+        }
+    }
+
+    #[tokio::test]
+    async fn literal_loopback_status_host_is_refused_before_dialling() {
+        let err = validate_status_host("https://127.0.0.1:1/list").await.unwrap_err();
+        assert!(err.contains("non-global"), "{err}");
+        let err = validate_status_host("https://[::1]:1/list").await.unwrap_err();
+        assert!(err.contains("non-global"), "{err}");
     }
 }
