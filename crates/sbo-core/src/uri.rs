@@ -4,7 +4,7 @@
 //! Grammar (see `specs/SBO URI Specification.md`):
 //!
 //! ```text
-//! sbo+raw://chain:appId[@firstBlock]/[path/][creator:][id][?query]
+//! sbo+raw://chain:appId[@firstBlock]/[path/][id][?query]
 //! ```
 //!
 //! - The authority is **exactly** `chain:appId` (CAIP-2 `namespace:reference` + appId).
@@ -319,19 +319,23 @@ impl SboRawUri {
         format!("{}:{}", self.chain.display_name(), self.app_id)
     }
 
-    /// The `creator` component (the part before `:` in the last path segment), if any.
+    /// Always `None`: `creator` is an object attribute, not an addressing
+    /// element (URI spec §Object references), and `:` is an ordinary id
+    /// character (`role:moderator`, `ed25519:…`). Kept so callers that used to
+    /// read a `creator:` prefix see nothing rather than a mis-split id
+    /// (audit 2026-11 D14 / Q37).
     pub fn creator(&self) -> Option<&str> {
-        let last = self.path.as_ref()?.rsplit('/').next()?;
-        last.split_once(':').map(|(c, _)| c)
+        None
     }
 
-    /// The object `id` (the last path segment, after any `creator:` prefix), if any.
+    /// The object `id` (the whole last path segment), if any. Ids are ASCII
+    /// (Q37) and round-trip verbatim: no percent-decoding, no `:` split.
     pub fn id(&self) -> Option<&str> {
         let last = self.path.as_ref()?.rsplit('/').next()?;
         if last.is_empty() {
             return None;
         }
-        Some(last.split_once(':').map(|(_, i)| i).unwrap_or(last))
+        Some(last)
     }
 
     /// The canonical database identity tuple `{chain}:{appId}:{firstBlock}:{genesisHash}`.
@@ -444,10 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_creator_id() {
-        let u = SboRawUri::parse("sbo+raw://avail:turing:506@12345/bob/alice:art-7").unwrap();
-        assert_eq!(u.creator(), Some("alice"));
-        assert_eq!(u.id(), Some("art-7"));
+    fn colon_in_id_is_not_a_creator_prefix() {
+        // Audit 2026-11 D14 (Q37): `(path, id)` is the whole address; a `:`
+        // belongs to the id (`role:moderator`), never to a creator.
+        let u = SboRawUri::parse("sbo+raw://avail:turing:506@12345/bob/role:art-7").unwrap();
+        assert_eq!(u.creator(), None);
+        assert_eq!(u.id(), Some("role:art-7"));
     }
 
     #[test]

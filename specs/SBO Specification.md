@@ -43,11 +43,15 @@ IDs, path segments, and creator names share the same syntax rules:
 
 **Case sensitivity:** IDs are case-sensitive. `Foo` and `foo` are different.
 
-**Unicode:** Not allowed directly. Use percent-encoding for non-ASCII characters (e.g., `café` → `caf%C3%A9`).
+**Unicode:** Not allowed. Identifiers are ASCII only; there is no percent-encoding (`%` is not an identifier character). Applications that want non-ASCII names map them to ASCII identifiers (a slug, a hash, or an IDNA-style A-label) and carry the display form in the payload.
+
+**Reserved segments:** `.` and `..` are not identifiers (and so not path segments): they carry path semantics in URIs and filesystems. Dots are otherwise ordinary (`a.b`, `...x` are valid).
+
+**Identity references:** An identifier containing `@` is an identity reference and follows the Identity Specification's comparison rule: exactly one `@`, a non-empty local part and a non-empty domain, and the domain in lowercase. `alice@Example.com` is not a valid identifier; `alice@example.com` is. The local part is case-sensitive like any identifier.
 
 **Grammar (ABNF):**
 ```
-id       = 1*256id_char
+id       = 1*256id_char        ; but not "." or "..", and at most one "@"
 id_char  = ALPHA / DIGIT / "-" / "_" / "." / "~" / "@" / "+" / ":"
 segment  = id
 path     = "/" *(segment "/")
