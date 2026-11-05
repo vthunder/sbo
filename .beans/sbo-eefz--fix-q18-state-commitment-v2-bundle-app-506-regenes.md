@@ -1,11 +1,11 @@
 ---
 # sbo-eefz
 title: 'Fix Q18: state-commitment v2 bundle + app 506 regenesis (carries Q2, Q6, Q8, Q13, Q33, Q39)'
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-11-04T21:31:36Z
-updated_at: 2026-11-05T08:40:30Z
+updated_at: 2026-11-05T10:54:47Z
 parent: sbo-ax7t
 blocking:
     - sbo-xypz

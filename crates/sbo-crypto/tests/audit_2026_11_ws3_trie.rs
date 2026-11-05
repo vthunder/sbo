@@ -139,7 +139,7 @@ proptest! {
     /// case panics today (W3-8 below).
     #[test]
     fn trie_verifier_is_total(root in any::<[u8; 32]>(), oh in prop::option::of(any::<[u8; 32]>()), segs in prop::collection::vec(seg(), 0..4), steps in prop::collection::vec((prop::option::of(seg()), prop::collection::btree_map(seg(), any::<[u8; 32]>(), 0..3)), 0..5)) {
-        let steps: Vec<TrieProofStep> = steps.into_iter().map(|(segment, siblings)| TrieProofStep { segment, siblings }).collect();
+        let steps: Vec<TrieProofStep> = steps.into_iter().map(|(segment, siblings)| TrieProofStep::new(segment, siblings)).collect();
         prop_assume!(segs.len() >= steps.len());
         let proof = sbo_crypto::trie::TrieProof { state_root: root, path_segments: segs, object_hash: oh, proof: steps };
         let _ = verify_trie_proof(&proof);
@@ -159,7 +159,6 @@ proptest! {
 /// /a", which is the second-preimage property the State Commitment spec
 /// claims. Expected after the fix: the two roots differ.
 #[test]
-#[ignore] // AUDIT-2026-11 D4: fails today — trie leaf and internal node hashes share one domain
 fn d4_leaf_and_subtree_commit_to_different_roots() {
     // Subtree: /a/b → X.
     let x = [7u8; 32];
@@ -182,7 +181,6 @@ fn d4_leaf_and_subtree_commit_to_different_roots() {
 /// silently dropped from every state root and can never be proven — and
 /// which one depends on insertion order (D21 collision class).
 #[test]
-#[ignore] // AUDIT-2026-11 W3-4: fails today — an object at a prefix path evicts (or is evicted by) the subtree beneath it
 fn w3_4_prefix_paths_coexist_in_the_commitment() {
     let (h1, h2) = ([1u8; 32], [2u8; 32]);
     let a = vec!["x".to_string(), "a".to_string()];
@@ -223,7 +221,7 @@ fn w3_8_nonexistence_verifier_rejects_short_path_segments() {
         state_root: [1u8; 32],
         path_segments: vec![],
         object_hash: None,
-        proof: vec![TrieProofStep { segment: None, siblings: BTreeMap::new() }],
+        proof: vec![TrieProofStep::new(None, BTreeMap::new())],
     };
     let r = std::panic::catch_unwind(|| verify_trie_proof(&proof));
     match r {

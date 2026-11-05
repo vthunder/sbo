@@ -369,15 +369,21 @@ fn generate_conformance_vectors() {
     sub.children.insert("b".into(), h(b"obj-ab"));
     let mut t3 = SparseTrie::new();
     t3.insert(vec!["a".into()], sub.hash());
+    // Object-versus-container (W3-4): an object at ["a"] and one at ["a","b"]
+    // coexist; the node for "a" carries both, whichever is written first.
+    let mut t5 = SparseTrie::new();
+    t5.insert(vec!["a".into(), "b".into()], h(b"obj-ab"));
+    t5.insert(vec!["a".into()], h(b"obj-a"));
 
     let trie = json!({
         "suite": "sbo conformance 2026-11 / state trie",
-        "description": "State Commitment §State Tree Structure: node hash = sha256 of canonical JSON {\"children\":{seg:\"sha256:<hex>\",…}} with sorted keys; leaf value = object_hash. Threat-model I30: a leaf and an internal node are distinguishable (D4). Implementations: sbo-crypto `SparseTrie` (builder), `PartialTrie` via `verify_state_transition` (verifier, also the zkVM guest's code), sbo-core `StateDb::compute_trie_state_root` (daemon, rocksdb). `root` is what the builder computes today and every other implementation must reproduce; `distinct_from` names a vector whose root the spec requires to differ.",
+        "description": "State Commitment v2 §Domain Separation / §Object Versus Container: leaf = sha256(0x00 || object_hash); node = sha256(0x01 || canonical JSON {\"children\":{seg:\"sha256:<hex>\",…}[,\"object\":\"sha256:<hex>\"]}) with sorted keys; an object and a container at the same segments coexist. Threat-model I30: a leaf and an internal node are distinguishable (D4). Implementations: sbo-crypto `SparseTrie` (builder), `PartialTrie` via `verify_state_transition` (verifier, also the zkVM guest's code), sbo-core `StateDb::compute_trie_state_root` (daemon, rocksdb). `root` is what the builder computes today and every other implementation must reproduce; `distinct_from` names a vector whose root the spec requires to differ.",
         "vectors": [
             { "id": "TRIE-01", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))} ], "root": hex::encode(t1.root_hash()) },
             { "id": "TRIE-02", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))}, {"segments": ["a","c"], "object_hash": hex::encode(h(b"obj-ac"))}, {"segments": ["z"], "object_hash": hex::encode(h(b"obj-z"))} ], "root": hex::encode(t2.root_hash()) },
             { "id": "TRIE-03", "description": "object at [a] whose object_hash equals the hash of the node {b: H}", "objects": [ {"segments": ["a"], "object_hash": hex::encode(sub.hash())} ], "root": hex::encode(t3.root_hash()), "distinct_from": "TRIE-01" },
-            { "id": "TRIE-04", "description": "empty state", "objects": [], "root": hex::encode([0u8; 32]) }
+            { "id": "TRIE-04", "description": "empty state", "objects": [], "root": hex::encode([0u8; 32]) },
+            { "id": "TRIE-05", "description": "object at [a] and object at [a,b] coexist (object-versus-container); order-independent", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))}, {"segments": ["a"], "object_hash": hex::encode(h(b"obj-a"))} ], "root": hex::encode(t5.root_hash()), "distinct_from": "TRIE-01" }
         ]
     });
     write("trie.json", &trie);

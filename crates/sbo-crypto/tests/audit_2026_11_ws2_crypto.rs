@@ -71,12 +71,7 @@ fn objects_of(v: &Value) -> Vec<(Vec<String>, [u8; 32])> {
 
 /// Every trie implementation reproduces the recorded root (agreement), and
 /// roots the spec requires to be distinct are distinct (I30).
-const TRIE_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D4: no leaf/internal domain separation — an object whose
-    // object_hash equals a subtree node hash yields the same root as that
-    // subtree (TRIE-03 vs TRIE-01).
-    ("TRIE-03/distinct", "D4"),
-];
+const TRIE_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn trie_vectors_builder_verifier_and_helper_agree() {
