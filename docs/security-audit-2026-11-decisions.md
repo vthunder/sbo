@@ -1,6 +1,6 @@
 # Security audit 2026-11: open decisions
 
-> **Status: Q1–Q40 settled (Q1–Q21 on 2026-11-04, Q22–Q40 on 2026-11-05); Q41 open (surfaced during remediation).** Product and design
+> **Status: Q1–Q40 settled (Q1–Q21 on 2026-11-04, Q22–Q40 on 2026-11-05); Q41 decided 2026-11-05.** Product and design
 > calls that remediation depends on, collected from each workstream as it
 > lands. Each item: what was found, the options, and a recommendation.
 > Reply per item number; answers are recorded here and in the affected
@@ -813,3 +813,5 @@ landing D4; documented in `docs/state-commitment-v2-migration.md`.
 **Recommendation: (a).** One hashing rule with no special case, and the
 regenesis is already paid for. Sentinel roots are also indistinguishable
 from "no commitment yet" in a header, which (a) removes.
+
+**Decided 2026-11-05 (Dan): (a).** Code follows the spec; bean `sbo-flzk`.

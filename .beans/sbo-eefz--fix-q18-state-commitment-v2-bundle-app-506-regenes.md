@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-04T21:31:36Z
-updated_at: 2026-11-05T10:54:47Z
+updated_at: 2026-11-05T11:12:24Z
 parent: sbo-ax7t
 blocking:
     - sbo-xypz
@@ -46,3 +46,4 @@ Still open, not doable in this repo:
 - New genesis batch in mingo (v7) and the regenesis / re-sync of
   da.sandmill.org: mingo-side and infra tasks.
 
+- [ ] Q41 (a): empty-state root follows the spec (sbo-flzk)
