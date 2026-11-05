@@ -19,10 +19,8 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use sbo_daemon::http::{
-    create_router, ApiError, ListSelector, ObjectView, RepoApi, SignRequestStore, StateRootView,
-    SubmitResultView,
+    create_router, ApiError, ListSelector, ObjectView, RepoApi, StateRootView, SubmitResultView,
 };
-use sbo_daemon::ipc::SignRequest;
 use sbo_daemon::status::StatusChecker;
 use sbo_core::browserid_core::{KeyPair, StatusRef};
 
@@ -96,13 +94,11 @@ async fn status_fetch_refuses_plain_http_without_connecting() {
     assert!(!observed.await.unwrap(), "a plain-http URI must never be dialled");
 }
 
-/// AUDIT-2026-11 W5-4: fails today. A status URI naming a loopback / private
-/// address is dialled (TLS then fails, but the connection is made): the
-/// submit gate is a blind SSRF probe steered by the presentation's
-/// `status.uri` once the attacker's own DNSSEC domain supplies the key
-/// (I31; browserid-ng H1 class).
+/// AUDIT-2026-11 W5-4: a status URI naming a loopback / private address is
+/// refused before any connection (the host must resolve to globally routable
+/// addresses only), so the submit gate is no longer a blind SSRF probe
+/// steered by the presentation's `status.uri` (I31; browserid-ng H1 class).
 #[tokio::test]
-#[ignore]
 async fn status_fetch_never_dials_a_non_public_address() {
     let (addr, observed) = connection_observer(Duration::from_secs(3)).await;
     let checker = StatusChecker::new();
@@ -111,11 +107,11 @@ async fn status_fetch_never_dials_a_non_public_address() {
     assert!(!observed.await.unwrap(), "status fetch dialled a loopback address");
 }
 
-/// AUDIT-2026-11 W5-4: fails today. The status URI host is never compared to
-/// the credential's authority (`iss`), so an IdP-issued cert may point the
-/// gate at any https host (WS1 D52; browserid-ng W6-4 class, I31).
+/// AUDIT-2026-11 W5-4 / D52: for the IdP-issued certs the status URI host
+/// must equal the credential's authority (`iss`), so an access/config cert
+/// cannot point the gate at an arbitrary https host (browserid-ng W6-4
+/// class, I31). Warrants stay signer-chosen (their authority IS the host).
 #[tokio::test]
-#[ignore]
 async fn status_fetch_requires_uri_host_to_equal_the_authority() {
     let (addr, observed) = connection_observer(Duration::from_secs(3)).await;
     let checker = StatusChecker::new();
@@ -156,12 +152,11 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// AUDIT-2026-11 W5-5: fails today. `bootstrap::fetch_snapshot` uses a default
-/// `reqwest::Client` (redirects followed, no address guard, body uncapped):
-/// a serving node can bounce the bootstrapper to any host. Operator-chosen
-/// `node_url`, so Medium not High (I31).
+/// AUDIT-2026-11 W5-5: `bootstrap::fetch_snapshot` uses a no-redirect client
+/// (plus an address guard and a body cap): a serving node cannot bounce the
+/// bootstrapper to another host. Operator-chosen `node_url`, so Medium not
+/// High (I31).
 #[tokio::test]
-#[ignore]
 async fn snapshot_fetch_refuses_redirects() {
     use axum::routing::get;
     let empty = gzip(br#"{"objects":[],"policy_versions":[]}"#);
@@ -193,12 +188,11 @@ async fn snapshot_decode_accepts_a_small_payload() {
     assert!(p.objects.is_empty());
 }
 
-/// AUDIT-2026-11 W5-5: fails today. `decode_snapshot_payload` inflates the
-/// whole gzip stream with `read_to_end` before looking at it: a ~260 KiB body
-/// allocates 256 MiB. Reachable from any serving node during bootstrap and
-/// from local snapshot files (I36).
+/// AUDIT-2026-11 W5-5: `decode_snapshot_payload` inflates through a capped
+/// reader (`MAX_SNAPSHOT_BYTES`, buffer sized once): a ~260 KiB body that
+/// claims 256 MiB is refused without being materialized. Reachable from any
+/// serving node during bootstrap and from local snapshot files (I36).
 #[test]
-#[ignore]
 fn snapshot_decode_rejects_a_gzip_bomb_without_inflating_it() {
     const BOMB: usize = 256 * 1024 * 1024;
     let gz = gzip(&vec![0u8; BOMB]);
@@ -215,13 +209,11 @@ fn snapshot_decode_rejects_a_gzip_bomb_without_inflating_it() {
 // W5-8 (WS1 D20): IPC socket permissions
 // ---------------------------------------------------------------------------
 
-/// AUDIT-2026-11 W5-8: fails today. The IPC socket is bound with the process
-/// umask (typically `0755`), so any local user can connect and issue every
-/// command, including `RepoAdd` (mirror any directory), `RepoRemove`
-/// (`remove_dir_all` of the repo state), `ApproveSignRequest` and
-/// `SubmitIdentity` (I34). The spec'd mode is `0600`.
+/// AUDIT-2026-11 W5-8 (Q22 a): the IPC socket is `0600` right after the bind
+/// (it used to inherit the process umask, typically `0755`, letting any local
+/// user issue every command: `RepoAdd` to any directory, `RepoRemove` of the
+/// repo state, `SubmitIdentity`; I34).
 #[tokio::test]
-#[ignore]
 async fn ipc_socket_is_created_mode_0600() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
@@ -345,24 +337,96 @@ fn required_issuers_are_read_from_unverified_presentation_claims() {
     assert_eq!(issuers, vec!["attacker-named-a.test", "attacker-named-b.test"]);
 }
 
+/// AUDIT-2026-11 W5-9: the submit path now takes its issuers from
+/// `evidence::capture_issuers`, which refuses the same bundle (the envelope
+/// key is not the access-key) before any capture could run. A
+/// self-consistent bundle (envelope signed by the access key, assertion over
+/// the warrant's audience, warrant signed by the config key, grantee ==
+/// access identity) yields exactly its two issuers, never more than
+/// `MAX_ISSUERS_PER_SUBMIT`.
+#[test]
+fn w5_9_inconsistent_presentation_names_no_issuers_for_capture() {
+    use sbo_core::browserid_core::device::{AccessCert, DeviceCert, Holder, HolderMatcher, Purpose, Warrant};
+    use sbo_core::browserid_core::Assertion;
+    use chrono::Duration as CDur;
+
+    let idp_a = KeyPair::generate();
+    let idp_b = KeyPair::generate();
+    let access_kp = KeyPair::generate();
+    let config_kp = KeyPair::generate();
+    let access = AccessCert::create(
+        "a.test", "agent@a.test", Holder::new("ag.k1").unwrap(), &access_kp.public_key(),
+        CDur::hours(1), &idp_a, None,
+    )
+    .unwrap();
+    let config = DeviceCert::create(
+        "b.test", &config_kp.public_key(), Purpose::Authorization, Holder::new("br.1").unwrap(),
+        vec!["user@b.test".to_string()], CDur::days(90), &idp_b, None,
+    )
+    .unwrap();
+    let warrant = Warrant::create(
+        "user@b.test", "agent@a.test", HolderMatcher::new("ag.k1").unwrap(),
+        "sbo+raw://avail:turing:1/", vec!["action:post".into()], CDur::days(30), &config_kp, None,
+    )
+    .unwrap();
+    let assertion = Assertion::create("sbo+raw://avail:turing:1/", CDur::minutes(5), &access_kp).unwrap();
+    let pres = format!("{}~{}~{}~{}", access.encoded(), assertion.encoded(), warrant.encoded(), config.encoded());
+
+    let mk = |signer: &sbo_core::crypto::SigningKey, cert: Option<String>| {
+        let mut msg = sbo_core::message::Message {
+            action: sbo_core::message::Action::Post,
+            path: sbo_core::message::Path::parse("/x/").unwrap(),
+            id: sbo_core::message::Id::new("y").unwrap(),
+            object_type: sbo_core::message::ObjectType::Object,
+            signing_key: signer.public_key(),
+            signature: sbo_core::crypto::Signature([0u8; 64]),
+            content_type: None,
+            content_hash: None,
+            payload: None,
+            owner: None,
+            creator: None,
+            content_encoding: None,
+            content_schema: None,
+            policy_ref: None,
+            related: None,
+            hlc: None,
+            prev: None,
+            auth_cert: cert,
+            auth_evidence: None,
+            auth_warrant: None,
+        };
+        msg.sign(signer);
+        msg
+    };
+
+    // Envelope signed by an unrelated key: refused, no issuers to capture.
+    let unrelated = sbo_core::crypto::SigningKey::generate();
+    let err = sbo_daemon::evidence::capture_issuers(&mk(&unrelated, Some(pres.clone()))).unwrap_err();
+    assert!(err.contains("access-key"), "{err}");
+
+    // Envelope signed by the access key, but the assertion names another
+    // audience than the warrant: refused.
+    let access_sk = sbo_core::crypto::SigningKey::from_bytes(access_kp.secret_bytes());
+    let other_assertion = Assertion::create("sbo+raw://avail:turing:2/", CDur::minutes(5), &access_kp).unwrap();
+    let bad_aud = format!("{}~{}~{}~{}", access.encoded(), other_assertion.encoded(), warrant.encoded(), config.encoded());
+    let err = sbo_daemon::evidence::capture_issuers(&mk(&access_sk, Some(bad_aud))).unwrap_err();
+    assert!(err.contains("audience"), "{err}");
+
+    // Self-consistent: exactly the two issuers, within the cap.
+    let issuers = sbo_daemon::evidence::capture_issuers(&mk(&access_sk, Some(pres))).unwrap();
+    assert_eq!(issuers, vec!["a.test", "b.test"]);
+    assert!(issuers.len() <= sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT);
+
+    // A key-rooted write (no presentation) needs no capture at all.
+    assert!(sbo_daemon::evidence::capture_issuers(&mk(&unrelated, None)).unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
-// W5-10 (WS1 D37): the auth popup
+// W5-10 (WS1 D37): the auth popup — removed (Q31)
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct PopupState {
-    requests: HashMap<String, SignRequest>,
-}
-impl SignRequestStore for PopupState {
-    fn create_sign_request(&mut self, request: SignRequest) -> String {
-        let id = request.request_id.clone();
-        self.requests.insert(id.clone(), request);
-        id
-    }
-    fn get_sign_request(&self, request_id: &str) -> Option<&SignRequest> {
-        self.requests.get(request_id)
-    }
-}
+struct PopupState;
 #[async_trait::async_trait]
 impl RepoApi for PopupState {
     fn get_object(&self, _: Option<&str>, _: &str, _: &str, _: bool) -> Result<ObjectView, ApiError> {
@@ -404,86 +468,25 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-/// Passes today: the `origin` query parameter is HTML-escaped into both the
-/// page text and the `ORIGIN` JS string, so `"`, `<` and `</script>` cannot
-/// break out (no reflected XSS on `/auth`).
+/// AUDIT-2026-11 W5-10, decided Q31 (a): the popup flow is removed, so an
+/// unauthenticated `GET /auth` creates nothing — it is a 404 and the daemon
+/// holds no sign-request table at all (`SignRequest` storage is gone from
+/// `DaemonState`). Retargeted from "pending requests are bounded" to "the
+/// route does not exist".
 #[tokio::test]
-async fn auth_popup_escapes_the_origin_parameter() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
-    let hostile = r#"https://a.test/"></script><script>alert(1)</script>"#;
-    let (status, body) = popup(state, hostile).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(!body.contains("<script>alert(1)"), "origin reflected unescaped");
-    assert!(!body.contains(r#"ORIGIN = "https://a.test/">"#));
-}
-
-/// Passes today (I35 asks for ≥ 64 bits): request ids are 8 random bytes.
-/// Recorded as an observation, not a finding: the id is a bearer for the
-/// assertion at `/auth/status/:id`, and 64 bits with no expiry and no
-/// per-source limit is the floor, not a comfortable margin.
-#[tokio::test]
-async fn auth_popup_request_id_is_64_random_bits() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
-    let (_, body) = popup(state.clone(), "https://a.test").await;
-    let id = body.split("const REQUEST_ID = \"").nth(1).unwrap().split('"').next().unwrap().to_string();
-    assert_eq!(id.len(), 16);
-    assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
-    assert!(state.read().await.requests.contains_key(&id));
-}
-
-/// AUDIT-2026-11 W5-10: fails today. Every unauthenticated `GET /auth`
-/// creates a pending sign request that is never swept (no expiry in
-/// `DaemonState`, `SignRequestStatus::Expired` is never assigned), so the
-/// request table grows without bound and the operator's `sbo auth approve`
-/// list fills with junk from any web page (D37). Expected: a cap on pending
-/// requests per source and a TTL sweep.
-#[tokio::test]
-#[ignore]
 async fn auth_popup_pending_requests_are_bounded() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
+    let state = Arc::new(RwLock::new(PopupState));
     for _ in 0..1000 {
-        let _ = popup(state.clone(), "https://a.test").await;
+        let (status, body) = popup(state.clone(), "https://a.test").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!body.contains("REQUEST_ID"), "popup page was served");
     }
-    let n = state.read().await.requests.len();
-    assert!(n < 1000, "{n} pending sign requests created by unauthenticated GETs");
-}
-
-/// Passes today: `/auth/status/:id` carries the assertion to any holder of
-/// the id, with no origin check — by design (the popup polls without
-/// credentials). Pinned so a future change that adds a binding is a
-/// deliberate one.
-#[tokio::test]
-async fn auth_status_serves_the_assertion_to_any_holder_of_the_id() {
-    use sbo_daemon::ipc::SignRequestStatus;
-    let mut st = PopupState::default();
-    st.requests.insert(
-        "deadbeefdeadbeef".into(),
-        SignRequest {
-            request_id: "deadbeefdeadbeef".into(),
-            app_name: "a.test".into(),
-            app_origin: Some("https://a.test".into()),
-            email: None,
-            challenge: "c".into(),
-            purpose: None,
-            status: SignRequestStatus::Approved,
-            created_at: 0,
-            assertion_jwt: Some("eyJ.fake.jwt".into()),
-            session_binding_jwt: None,
-            rejection_reason: None,
-        },
-    );
-    let resp = create_router(Arc::new(RwLock::new(st)))
-        .oneshot(
-            Request::builder()
-                .uri("/auth/status/deadbeefdeadbeef")
-                .header("origin", "https://evil.example")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["assertion_jwt"], "eyJ.fake.jwt");
+    // The companion routes are gone too.
+    for (m, uri) in [(Method::POST, "/auth/request"), (Method::GET, "/auth/status/deadbeefdeadbeef")] {
+        let resp = create_router(state.clone())
+            .oneshot(Request::builder().method(m.clone()).uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{m} {uri}");
+    }
 }

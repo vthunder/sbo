@@ -21,6 +21,7 @@ pub use decode::{
     decode_app_extrinsics,
     extract_data_from_encoded_extrinsic,
     decode_compact,
+    MAX_INFLATED_BYTES,
     unpad_iec_9797_1,
     CHUNK_SIZE,
     DATA_CHUNK_SIZE,

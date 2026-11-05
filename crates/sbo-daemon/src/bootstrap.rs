@@ -67,12 +67,24 @@ pub fn evaluate_trust(
         backers.insert(SYS_AUTHORITY);
     }
     for a in attestations {
-        if a.block == block && a.state_root == checkpoint_root && trusted.contains(a.attestor.as_str())
+        if a.block == block
+            && roots_equal(&a.state_root, checkpoint_root)
+            && trusted.contains(a.attestor.as_str())
         {
             backers.insert(a.attestor.as_str());
         }
     }
     (backers.len() >= policy.threshold).then_some(backers.len())
+}
+
+/// Two wire-form roots name the same value: `sha256:<hex>` and bare hex
+/// compare equal by bytes (Q34 migration); anything unparseable compares as
+/// the literal string.
+fn roots_equal(a: &str, b: &str) -> bool {
+    match (crate::trust::parse_state_root(a), crate::trust::parse_state_root(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 #[derive(Debug)]
@@ -84,10 +96,8 @@ pub struct BootstrapResult {
 }
 
 fn hex_to_32(s: &str) -> Result<[u8; 32]> {
-    let v = hex::decode(s).context("decode hex root")?;
-    v.as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("state root is not 32 bytes"))
+    crate::trust::parse_state_root(s)
+        .ok_or_else(|| anyhow!("state root {s:?} is not sha256:<hex> / 32-byte hex"))
 }
 
 /// Verify `objects` reconstruct `trusted_root`, then load them into `db`. The
@@ -165,35 +175,97 @@ pub fn verify_and_load_payload(
     Ok(())
 }
 
+/// Cap on a fetched sync-point manifest body.
+const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on a fetched (compressed) snapshot body.
+const MAX_SNAPSHOT_GZ_BYTES: usize = 16 * 1024 * 1024;
+
+/// The bootstrap fetch client (W5-5): no redirects — a serving node must
+/// answer where the operator pointed, never bounce the bootstrapper to
+/// another host — and a short timeout.
+fn fetch_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("bootstrap http client")
+}
+
+/// Refuse a node URL whose hostname resolves to a non-global address unless
+/// the operator named that address explicitly (a literal IP or `localhost`):
+/// a local dev node is a legitimate target, a DNS name quietly pointing at a
+/// metadata or internal service is not.
+async fn check_node_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("parse {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!("node url {url}: scheme must be http or https"));
+    }
+    let hostname = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("node url {url} has no host"))?
+        .to_string();
+    let literal = hostname.trim_start_matches('[').trim_end_matches(']');
+    if literal.parse::<std::net::IpAddr>().is_ok() || hostname.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((hostname.as_str(), port))
+        .await
+        .with_context(|| format!("resolve node host {hostname}"))?;
+    let mut any = false;
+    for a in addrs {
+        any = true;
+        if !crate::status::is_global_ip(a.ip()) {
+            return Err(anyhow!(
+                "node host {hostname} resolves to non-global address {}; refusing",
+                a.ip()
+            ));
+        }
+    }
+    if !any {
+        return Err(anyhow!("node host {hostname} did not resolve"));
+    }
+    Ok(())
+}
+
+async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>> {
+    check_node_url(url).await?;
+    let resp = fetch_client()?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("GET {url} -> {}", resp.status()));
+    }
+    crate::status::read_capped(resp, cap)
+        .await
+        .map_err(|e| anyhow!("read {url}: {e}"))
+}
+
 /// Fetch the sync-point manifest from a serving node.
 pub async fn fetch_manifest(node_url: &str) -> Result<SyncPointsView> {
     let url = format!("{}/v1/sync-points", node_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("GET {url} -> {}", resp.status()));
-    }
-    resp.json::<SyncPointsView>()
-        .await
-        .with_context(|| format!("decode {url}"))
+    let body = fetch_capped(&url, MAX_MANIFEST_BYTES).await?;
+    serde_json::from_slice::<SyncPointsView>(&body).with_context(|| format!("decode {url}"))
 }
 
 /// Download + decompress the snapshot at `block` into its full payload.
-pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<snapshot::SnapshotPayload> {
+/// The inflate is capped at `uncompressed_cap` (the manifest's advertised
+/// `uncompressed_bytes`), itself clamped to [`snapshot::MAX_SNAPSHOT_BYTES`].
+pub async fn fetch_snapshot_capped(
+    node_url: &str,
+    block: u64,
+    uncompressed_cap: usize,
+) -> Result<snapshot::SnapshotPayload> {
     let url = format!("{}/v1/snapshot?block={}", node_url.trim_end_matches('/'), block);
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("GET {url} -> {}", resp.status()));
-    }
-    let gz = resp.bytes().await?.to_vec();
-    snapshot::decode_snapshot_payload(&gz).context("decode snapshot")
+    let gz = fetch_capped(&url, MAX_SNAPSHOT_GZ_BYTES).await?;
+    snapshot::decode_snapshot_payload_capped(&gz, uncompressed_cap).context("decode snapshot")
+}
+
+/// [`fetch_snapshot_capped`] at the hard ceiling.
+pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<snapshot::SnapshotPayload> {
+    fetch_snapshot_capped(node_url, block, snapshot::MAX_SNAPSHOT_BYTES).await
 }
 
 /// End-to-end bootstrap into `db` from a serving node: pick the newest snapshot,
@@ -252,7 +324,8 @@ pub async fn bootstrap_provisional(
         .unwrap_or_else(|| chosen.state_root.clone());
     let trusted_root = hex_to_32(&root_hex)?;
 
-    let payload = fetch_snapshot(node_url, block).await?;
+    let payload =
+        fetch_snapshot_capped(node_url, block, chosen.uncompressed_bytes as usize).await?;
     let object_count = payload.objects.len();
     verify_and_load_payload(db, &payload, trusted_root)?;
 
@@ -369,6 +442,19 @@ mod tests {
             evaluate_trust(&p, 100, "aa", &[att(100, "alice", "aa"), att(100, "alice", "aa")]),
             Some(2)
         );
+    }
+
+    // Q34: a prefixed checkpoint root and a bare-hex attestation root agree.
+    #[test]
+    fn prefixed_and_bare_roots_agree() {
+        let p = TrustPolicy { attestors: vec!["alice".into(), "bob".into()], threshold: 2 };
+        let bare = "ab".repeat(32);
+        let prefixed = format!("sha256:{bare}");
+        assert_eq!(
+            evaluate_trust(&p, 5, &prefixed, &[att(5, "alice", &bare), att(5, "bob", &prefixed)]),
+            Some(2)
+        );
+        assert_eq!(evaluate_trust(&p, 5, &prefixed, &[att(5, "alice", &"cd".repeat(32)), att(5, "bob", &bare)]), None);
     }
 
     // A policy that excludes the authority trusts only independent attestors.

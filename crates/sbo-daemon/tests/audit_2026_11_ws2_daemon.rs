@@ -214,11 +214,9 @@ fn trie_vectors_daemon_state_root_from_segment_mapping() {
 // ----------------------------------------------------------- checkpoint ----
 
 const CP_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 S18 (Q22): the spec writes `state_root` as `sha256:<hex>`;
-    // `claim_from_message` decodes bare hex only, so a spec-shaped checkpoint
-    // is silently not a claim and never counts as a backer.
-    ("CP-01", "S18"),
-    ("CP-03", "S18"),
+    // AUDIT-2026-11 S18 / Q34 (a), sbo-mux6: `claim_from_message` accepts the
+    // spec's `sha256:<hex>` (and bare hex during migration); CP-01 / CP-03
+    // agree with the spec now.
 ];
 
 #[test]

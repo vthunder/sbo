@@ -259,11 +259,22 @@ pub fn extract_data_from_encoded_extrinsic(encoded: &[u8]) -> Option<Vec<u8>> {
 
     tracing::debug!("  Extracted {} bytes from extrinsic", data.len());
 
-    // Check for gzip compression and decompress if needed
+    // Check for gzip compression and decompress if needed. The inflate is
+    // capped (W3-7): chain data is attacker-authored and gzip is ~1000:1, so
+    // an over-cap blob is dropped as undecodable rather than inflated on
+    // every syncing node.
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-        let mut decoder = GzDecoder::new(data.as_slice());
+        let mut decoder = GzDecoder::new(data.as_slice()).take(MAX_INFLATED_BYTES as u64 + 1);
         let mut decompressed = Vec::new();
         if decoder.read_to_end(&mut decompressed).is_ok() {
+            if decompressed.len() > MAX_INFLATED_BYTES {
+                tracing::warn!(
+                    "  Dropping gzip blob of {} bytes: inflates past the {}-byte cap",
+                    data.len(),
+                    MAX_INFLATED_BYTES
+                );
+                return None;
+            }
             tracing::debug!("  Decompressed: {} -> {} bytes", data.len(), decompressed.len());
             return Some(decompressed);
         }
@@ -271,6 +282,11 @@ pub fn extract_data_from_encoded_extrinsic(encoded: &[u8]) -> Option<Vec<u8>> {
 
     Some(data)
 }
+
+/// Cap on the inflated size of one gzip-compressed submission (W3-7). Well
+/// above any legal SBO submission (the HTTP submit body is 2 MiB), far below
+/// what a gzip bomb would ask for.
+pub const MAX_INFLATED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Decode a SCALE compact integer, returns (value, bytes_consumed)
 pub fn decode_compact(data: &[u8]) -> Option<(usize, usize)> {

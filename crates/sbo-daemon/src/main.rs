@@ -2,7 +2,6 @@
 //!
 //! Manages local SBO repository replicas with data availability verification.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -11,8 +10,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use sbo_daemon::config::Config;
-use sbo_daemon::http::{self, SignRequestStore};
-use sbo_daemon::ipc::{IpcServer, Request, Response, SignRequestStatus, SignRequest as IpcSignRequest};
+use sbo_daemon::http;
+use sbo_daemon::ipc::{IpcServer, Request, Response};
 use sbo_daemon::lc::LcManager;
 use sbo_daemon::prover::Prover;
 use sbo_daemon::repo::{RepoManager, SboRawUri};
@@ -102,7 +101,7 @@ impl VerboseFlags {
 /// Debug flags for development/troubleshooting
 #[derive(Clone, Default)]
 pub struct DebugFlags {
-    /// Save raw block data (header, matrix, lookup) to /tmp/sbo-debug/
+    /// Save raw block data (header, matrix, lookup) to `<sbo dir>/debug/` (owner-only, W4-3)
     pub save_raw_block: bool,
 }
 
@@ -125,8 +124,6 @@ struct DaemonState {
     /// TurboDA credentials per DA target — consulted at submit time so a
     /// repo this node cannot submit for is refused up front.
     turbo_config: sbo_daemon::config::TurboDaConfig,
-    /// Pending sign requests from apps (keyed by request_id)
-    sign_requests: HashMap<String, IpcSignRequest>,
     /// Shared mempool overlay (validated-but-unconfirmed writes). Cloned into the
     /// sync task so confirmed writes reconcile (evict) their shadows.
     pending: SharedPending,
@@ -190,24 +187,11 @@ impl DaemonState {
             rpc,
             turbo,
             turbo_config,
-            sign_requests: HashMap::new(),
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
             trust_gate,
             submit_queue: sbo_daemon::submit_queue::SubmitQueue::new(),
             status_checker: std::sync::Arc::new(sbo_daemon::status::StatusChecker::new()),
         })
-    }
-}
-
-impl SignRequestStore for DaemonState {
-    fn create_sign_request(&mut self, request: IpcSignRequest) -> String {
-        let id = request.request_id.clone();
-        self.sign_requests.insert(id.clone(), request);
-        id
-    }
-
-    fn get_sign_request(&self, request_id: &str) -> Option<&IpcSignRequest> {
-        self.sign_requests.get(request_id)
     }
 }
 
@@ -650,13 +634,30 @@ impl RepoApi for DaemonState {
         // objects AHEAD of the client's messages — they validate and stage
         // through the same pipeline, and the client's own attribution check
         // below then sees the fresh copy in the overlay.
+        //
+        // W5-9: issuers come from `capture_issuers`, which refuses a
+        // presentation that is not internally consistent (envelope key ==
+        // access-key, assertion/warrant signatures, audience/grantee joins)
+        // BEFORE any live capture, and the batch is capped at
+        // `MAX_ISSUERS_PER_SUBMIT` distinct issuers. Each capture runs inside
+        // this handler, so public mode's per-source spend limiter bounds
+        // them too.
         let mut issuers: Vec<String> = Vec::new();
         for m in &client_messages {
-            for d in sbo_daemon::evidence::required_issuers(m) {
+            let named = sbo_daemon::evidence::capture_issuers(m)
+                .map_err(|e| ApiError::bad_request(format!("Attribution: {e}")))?;
+            for d in named {
                 if !issuers.contains(&d) {
                     issuers.push(d);
                 }
             }
+        }
+        if issuers.len() > sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT {
+            return Err(ApiError::bad_request(format!(
+                "submit names {} issuers; at most {} per submit",
+                issuers.len(),
+                sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT
+            )));
         }
         let deadline = now + sbo_daemon::evidence::DEFAULT_MARGIN_SECS;
         let stale = sbo_daemon::evidence::stale_issuers(&overlay, &issuers, deadline);
@@ -898,7 +899,7 @@ async fn checkpoint_if_due(
                         let wire = build_checkpoint_wire(
                             key,
                             head,
-                            &hex::encode(root),
+                            &sbo_daemon::trust::format_state_root(&root),
                             prev_checkpoint.as_deref(),
                             now,
                         );
@@ -1013,14 +1014,17 @@ async fn attest_if_due(
         // attested. If we have no root at or before `block` (bootstrapped past it),
         // we cannot independently vouch → skip. Mismatch → divergence alarm.
         let our_root = match state_db.get_state_root_at_or_before(block) {
-            Ok(Some((_, r))) => hex::encode(r),
+            Ok(Some((_, r))) => r,
             Ok(None) => continue,
             Err(e) => {
                 tracing::warn!("attest: root lookup for block {block} failed: {e}");
                 continue;
             }
         };
-        if our_root != cp_root {
+        // Compare by value: the checkpoint may carry `sha256:<hex>` (spec) or
+        // bare hex (pre-Q34); an unparseable root never matches.
+        if sbo_daemon::trust::parse_state_root(cp_root) != Some(our_root) {
+            let our_root = sbo_daemon::trust::format_state_root(&our_root);
             tracing::error!(
                 "attest: DIVERGENCE at block {block}: checkpoint root {cp_root} != our root {our_root}; not attesting"
             );
@@ -1028,7 +1032,14 @@ async fn attest_if_due(
             continue;
         }
 
-        let wire = build_attestation_wire(key, attestor, block, &our_root, now);
+        // Emit the spec form (`sha256:<hex>`, Q34 a).
+        let wire = build_attestation_wire(
+            key,
+            attestor,
+            block,
+            &sbo_daemon::trust::format_state_root(&our_root),
+            now,
+        );
         // Route through the ordered finality-gated queue (bean sbo-hy4r).
         queue.enqueue(wire).await;
         tracing::info!("queued checkpoint-attestation.v1 for block {block}");
@@ -1089,6 +1100,7 @@ fn build_attestation_wire(
 
 /// Load the checkpoint-authority signing key from a JSON file `{"secret_key":"<hex>"}`.
 fn load_checkpoint_key(path: &std::path::Path) -> anyhow::Result<sbo_core::crypto::SigningKey> {
+    Config::assert_private_key_file(path)?;
     let bytes = std::fs::read(path)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
     let hex_key = v
@@ -1442,10 +1454,14 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         })
     };
 
-    // Start HTTP server for web auth
+    // Start the HTTP read + submit API. The exposure mode is resolved up front
+    // so a misconfigured public bind (loopback mode on 0.0.0.0) fails the
+    // start instead of serving open CORS on a routable address (W5-1).
+    let http_options = config.http.resolve()?;
+    let http_bind = config.http.bind.clone();
     let state_for_http = Arc::clone(&state);
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = http::run_server(state_for_http, 7890).await {
+        if let Err(e) = http::run_server(state_for_http, &http_bind, http_options).await {
             tracing::error!("HTTP server error: {}", e);
         }
     });
@@ -2613,171 +2629,6 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             tracing::info!("Shutdown requested via IPC");
             // TODO: Graceful shutdown
             Response::ok(serde_json::json!({"status": "shutting down"}))
-        }
-
-        // ====================================================================
-        // Auth / Sign Request Flow
-        // ====================================================================
-
-        Request::SubmitSignRequest {
-            request_id,
-            app_name,
-            app_origin,
-            email,
-            challenge,
-            purpose,
-        } => {
-            let mut state_write = state.write().await;
-
-            // Check for duplicate request_id
-            if state_write.sign_requests.contains_key(&request_id) {
-                return Response::error(format!("Request ID '{}' already exists", request_id));
-            }
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let request = IpcSignRequest {
-                request_id: request_id.clone(),
-                app_name,
-                app_origin,
-                email,
-                challenge,
-                purpose,
-                status: SignRequestStatus::Pending,
-                created_at: now,
-                assertion_jwt: None,
-                session_binding_jwt: None,
-                rejection_reason: None,
-            };
-
-            state_write.sign_requests.insert(request_id.clone(), request);
-
-            tracing::info!("New sign request queued: {}", request_id);
-
-            Response::ok(serde_json::json!({
-                "status": "pending",
-                "request_id": request_id,
-            }))
-        }
-
-        Request::ListSignRequests => {
-            let state_read = state.read().await;
-
-            let requests: Vec<_> = state_read
-                .sign_requests
-                .values()
-                .filter(|r| r.status == SignRequestStatus::Pending)
-                .map(|r| serde_json::json!({
-                    "request_id": r.request_id,
-                    "app_name": r.app_name,
-                    "app_origin": r.app_origin,
-                    "email": r.email,
-                    "challenge": r.challenge,
-                    "purpose": r.purpose,
-                    "created_at": r.created_at,
-                }))
-                .collect();
-
-            Response::ok(serde_json::json!({ "requests": requests }))
-        }
-
-        Request::GetSignRequest { request_id } => {
-            let state_read = state.read().await;
-
-            match state_read.sign_requests.get(&request_id) {
-                Some(request) => Response::ok(serde_json::json!({
-                    "request_id": request.request_id,
-                    "app_name": request.app_name,
-                    "app_origin": request.app_origin,
-                    "email": request.email,
-                    "challenge": request.challenge,
-                    "purpose": request.purpose,
-                    "status": format!("{:?}", request.status),
-                    "created_at": request.created_at,
-                })),
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::ApproveSignRequest {
-            request_id,
-            assertion_jwt,
-            session_binding_jwt,
-        } => {
-            let mut state_write = state.write().await;
-
-            match state_write.sign_requests.get_mut(&request_id) {
-                Some(request) => {
-                    if request.status != SignRequestStatus::Pending {
-                        return Response::error(format!(
-                            "Request '{}' is not pending (status: {:?})",
-                            request_id, request.status
-                        ));
-                    }
-
-                    request.status = SignRequestStatus::Approved;
-                    request.assertion_jwt = Some(assertion_jwt);
-                    request.session_binding_jwt = Some(session_binding_jwt);
-
-                    tracing::info!("Sign request approved: {}", request_id);
-
-                    Response::ok(serde_json::json!({
-                        "status": "approved",
-                        "request_id": request_id,
-                    }))
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::RejectSignRequest { request_id, reason } => {
-            let mut state_write = state.write().await;
-
-            match state_write.sign_requests.get_mut(&request_id) {
-                Some(request) => {
-                    if request.status != SignRequestStatus::Pending {
-                        return Response::error(format!(
-                            "Request '{}' is not pending (status: {:?})",
-                            request_id, request.status
-                        ));
-                    }
-
-                    request.status = SignRequestStatus::Rejected;
-                    request.rejection_reason = reason;
-
-                    tracing::info!("Sign request rejected: {}", request_id);
-
-                    Response::ok(serde_json::json!({
-                        "status": "rejected",
-                        "request_id": request_id,
-                    }))
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::GetSignRequestResult { request_id } => {
-            let state_read = state.read().await;
-
-            match state_read.sign_requests.get(&request_id) {
-                Some(request) => {
-                    let status = format!("{:?}", request.status).to_lowercase();
-
-                    // Return SignRequestResult format
-                    let result = serde_json::json!({
-                        "status": status,
-                        "assertion_jwt": request.assertion_jwt,
-                        "session_binding_jwt": request.session_binding_jwt,
-                        "rejection_reason": request.rejection_reason,
-                    });
-
-                    Response::ok(result)
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
         }
     }
 }

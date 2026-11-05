@@ -67,7 +67,6 @@ proptest! {
 /// node chose. Expected: a cap tied to the manifest's `uncompressed_bytes`
 /// (itself bounded) and a hard ceiling.
 #[test]
-#[ignore] // AUDIT-2026-11 D50: fails today — snapshot gzip inflation is unbounded
 fn d50_snapshot_inflation_is_capped() {
     const CAP: usize = 64 << 20;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());

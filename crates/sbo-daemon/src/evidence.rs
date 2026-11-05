@@ -56,6 +56,61 @@ pub fn required_issuers(msg: &Message) -> Vec<String> {
     out
 }
 
+/// Hard cap on distinct issuers one submit may make this node capture
+/// evidence for (W5-9): one presentation names at most two (access and
+/// config issuer), and a batch is one writer's work.
+pub const MAX_ISSUERS_PER_SUBMIT: usize = 2;
+
+/// The issuers this write may make the node capture evidence for — only
+/// after the presentation is shown to be **internally consistent** (W5-9):
+///
+/// - the envelope signing key is the access cert's certified `access-key`;
+/// - the assertion is signed by that key and names the warrant's audience;
+/// - the warrant is signed by the config cert's key and its grantee is the
+///   access cert's identity.
+///
+/// Issuer signatures on the two certs still need the DNSSEC-proven keys the
+/// capture fetches, so they are checked afterwards by attribution; but a
+/// bundle that fails these offline joins is garbage and must not drive a
+/// live DNS walk per invented issuer (I2 class: network before signatures).
+/// `Err` is the reason; the caller refuses the submit with it.
+pub fn capture_issuers(msg: &Message) -> Result<Vec<String>, String> {
+    let Some(cert) = msg.auth_cert.as_deref() else {
+        return Ok(Vec::new());
+    };
+    if !cert.contains('~') {
+        // Legacy single identity JWT: one issuer, nothing to cross-check offline.
+        return Ok(required_issuers(msg));
+    }
+    use sbo_core::browserid_core::device::AccessPresentation;
+    let pres = AccessPresentation::parse(cert).map_err(|e| format!("presentation: {e}"))?;
+    let ac = pres.access_cert.claims();
+    let cc = pres.config_cert.claims();
+    let wc = pres.warrant.claims();
+
+    if ac.access_key.as_bytes() != &msg.signing_key.bytes {
+        return Err("presentation: envelope signing key is not the access cert's access-key".into());
+    }
+    pres.assertion
+        .verify(&ac.access_key)
+        .map_err(|e| format!("presentation: assertion not signed by the access-key: {e}"))?;
+    if pres.assertion.audience() != wc.audience {
+        return Err("presentation: assertion audience != warrant audience".into());
+    }
+    pres.warrant
+        .verify(&cc.public_key)
+        .map_err(|e| format!("presentation: warrant not signed by the config cert key: {e}"))?;
+    if !sbo_core::browserid_core::identity::identity_eq(&wc.grantee, &ac.identity) {
+        return Err("presentation: warrant grantee != access cert identity".into());
+    }
+
+    let mut out = vec![ac.iss.clone()];
+    if !out.contains(&cc.iss) {
+        out.push(cc.iss.clone());
+    }
+    Ok(out)
+}
+
 /// The on-chain proof's RRSIG window for `domain`, if a valid proof is there.
 pub fn on_chain_window(state: &dyn StateView, domain: &str) -> Option<(i64, i64)> {
     let bytes = fetch_evidence_object(state, &format!("/sys/dnssec/{domain}"))?;
