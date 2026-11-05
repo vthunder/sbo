@@ -90,8 +90,12 @@ impl std::fmt::Display for PolicyError {
 /// pinned trust anchors. Threaded from the block being replayed.
 pub struct L2Context {
     /// The DA block's inclusion time (UNIX seconds), if known. `None` means the
-    /// block carried no usable timestamp — email-rooted owners then cannot be
-    /// attributed and their writes are carried-but-filtered.
+    /// block carried no usable timestamp. The sync path never gets here with
+    /// `None` (Q23 (a): a block whose timestamp cannot be read is a fetch
+    /// failure and is retried, never processed); when a caller does pass
+    /// `None`, every time-dependent rule fails closed -- email-rooted owners
+    /// cannot be attributed, an `HLC` cannot be bounded and attestations
+    /// cannot be judged in force -- so nodes never disagree on a block.
     pub inclusion_time: Option<i64>,
     /// Pinned trust anchors (authorized brokers + informational root KSK).
     pub anchors: TrustAnchors,
@@ -438,13 +442,15 @@ pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Cont
 
 /// Enforce the HLC ordering-integrity rule (Content Spec §Validity bound) for a
 /// write that carries an `HLC` header. A malformed `HLC` is always rejected. The
-/// `T_b − W ≤ physical ≤ T_b + ε` bound is enforced only when the block's
-/// inclusion time is known; absent a timestamp the bound cannot be evaluated and
-/// we fail open on it (the write is still carried, matching the attribution
-/// carry semantics). Returns `Err(reason)` if the write must be filtered.
+/// `T_b − W ≤ physical ≤ T_b + ε` bound needs the block's inclusion time; a
+/// write that carries an `HLC` in a block whose inclusion time is unknown is
+/// rejected (D28: the bound is never skipped -- a node that cannot evaluate it
+/// must not admit what a node that can would refuse). Returns `Err(reason)` if
+/// the write must be filtered.
 ///
-/// `W` (max authoring lag) defaults to [`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`];
-/// per-collection `W` from a `collection.v1` descriptor is wired in a later step.
+/// `W` (max authoring lag) defaults to [`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`]
+/// and is read from the collection's `collection.v1` descriptor, capped at the
+/// protocol maximum [`sbo_core::hlc::MAX_AUTHORING_LAG_MS`] (D22 / Q9).
 fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
     let hlc_str = match &msg.hlc {
         Some(h) => h,
@@ -452,21 +458,22 @@ fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Resu
     };
     let hlc = sbo_core::hlc::Hlc::parse(hlc_str).map_err(|e| format!("malformed HLC: {e}"))?;
 
-    if let Some(t_b_secs) = l2.inclusion_time {
-        let t_b_ms = t_b_secs.saturating_mul(1000);
-        let max_lag = collection_max_lag_ms(msg, state);
-        let skew = sbo_core::hlc::DEFAULT_SKEW_TOLERANCE_MS;
-        if !hlc.within_bound(t_b_ms, max_lag, skew) {
-            return Err(format!(
-                "HLC physical {} outside validity bound [{}, {}] (T_b={}ms, W={}ms, ε={}ms)",
-                hlc.physical,
-                t_b_ms - max_lag,
-                t_b_ms + skew,
-                t_b_ms,
-                max_lag,
-                skew
-            ));
-        }
+    let Some(t_b_secs) = l2.inclusion_time else {
+        return Err("block inclusion time unknown: HLC validity bound cannot be evaluated".to_string());
+    };
+    let t_b_ms = t_b_secs.saturating_mul(1000);
+    let max_lag = collection_max_lag_ms(msg, state);
+    let skew = sbo_core::hlc::DEFAULT_SKEW_TOLERANCE_MS;
+    if !hlc.within_bound(t_b_ms, max_lag, skew) {
+        return Err(format!(
+            "HLC physical {} outside validity bound [{}, {}] (T_b={}ms, W={}ms, ε={}ms)",
+            hlc.physical,
+            t_b_ms.saturating_sub(max_lag),
+            t_b_ms.saturating_add(skew),
+            t_b_ms,
+            max_lag,
+            skew
+        ));
     }
     Ok(())
 }
@@ -475,8 +482,11 @@ fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Resu
 /// write, from a `collection.v1` descriptor at the write's collection root
 /// (`<path>/_config`). Absent a descriptor (or its `max_authoring_lag_s`), the
 /// collection defaults to a small `W` ([`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`]).
-/// The descriptor is looked up at the write's own path; deeper ancestor
-/// resolution is a later refinement.
+/// Whatever the descriptor says, `W` never exceeds the protocol maximum
+/// [`sbo_core::hlc::MAX_AUTHORING_LAG_MS`] (D22 / Q9 (a)): a hostile or
+/// legacy `_config` cannot make the authoring bound vacuous. The descriptor is
+/// looked up at the write's own path; deeper ancestor resolution is a later
+/// refinement.
 fn collection_max_lag_ms(msg: &Message, state: &dyn StateView) -> i64 {
     let descriptor = state
         .get_object(&msg.path, &Id::new(sbo_core::schema::COLLECTION_CONFIG_ID).unwrap())
@@ -486,7 +496,9 @@ fn collection_max_lag_ms(msg: &Message, state: &dyn StateView) -> i64 {
         if obj.content_schema.as_deref() == Some("collection.v1") {
             if let Ok(collection) = sbo_core::schema::parse_collection(&obj.payload) {
                 if let Some(lag_s) = collection.max_authoring_lag_s {
-                    return lag_s.saturating_mul(1000);
+                    return lag_s
+                        .saturating_mul(1000)
+                        .clamp(0, sbo_core::hlc::MAX_AUTHORING_LAG_MS);
                 }
             }
         }
@@ -788,7 +800,41 @@ fn validate_post(
         return ValidationResult::Valid { creator: creator.to_string() };
     }
 
+    // A collection descriptor (`_config`) sets the collection's `W`, which
+    // widens the authoring instant every attributed write in the collection is
+    // judged at. Writing it is therefore a governance act (Content spec
+    // "Writing `_config` needs an explicit grant"; D22 / Q9 (a)): the
+    // governing policy must grant it EXPLICITLY -- a `govern` grant on the
+    // collection, or a grant whose `id` names `_config` -- never an ordinary
+    // `create`/`update` grant that happens to cover the path, and never the
+    // owner fast-path. Genesis (no root policy yet) bootstraps freely.
+    if is_collection_config_write(msg) {
+        if !root_policy_exists {
+            tracing::debug!("Allowing _config write without root policy (genesis mode)");
+        } else if let Err(e) = check_collection_config_grant(state, msg, existing.as_ref(), l2) {
+            return e.into_invalid(|reason| {
+                format!(
+                    "Collection descriptor write requires an explicit grant (`govern`, or `id: \"_config\"`) on {}: {}",
+                    msg.path, reason
+                )
+            });
+        }
+        return ValidationResult::Valid { creator: creator.to_string() };
+    }
+
     if let Some(existing_obj) = existing {
+        // `Policy-Ref` may be set or changed only by the object's creator (Core
+        // spec; D12). Anyone else -- the controller included -- may update the
+        // object but must leave its policy reference alone.
+        if msg.policy_ref != existing_obj.policy_ref && creator != existing_obj.creator {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason: format!(
+                    "Policy-Ref may only be set or changed by the object's creator {} (signer acts as {})",
+                    existing_obj.creator, creator
+                ),
+            };
+        }
         // Slot occupied - this is an update. Authorize the signer against the
         // object's *resolved controller* (its stored `owner_ref`), not the legacy
         // signer-key `owner`: a direct key match for key-rooted owners, browserid
@@ -817,6 +863,50 @@ fn validate_post(
     }
 
     ValidationResult::Valid { creator: creator.to_string() }
+}
+
+/// Whether this write installs or replaces a collection descriptor
+/// (`<path>/_config`), the object `collection_max_lag_ms` reads `W` from.
+fn is_collection_config_write(msg: &Message) -> bool {
+    msg.id.as_str() == sbo_core::schema::COLLECTION_CONFIG_ID
+}
+
+/// Authorize a `_config` write by an EXPLICIT grant only: `govern` on the
+/// collection, or the collection's `create`/`update` evaluated against only
+/// those grants whose `id` pattern is the literal `_config` (a wildcard or
+/// absent `id` is not explicit). Restrictions and `deny` still apply in the
+/// second form, since it runs through the ordinary evaluator.
+fn check_collection_config_grant(
+    state: &dyn StateView,
+    msg: &Message,
+    existing: Option<&StoredObject>,
+    l2: &L2Context,
+) -> Result<(), PolicyError> {
+    let govern = match check_policy(state, msg, ActionType::Govern, None, l2) {
+        Ok(()) => return Ok(()),
+        Err(e @ PolicyError::State(_)) => return Err(e),
+        Err(PolicyError::Denied(reason)) => reason,
+    };
+    let policy = match state.resolve_policy(&msg.path) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err(PolicyError::Denied("No applicable policy found".to_string())),
+        Err(e) => return Err(PolicyError::State(format!("Error resolving policy: {e}"))),
+    };
+    let mut explicit = policy.clone();
+    explicit.grants.retain(|g| {
+        // `IdPattern` serializes transparently as its pattern string.
+        serde_json::to_value(&g.id).ok().and_then(|v| v.as_str().map(|s| s == sbo_core::schema::COLLECTION_CONFIG_ID)).unwrap_or(false)
+    });
+    if explicit.grants.is_empty() {
+        return Err(PolicyError::Denied(format!(
+            "no `govern` grant ({govern}) and no grant with `id: \"_config\"`"
+        )));
+    }
+    let (action, owner) = match existing {
+        Some(obj) => (ActionType::Update, Some(stored_owner_ref(obj))),
+        None => (ActionType::Create, None),
+    };
+    evaluate_policy_for(state, msg, &explicit, &msg.path, action, owner, l2)
 }
 
 /// Whether `path` is a name-claim path (`/sys/names/…`), which carries the
@@ -2153,7 +2243,12 @@ fn attested_subject_matches(
 ) -> Result<bool, String> {
     let lookup = name_lookup(state);
     let pd = primary_domain(state);
-    let t = l2.inclusion_time.unwrap_or(0);
+    // Whether an attestation is in force is a function of the block's inclusion
+    // time; without it the question has no answer, and guessing `t = 0` would
+    // lift every ban (D28). Fail closed.
+    let t = l2
+        .inclusion_time
+        .ok_or_else(|| "block inclusion time unknown: attestations cannot be evaluated".to_string())?;
     let candidates = state
         .list_objects_by_schema("attestation.v1")
         .map_err(|e| format!("cannot list attestations: {e}"))?;
@@ -2213,9 +2308,18 @@ pub fn message_to_stored_object(
     // *valid update* (creator preserved → same creator → LWW) — see
     // `state_view::merge`. Recomputing creator per-write would flip the stored
     // creator on a self-auth refresh and cause the overlay to drop it.
-    let creator = match state.and_then(|s| s.get_object(&msg.path, &msg.id).ok().flatten()) {
-        Some(existing) => existing.creator,
+    let existing = state.and_then(|s| s.get_object(&msg.path, &msg.id).ok().flatten());
+    let creator = match &existing {
+        Some(existing) => existing.creator.clone(),
         None => resolve_creator(msg, state, l2),
+    };
+    // `Policy-Ref` is the creator's to set or change (Core spec; D12). On an
+    // update by anyone else the stored reference is carried forward unchanged
+    // -- validation already refuses a differing header from a non-creator, this
+    // keeps the stored object right even for a caller that skipped it.
+    let policy_ref = match &existing {
+        Some(existing) if resolve_creator(msg, state, l2) != existing.creator => existing.policy_ref.clone(),
+        _ => msg.policy_ref.clone(),
     };
 
     // Legacy signer-key owner record (retained for objects/proofs that still
@@ -2231,7 +2335,7 @@ pub fn message_to_stored_object(
         content_type: content_type.clone(),
         content_hash: content_hash.clone(),
         payload: payload.clone(),
-        policy_ref: msg.policy_ref.clone(),
+        policy_ref,
         // Descriptive only (Wire Format Spec §Related Objects): carried so
         // readers see an object's declared references without re-parsing raw
         // wire. `ref` is NOT resolved or checked to exist, and nothing

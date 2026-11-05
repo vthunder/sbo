@@ -397,14 +397,21 @@ impl RpcClient {
         );
 
         // Fetch the block's DA inclusion time from its `timestamp.set` inherent
-        // (the SDK returns UNIX millis). This is the time L2 attribution windows
-        // are checked against. A missing timestamp is non-fatal — we proceed with
-        // None (email-rooted owners then fail closed for this block).
+        // (the SDK returns UNIX millis). This is the time L2 attribution windows,
+        // the HLC bound and attestation in-force checks are evaluated against.
+        // The timestamp is part of the block, so failing to read it is a
+        // transport failure, not chain state: the block is NOT processed (Q23
+        // (a) / D28) -- the error propagates like "block not available" and the
+        // sync loop retries. Processing without it would make this node apply
+        // a different set of writes than a node that has it.
         let timestamp = match block.timestamp().await {
             Ok(ms) => Some((ms / 1000) as i64),
             Err(e) => {
-                tracing::warn!("Block {} timestamp unavailable: {}", block_number, e);
-                None
+                tracing::warn!("Block {} timestamp unavailable: {} (will retry)", block_number, e);
+                return Err(crate::DaemonError::Rpc(format!(
+                    "Block {} inclusion time unavailable: {}",
+                    block_number, e
+                )));
             }
         };
 

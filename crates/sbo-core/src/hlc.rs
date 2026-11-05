@@ -37,6 +37,15 @@ pub const DEFAULT_SKEW_TOLERANCE_MS: i64 = 5 * 60 * 1000;
 /// back-dated insertion into append-only history is tightly bounded.
 pub const DEFAULT_MAX_AUTHORING_LAG_MS: i64 = 5 * 60 * 1000;
 
+/// Protocol maximum for a collection's `W` (max authoring lag), in seconds:
+/// 24 hours (Content Spec; audit 2026-11 Q9 (a) / D22). A `collection.v1`
+/// descriptor asking for more is invalid, and a validator never widens the
+/// bound past it whatever the descriptor says.
+pub const MAX_AUTHORING_LAG_S: i64 = 24 * 60 * 60;
+
+/// [`MAX_AUTHORING_LAG_S`] in milliseconds.
+pub const MAX_AUTHORING_LAG_MS: i64 = MAX_AUTHORING_LAG_S * 1000;
+
 impl Hlc {
     /// Parse the wire form `<physical>.<counter>`. Both components are decimal;
     /// `physical` is non-negative Unix ms, `counter` a non-negative integer.
@@ -63,8 +72,12 @@ impl Hlc {
     /// time `t_b` (both in ms): `t_b − W ≤ physical ≤ t_b + ε`. A write outside
     /// the bound is disregarded on replay (an ordering-integrity rule; it does
     /// not touch attribution).
+    ///
+    /// The arithmetic saturates (I24): no combination of `t_b`, `W` and `ε`
+    /// can overflow, so a hostile descriptor cannot panic a validator.
     pub fn within_bound(&self, t_b_ms: i64, max_lag_ms: i64, skew_ms: i64) -> bool {
-        self.physical >= t_b_ms - max_lag_ms && self.physical <= t_b_ms + skew_ms
+        self.physical >= t_b_ms.saturating_sub(max_lag_ms)
+            && self.physical <= t_b_ms.saturating_add(skew_ms)
     }
 }
 

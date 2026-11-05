@@ -233,9 +233,15 @@ proptest! {
         let t = now + t_off;
         let proven = vec![(IDP.to_string(), idp.public_key(), inc, exp)];
         let r = verify_device_attribution_with_provider_keys(&key, reparse(&pres), &proven, AUD, t, Some(now), &TrustAnchors::default());
+        let ac_iat = pres.access_cert.claims().iat;
         if t < inc || t > exp {
             let is_window_err = matches!(r, Err(AttributionError::EvidenceWindowMismatch { .. }));
             prop_assert!(is_window_err, "{:?}", r.err());
+        } else if exp < ac_iat {
+            // The DNSSEC window closes before the access cert was issued: the
+            // intersection is empty and must reject (the "empty intersection"
+            // clause above; reachable when `lo + len < 0`).
+            prop_assert!(matches!(r, Err(AttributionError::EmptyWindow)), "{:?}", r.err());
         } else {
             let a = r.expect("inside window");
             let ac = pres.access_cert.claims();
@@ -298,7 +304,6 @@ fn w3_2_scope_path_glob_is_polynomial() {
 /// any case the bound becomes vacuous. The decided rule (Q9) caps `W` at a
 /// protocol maximum; the arithmetic must be checked.
 #[test]
-#[ignore] // AUDIT-2026-11 I24: fails today — HLC bound arithmetic is unchecked (overflow) and W is unbounded
 fn i24_hlc_bound_arithmetic_is_checked() {
     proptest!(cfg(), |(t_b in any::<i64>(), w in any::<i64>(), eps in any::<i64>(), physical in any::<i64>())| {
         // Must not panic for any inputs (debug builds panic on overflow today).
@@ -313,7 +318,6 @@ fn i24_hlc_bound_arithmetic_is_checked() {
 /// (the presentation is judged at the claimed authoring instant). The spec
 /// decision is a protocol maximum (reference 24 h).
 #[test]
-#[ignore] // AUDIT-2026-11 D22: fails today — W (max_authoring_lag_s) has no protocol maximum
 fn d22_max_authoring_lag_has_a_protocol_maximum() {
     const PROTOCOL_MAX_S: i64 = 24 * 3600;
     proptest!(cfg(), |(lag in (PROTOCOL_MAX_S + 1)..=i64::MAX)| {

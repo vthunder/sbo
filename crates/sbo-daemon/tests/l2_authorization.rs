@@ -77,8 +77,10 @@ fn put_key_rooted_name(db: &StateDb, name: &str, key: &SigningKey) {
 }
 
 fn ctx(db: &StateDb) -> L2Context {
-    // No block timestamp in tests; email-rooted owners fail closed accordingly.
-    L2Context::for_block(None, db)
+    // A fixed block inclusion time: attestations and HLC bounds are judged at
+    // it (audit 2026-11 D28: an unknown inclusion time fails closed, so a
+    // context without one no longer admits attested or HLC-bearing writes).
+    L2Context::for_block(Some(1_700_000_000), db)
 }
 
 #[test]
@@ -652,10 +654,14 @@ fn hlc_bound_gates_writes() {
         ValidationResult::Invalid { stage: ValidationStage::Ordering, .. }
     ));
 
-    // No timestamp → bound cannot be evaluated; a well-formed HLC still passes.
+    // No timestamp → the bound cannot be evaluated and an HLC-bearing write is
+    // rejected at Ordering (audit 2026-11 D28: never skipped).
     let no_ts = L2Context::for_block(None, &db);
     let ok2 = with_hlc(&format!("{}.0", t_b_ms + 300_001));
-    assert!(matches!(validate_message(&ok2, &db, dir.path(), &no_ts), ValidationResult::Valid { .. }));
+    assert!(matches!(
+        validate_message(&ok2, &db, dir.path(), &no_ts),
+        ValidationResult::Invalid { stage: ValidationStage::Ordering, .. }
+    ));
     // ...but a malformed HLC is rejected even without a timestamp.
     let bad2 = with_hlc("1.2.3");
     assert!(matches!(

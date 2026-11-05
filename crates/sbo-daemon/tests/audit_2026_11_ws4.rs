@@ -191,10 +191,10 @@ fn d56_name_claim_evaluates_root_policy() {
 
 // ───────────────────────────── D12: Policy-Ref ─────────────────────────────
 
-/// AUDIT-2026-11 D12: fails today. Core spec: `Policy-Ref` may be set only by
-/// the object's creator. A non-creator with an `update` grant repoints it.
+/// AUDIT-2026-11 D12 (fixed, sbo-mlyp): Core spec: `Policy-Ref` may be set
+/// only by the object's creator. A non-creator with an `update` grant cannot
+/// repoint it.
 #[test]
-#[ignore]
 fn d12_policy_ref_is_not_changed_by_a_non_creator() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -296,11 +296,10 @@ fn d11_not_attested_fails_closed_on_state_read_error() {
     assert!(!is_valid(&r), "a state-read error must fail closed, got {r:?}");
 }
 
-/// AUDIT-2026-11 D28: fails today. With no block timestamp the attestation
-/// clock is `t = 0`, so a ban issued at `t = 1` is "not yet in force" and the
-/// banned writer is admitted; a node that has the timestamp rejects it (fork).
+/// AUDIT-2026-11 D28 (fixed, sbo-zyny): with no block timestamp the
+/// attestation question has no answer and the write fails closed; it is never
+/// judged at `t = 0`.
 #[test]
-#[ignore]
 fn d28_unknown_inclusion_time_does_not_lift_a_ban() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -313,10 +312,9 @@ fn d28_unknown_inclusion_time_does_not_lift_a_ban() {
     assert!(!is_valid(&r), "unknown inclusion time must not lift a ban, got {r:?}");
 }
 
-/// AUDIT-2026-11 D28: fails today. With no block timestamp the HLC validity
-/// bound is skipped entirely, so a write authored in 1970 is admitted.
+/// AUDIT-2026-11 D28 (fixed, sbo-zyny): with no block timestamp the HLC
+/// validity bound cannot be evaluated and an HLC-bearing write is rejected.
 #[test]
-#[ignore]
 fn d28_unknown_inclusion_time_does_not_skip_the_hlc_bound() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -352,12 +350,10 @@ fn d22_default_w_rejects_an_hour_old_authoring_instant() {
     assert!(!is_valid(&r), "default W must reject, got {r:?}");
 }
 
-/// AUDIT-2026-11 D22: fails today. A collection `_config` sets `W` with no
-/// protocol maximum, so whoever can write `_config` makes the bound vacuous: a
-/// write authored 50 years before inclusion is admitted (and, for attributed
-/// writes, presentation expiries are judged at that instant).
+/// AUDIT-2026-11 D22 (fixed, sbo-wc85): a collection `_config` cannot widen
+/// `W` past the protocol maximum (24 h), so a write authored 50 years before
+/// inclusion is refused whatever the descriptor says.
 #[test]
-#[ignore]
 fn d22_collection_w_is_capped_by_a_protocol_maximum() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -370,6 +366,39 @@ fn d22_collection_w_is_capped_by_a_protocol_maximum() {
     msg.sign(&k);
     let r = validate(&db, &msg, &ctx(&db));
     assert!(!is_valid(&r), "W beyond the protocol maximum must not admit, got {r:?}");
+}
+
+/// D22 / S10 (sbo-wc85): writing `_config` needs an explicit grant. An
+/// ordinary `create` grant on the collection does not cover it; a grant with
+/// `id: "_config"` does, and so does `govern` on the collection.
+#[test]
+fn d22_config_write_needs_an_explicit_grant() {
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
+    let k = SigningKey::generate();
+    let cfg = serde_json::to_vec(&serde_json::json!({ "max_authoring_lag_s": 60 })).unwrap();
+    let mut msg = post(&k, "/posts/", "_config", &cfg);
+    msg.content_schema = Some("collection.v1".into());
+    msg.sign(&k);
+
+    put_root_policy(&db, w_policy());
+    let r = validate(&db, &msg, &ctx(&db));
+    assert!(!is_valid(&r), "an ordinary create grant must not cover _config, got {r:?}");
+
+    put_root_policy(
+        &db,
+        serde_json::json!({ "grants": [{"to": "*", "can": ["create"], "on": "/posts/", "id": "_config"}] }),
+    );
+    let r = validate(&db, &msg, &ctx(&db));
+    assert!(is_valid(&r), "an `id: _config` grant must cover it, got {r:?}");
+
+    put_root_policy(&db, serde_json::json!({ "grants": [{"to": "*", "can": ["govern"], "on": "/posts/"}] }));
+    let r = validate(&db, &msg, &ctx(&db));
+    assert!(is_valid(&r), "a govern grant must cover it, got {r:?}");
+
+    put_root_policy(&db, serde_json::json!({ "grants": [{"to": "*", "can": ["create"], "on": "/posts/", "id": "*"}] }));
+    let r = validate(&db, &msg, &ctx(&db));
+    assert!(!is_valid(&r), "a wildcard id is not explicit, got {r:?}");
 }
 
 // ───────────────────────────── D23 / Q7: genesis mode ─────────────────────────────
@@ -456,16 +485,15 @@ fn hlc_less(path: &str, id: &str, hash: u8) -> StoredObject {
     }
 }
 
-/// Passes today (documents D17): for an HLC-less pair the read merge says the
-/// pending value wins, while reconciliation on confirmation drops it. The two
-/// rules disagree only until the confirming write lands, after which reads
-/// converge on the confirmed value — so this is a tip-visibility wobble, not a
-/// state divergence.
+/// AUDIT-2026-11 D17 (fixed, sbo-5fja; inverted from the audit's documenting
+/// form): for an HLC-less pair the read merge and reconciliation agree -- the
+/// confirmed value wins on both sides (Q25 (a)), so the tip never shows a
+/// value reconciliation is about to drop.
 #[test]
 fn d17_overlay_and_reconcile_disagree_on_missing_hlc() {
     let pending = hlc_less("/p/", "x", 1);
     let confirmed = hlc_less("/p/", "x", 2);
-    assert!(sbo_daemon::pending::overlay_wins(&pending, &confirmed));
+    assert!(!sbo_daemon::pending::overlay_wins(&pending, &confirmed), "read merge: confirmed wins on a missing HLC");
     let mut pool = sbo_daemon::pending::PendingPool::new();
     pool.insert(pending.clone(), [1u8; 32], 0);
     pool.reconcile_applied(&confirmed);
@@ -526,12 +554,15 @@ fn d34_legacy_authority_name_is_not_a_pinnable_key() {
     assert!(sbo_daemon::trust::TrustPolicy::from_config(&["sys-checkpointer".to_string()], 1).is_err());
 }
 
-/// Passes today (pins D15, Low): an enforcing anchor with no observed claims
-/// stays gated; the only exit is the config `timeout_blocks`, which stops sync
-/// and keeps reads refused (no degrade path).
+/// D15 (sbo-prqd): an enforcing anchor with no observed claims stays gated.
+/// The State Commitment spec's liveness fallback leaves the on-exhaustion
+/// behaviour to the deployment; this daemon's chosen rule is "report trust not
+/// established": the bounded wait (`trust.timeout_blocks`) is exhausted at
+/// `anchor + timeout`, sync stops, and the gate NEVER degrades -- reads stay
+/// refused, no weaker policy is substituted, no backer is invented.
 #[test]
 fn d15_enforcing_gate_stays_gated_without_claims() {
-    use sbo_daemon::trust::{PendingAnchor, TrustGate};
+    use sbo_daemon::trust::{ClaimKind, ObservedClaim, PendingAnchor, Promotion, TrustGate};
     let dir = tempdir().unwrap();
     let k = SigningKey::generate();
     let anchor = PendingAnchor {
@@ -540,8 +571,29 @@ fn d15_enforcing_gate_stays_gated_without_claims() {
         attestors: vec![k.public_key().to_string()],
         threshold: 1,
     };
-    let gate = TrustGate::with_anchor(dir.path().to_path_buf(), anchor).unwrap();
+    let mut gate = TrustGate::with_anchor(dir.path().to_path_buf(), anchor).unwrap();
     assert!(gate.is_gated());
+
+    // The bounded wait: not exhausted at or before anchor + timeout, exhausted
+    // after it; a timeout of 0 means wait forever.
+    assert!(!gate.wait_exhausted(10, 5));
+    assert!(!gate.wait_exhausted(15, 5));
+    assert!(gate.wait_exhausted(16, 5));
+    assert!(!gate.wait_exhausted(u64::MAX, 0));
+
+    // A claim for the wrong root does not count, and exhaustion itself changes
+    // nothing: still gated, still zero backers (no degrade fallback).
+    let wrong = ObservedClaim { kind: ClaimKind::Attestation, block: 10, state_root: [0xbb; 32], signing_key: k.public_key() };
+    assert!(matches!(gate.observe(&wrong), Promotion::Pending { backers: 0, .. }));
+    assert!(gate.wait_exhausted(1_000, 5));
+    assert!(gate.is_gated(), "exhausting the wait must not open the gate");
+    assert_eq!(gate.backer_count(), 0);
+
+    // Only the pinned attestor vouching for the anchor root promotes.
+    let right = ObservedClaim { kind: ClaimKind::Attestation, block: 10, state_root: [0xaa; 32], signing_key: k.public_key() };
+    assert!(matches!(gate.observe(&right), Promotion::Promoted { backers: 1 }));
+    assert!(!gate.is_gated());
+    assert!(!gate.wait_exhausted(1_000, 5), "a promoted gate has nothing to wait for");
 }
 
 // ───────────────────────────── D20: IPC socket mode ─────────────────────────────
