@@ -55,6 +55,7 @@ pub fn envelope(path: &str, id: &str, payload: Vec<u8>, seed: u8) -> Message {
         auth_cert: None,
         auth_evidence: None,
         auth_warrant: None,
+        extra_headers: Vec::new(),
     };
     m.sign(&k);
     m

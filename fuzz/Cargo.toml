@@ -26,6 +26,11 @@ sbo-types = { path = "../crates/sbo-types" }
 
 [workspace]
 
+# Same vendored dnssec-prover as the root workspace (sbo-core imports
+# verify_rr_stream_with_anchors, which only the vendored copy has).
+[patch.crates-io]
+dnssec-prover = { path = "../vendor/dnssec-prover" }
+
 [profile.release]
 debug = 1
 

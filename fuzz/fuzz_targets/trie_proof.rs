@@ -75,6 +75,8 @@ fuzz_target!(|input: Input| {
         proof: input.raw_steps.iter().take(6).map(|(s, sibs)| TrieProofStep {
             segment: s.map(|b| format!("s{}", b % 5)),
             siblings: sibs.iter().take(4).map(|(k, h)| (format!("s{}", k % 5), *h)).collect::<BTreeMap<_, _>>(),
+            object: None,
+            children: None,
         }).collect(),
     };
     let _ = verify_trie_proof(&proof);
