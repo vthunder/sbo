@@ -1,7 +1,7 @@
 //! Security audit 2026-11, WS3: property tests over the sparse path-segment
 //! trie (inclusion / non-existence proofs, state-transition witnesses) and the
-//! (threat model I4; WS1 leads D4, D21; July `sbo-hedq`). The `merkle.rs` file in
-//! this crate is not declared as a module and is not compiled; see the WS3 report.
+//! (threat model I4; WS1 leads D4, D21; July `sbo-hedq`). The dead `merkle.rs`
+//! this crate once carried (never a declared module) was deleted under W3-5.
 
 use proptest::prelude::*;
 use sbo_crypto::trie::{
