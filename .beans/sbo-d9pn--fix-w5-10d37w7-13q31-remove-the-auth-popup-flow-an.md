@@ -1,11 +1,11 @@
 ---
 # sbo-d9pn
 title: 'Fix W5-10/D37/W7-13/Q31: remove the /auth popup flow and the six sign-request IPC commands'
-status: draft
+status: todo
 type: task
 priority: low
 created_at: 2026-11-04T21:34:00Z
-updated_at: 2026-11-04T21:34:00Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -15,3 +15,7 @@ Depends on: **Q31 (open)**; recommendation (a) remove. If (b): TTL sweep, per-so
 
 - [ ] Remove routes, IPC commands, `SignRequest` storage
 - [ ] Acceptance: ws5 `auth_popup_pending_requests_are_bounded` retargeted to 404
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

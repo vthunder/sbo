@@ -1,11 +1,11 @@
 ---
 # sbo-xs2u
 title: 'Spec edit (Authorization): device presentation is normative, sign:sbo scopes, wildcard cap, empty scope list (Q1, S1, Q38, Q40)'
-status: draft
+status: todo
 type: task
 priority: normal
 created_at: 2026-11-04T21:36:02Z
-updated_at: 2026-11-04T21:36:02Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -14,3 +14,7 @@ One bean per spec document. `specs/SBO Authorization Specification.md`: rewrite 
 - [ ] Q1 rewrite + Auth-Warrant removal
 - [ ] sign:sbo scope grammar
 - [ ] Q38 cap, Q40 sentence (after decisions)
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

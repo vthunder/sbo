@@ -1,6 +1,6 @@
 # Security audit 2026-11: open decisions
 
-> **Status: Q1–Q21 settled 2026-11-04; Q22–Q25 (WS4) open.** Product and design
+> **Status: Q1–Q40 settled (Q1–Q21 on 2026-11-04, Q22–Q40 on 2026-11-05).** Product and design
 > calls that remediation depends on, collected from each workstream as it
 > lands. Each item: what was found, the options, and a recommendation.
 > Reply per item number; answers are recorded here and in the affected
@@ -17,12 +17,12 @@
 | WS1 threat model + spec review | sbo-dl2l | Done 2026-11-03. 10 adversaries, 14 boundaries, 36 invariants. 50 code leads D1–D58 (3 Critical, 13 High pre-verification), 20 spec findings S1–S22. All 12 open July 2026 leads still present. 21 decisions below. |
 | WS2 conformance vectors | sbo-5t0f | Done 2026-11-04. 135 vectors in 8 suites, 5 runners (19 tests) green in CI (`conformance.yml`) with expected-fail tables. 4 genuine cross-implementation disagreements (W2-1..W2-4); everything else is the stack agreeing with itself against the spec (D1, D2, D3, D4, D13, D21, D28, D30, D54 all confirmed by vector). Decisions Q34–Q37. |
 | WS3 fuzz + proptest | sbo-qw0z | Done 2026-11-04. proptest: core 47 pass / 22 ignored, crypto 5 / 3, rpc 3 / 1, daemon 3 / 1. 12 cargo-fuzz targets in a standalone `fuzz/` workspace (`make fuzz-smoke`, weekly launchd, `fuzz-smoke.yml`). New findings W3-1..W3-11 (2 High: exponential glob matching in policy patterns and warrant scopes; W3-8/W3-9 verifier and parser panics on untrusted input). Decisions Q38–Q40. |
-| WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 open. |
+| WS4 never-audited layers | sbo-f8cj | Done 2026-11-04. 21 candidates: 15 confirmed, 3 partial, 1 refuted, D33/D58 confirmed by reading, D39 accepted risk (Q20). 4 new (W4-1..4). Tests: daemon 7 pass / 16 ignored, core 2 / 1. Decisions Q22–Q25 settled 2026-11-05. |
 | WS5 HTTP / IPC surface | sbo-s4xl | Done 2026-11-04. 7 candidates: 6 confirmed, 1 partial. Findings W5-1..W5-10 (1 High: W5-1 public bind with `*` CORS + PNA; 6 Medium; 3 Low). Authz matrix 12 pass / 9 ignored; findings 8 / 6. Decisions Q30, Q31 (numbered past the WS4/WS7 Q22–Q25 pairs). |
 | WS6 crypto core / verification | sbo-iye5 | Done 2026-11-04. 12 candidates: 9 confirmed, 2 partial (D3, D24), 1 read-only (D8). 5 new findings W6-1..W6-5. Tests: sbo-core 13 pass / 14 ignored, sbo-crypto 2 / 1 (+1 kzg), sbo-daemon 0 / 3. Live v5 genesis passes Q7 only under Q33 (a); fails Q8 either way. Decisions Q32, Q33. |
 | WS7 supply chain / CI / secrets / logging | sbo-ip5k | Done 2026-11-04. No CI existed; `test.yml`, `supply-chain.yml` (cargo-audit, cargo-deny, gitleaks), dependabot added. 41 advisories, 34 after reasoned ignores, all closable by `cargo update` + dropping an unused `reqwest 0.11`. No secret ever committed (514 commits). 14 findings W7-1..14 (3 Medium). Decisions Q26–Q29. |
 | WS8 PoCs | sbo-cka2 | Ordering list in the WS1 report §6. |
-| WS9 ledger + remediation beans | sbo-q92z | Done 2026-11-04. `docs/security-audit-2026-11.md`: 2 Critical, 12 High, 29 Medium, 22 Low, 10 Info confirmed; 20+ leads refuted. 60 beans under the epic (48 remediation: 28 `todo`, 20 `draft` pending Q22–Q40; 12 spec-edit). Suite: 518 pass / 0 fail / 94 ignored after one WS3 generator fix. July epic sbo-f5wn closed, every open item carried. |
+| WS9 ledger + remediation beans | sbo-q92z | Done 2026-11-04. `docs/security-audit-2026-11.md`: 2 Critical, 12 High, 29 Medium, 22 Low, 10 Info confirmed; 20+ leads refuted. 60 beans under the epic (48 remediation: 28 `todo`, 20 `draft` pending Q22–Q40, all flipped to `todo` 2026-11-05; 12 spec-edit). Suite: 518 pass / 0 fail / 94 ignored after one WS3 generator fix. July epic sbo-f5wn closed, every open item carried. |
 
 **Highest-severity candidates (pre-verification)**
 
@@ -349,6 +349,8 @@ refuted as an arbitrary delete (it removes the daemon's own state dir).
 **Recommendation: (a).** A same-uid process can already read the keyring,
 so a token adds nothing on the hosts we run.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q23. A block with no inclusion time (WS4 D28)
 
 `rpc.rs` treats a missing `timestamp.set` as non-fatal. `validate.rs` then
@@ -363,6 +365,8 @@ a different set of writes from the same block than a node with it.
 
 **Recommendation: (a).** The timestamp is in the block; failing to read it is
 transport, not chain state.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 ### Q24. Filesystem mirror encoding and failure policy (WS4 D21, D58)
 
@@ -384,6 +388,8 @@ and `run` moves to the next block.
 **Recommendation: (a).** A mirror error must not fork state; state is in
 RocksDB and the trie, the mirror is a view.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q25. Overlay rule on a missing HLC (WS4 D17)
 
 `overlay_wins` (read merge) lets a pending write without an HLC shadow a
@@ -397,6 +403,8 @@ discarded.
 
 **Recommendation: (a).** One rule for both sides; HLC-less writes are the
 legacy case anyway.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 ### Q26. WS7: supply-chain gate is red until the bumps land (W7-2, W7-6)
 
@@ -413,6 +421,8 @@ the audit rule keeps off the branch.
 **Recommendation: (a).** Nothing a deployed binary links stays vulnerable, and
 a green gate on the first PR is what makes people keep it.
 
+**Decided 2026-11-05 (Dan): (a).** Land the bumps on the audit branch.
+
 ### Q27. WS7: daemon container runs as root (W7-12, Medium)
 
 `/data` holds the checkpoint and attestor secret keys, the state index and the
@@ -427,6 +437,8 @@ so it is coordinated with sandmill-infra (same shape as browserid-ng Q9).
 
 **Recommendation: (a).**
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q28. WS7: required status checks on `main` (W7-1)
 
 Branch protection on `vthunder/sbo` requires only the external
@@ -439,6 +451,8 @@ required, so a red run does not block a merge.
 
 **Recommendation: (a)**, once Q26 makes the gate green.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q29. WS7: `avail-rust` tracked by branch (W7-3, Low)
 
 Three manifests pin `avail-rust` to `branch = "main"`; the lockfile holds the
@@ -449,6 +463,8 @@ commit, but every `cargo update` moves it (the dry run jumps `de07cce1` to
 - (b) Keep tracking `main`; rely on the lockfile.
 
 **Recommendation: (a).** It also makes R7-1 a lockfile-only change.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 ### Q30. `/v1/dnssec` after submit-side evidence refresh (WS5 W5-2, Medium)
 
@@ -463,6 +479,8 @@ and the one remaining caller is `mingo-app`'s `appoint` CLI.
 
 **Recommendation: (a).** One fewer unauthenticated amplifier, and the
 submit path already does the job once.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 ### Q31. The `/auth` popup flow and sign-request IPC commands (WS5 W5-10, Low)
 
@@ -479,6 +497,8 @@ and the assertion is a 64-bit bearer.
 
 **Recommendation: (a).** Dead surface is the cheapest surface to secure;
 the device-cert model made this flow obsolete.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 History (asked by Dan 2026-11-05): the six IPC commands landed 2025-12-18
 (443da50) for a pre-browserid "sign request" login: an app submitted a
@@ -536,6 +556,8 @@ clients that do not know them; several can be live at once. The ignored
 test `d2_unsigned_unknown_header_is_rejected` already pins (c): it rejects
 an *unsigned* unknown header, not an unknown header as such.
 
+**Decided 2026-11-05 (Dan): (c).** Sign what was sent; consumers never reserialize (bytes in, bytes out); `Critical` header and `X-` prefix for experimental headers.
+
 Follow-up (asked by Dan 2026-11-05): under (a), a mixed fleet means old
 nodes drop every message with a new header, and concurrent experiments are
 impossible; (c) was added in answer.
@@ -578,6 +600,8 @@ policy exists.
 **Recommendation: (b).** It is the only reading consistent with Q4, it
 removes the last accept-all window, and the regenesis is already planned.
 
+**Decided 2026-11-05 (Dan): (b).**
+
 ### Q34. `state_root` wire form in checkpoint objects (WS2 W2-4 / S18, Low)
 
 The State Commitment spec writes `state_root` as `sha256:<hex>` in every
@@ -593,6 +617,8 @@ today is the form that works.
 **Recommendation: (a).** Every other hash on the wire carries its
 algorithm prefix (`Content-Hash`, `Prev`, `genesisHash`); a bare hash is
 the odd one out.
+
+**Decided 2026-11-05 (Dan): (a).**
 
 ### Q35. Which bytes `genesisHash` covers (WS2, Genesis spec vs State Commitment)
 
@@ -611,6 +637,8 @@ mandatory for accepted messages. Until Q32 lands, the daemon's
 **Recommendation: (a).** One hashing rule; it is what the generator and
 every runner in `conformance/` already assume.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q36. Two identifier grammars (WS2 W2-1, Low)
 
 `sbo-types` (`Id`, `Path`, `Action`, re-exported as `sbo_core::Id` and used
@@ -628,6 +656,8 @@ Nothing on the wire path uses it today, which is why it has not bitten.
 definition by construction, and the conformance runner for sbo-types stays
 meaningful.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q37. Percent-encoding versus the identifier charset (WS2 / S23, Info)
 
 Core §Identifier Syntax says non-ASCII is not allowed directly and to use
@@ -642,6 +672,8 @@ grammar and not the prose).
 
 **Recommendation: (a).** Nothing emits or decodes percent-encoded ids, and
 (b) would reopen the normalization questions Q5 just closed.
+
+**Decided 2026-11-05 (Dan): (a).** ASCII ids. If internationalized addresses are wanted later, route (2) (IDNA-style A-labels as a spec note) is the agreed path; tracked as a deferred spec bean.
 
 Zoom-out (asked by Dan 2026-11-05: are paths user-facing, and should other
 scripts be allowed?). Paths are user-facing in three places: community
@@ -708,6 +740,8 @@ implementation can be held to; (b) alone leaves the quadratic-ish worst
 case in place. The reference matchers in the WS3 tests and fuzz targets
 are the oracle for (a).
 
+**Decided 2026-11-05 (Dan): (c).**
+
 ### Q39. Unknown keys in policy documents (WS3 W3-3, Medium)
 
 `Policy`, `Grant`, `Restriction` and `Requirements` deserialize without
@@ -726,6 +760,8 @@ become invalid on replay.
 
 **Recommendation: (a).**; it rides the same regenesis as Q2/Q6/Q8/Q13.
 
+**Decided 2026-11-05 (Dan): (a).**
+
 ### Q40. A warrant with no scopes (WS3 observation, Info)
 
 `scopes_authorize([])` is `true`: a warrant whose scope list is empty
@@ -743,6 +779,8 @@ scopes today, so nothing emits an empty list. Pinned by
 
 **Recommendation: (b)**; it matches the browserid "inert without a warrant"
 posture, and the cost is one line in every signer.
+
+**Decided 2026-11-05 (Dan): (b).**
 
 ## 3. Already settled by the spec text (no decision needed)
 

@@ -1,11 +1,11 @@
 ---
 # sbo-skvm
 title: 'Spec edit (Policy): document govern/pin/descendant_constraint/forbid_pinning/dnssec_proof/require_payload_signed_by; cycles reject; unknown keys reject; wildcard cap (S12, Q17, Q39, Q38)'
-status: draft
+status: todo
 type: task
 priority: normal
 created_at: 2026-11-04T21:36:02Z
-updated_at: 2026-11-04T21:36:02Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -13,3 +13,7 @@ parent: sbo-ax7t
 
 - [ ] S12, Q17
 - [ ] Q38, Q39 (after decisions)
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

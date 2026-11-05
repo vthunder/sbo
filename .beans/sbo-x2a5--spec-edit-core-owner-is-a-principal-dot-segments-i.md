@@ -1,11 +1,11 @@
 ---
 # sbo-x2a5
 title: 'Spec edit (Core): owner is a principal, dot segments invalid, ASCII-only ids, submit gates are advisory (Q13, Q24, Q37, S20)'
-status: draft
+status: todo
 type: task
 priority: normal
 created_at: 2026-11-04T21:36:02Z
-updated_at: 2026-11-04T21:36:02Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -13,3 +13,7 @@ parent: sbo-ax7t
 
 - [ ] Q13, S20
 - [ ] Q24, Q37 (after decisions)
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

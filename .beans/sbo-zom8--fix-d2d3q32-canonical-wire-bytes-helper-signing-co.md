@@ -1,11 +1,11 @@
 ---
 # sbo-zom8
 title: 'Fix D2/D3/Q32: canonical wire bytes helper (signing content = received header block; unknown headers reject)'
-status: draft
+status: todo
 type: task
 priority: high
 created_at: 2026-11-04T21:31:36Z
-updated_at: 2026-11-04T21:34:48Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 blocking:
     - sbo-cusw
@@ -19,3 +19,7 @@ Depends on: **Q32 (open)**. Blocks: the D2, D3 and W3-10 beans.
 - [ ] One helper in `sbo-core/src/wire` that returns the received header block and rejects unknown headers (Q32 (a))
 - [ ] `verify_message` signs/verifies that block, not a reconstruction
 - [ ] Acceptance: `crates/sbo-core/tests/audit_2026_11_ws6.rs` `d2_unsigned_unknown_header_is_rejected`, `d3_every_accepted_message_is_canonical`; WS2 `conformance/wire.json` W-INJ-01/02 removed from `EXPECTED_FAIL` in core + wasm runners
+
+## Decision
+
+Q32 decided (c), not (a): sign what was sent. Signing content = received header block minus the Signature line; an unknown header is valid iff it is inside the signature and placed after the modelled headers; consumers never reserialize (bytes in, bytes out: verify, hash, store and forward the received bytes); a Critical header lists headers an old client must not skip; experimental headers use the X- prefix. Do NOT reject unknown headers as such; reject only unsigned ones (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

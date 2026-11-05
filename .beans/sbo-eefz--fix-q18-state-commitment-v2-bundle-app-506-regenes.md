@@ -1,11 +1,11 @@
 ---
 # sbo-eefz
 title: 'Fix Q18: state-commitment v2 bundle + app 506 regenesis (carries Q2, Q6, Q8, Q13, Q33, Q39)'
-status: draft
+status: todo
 type: task
 priority: high
 created_at: 2026-11-04T21:31:36Z
-updated_at: 2026-11-04T21:34:48Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 blocking:
     - sbo-xypz
@@ -24,3 +24,7 @@ Depends on: **Q33, Q39 (open)**; Q2, Q6, Q8, Q13, Q18 settled. Blocks: D3, D4, Q
 - [ ] Survey app 506 policies for owner admission (Q13) and stray keys (Q39)
 - [ ] New genesis batch in mingo (Q33 order, dnssec object, brokers object form)
 - [ ] Regenesis and re-sync of da.sandmill.org (mingo-side task)
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

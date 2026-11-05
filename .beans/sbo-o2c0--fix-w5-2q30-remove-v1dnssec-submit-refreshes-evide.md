@@ -1,11 +1,11 @@
 ---
 # sbo-o2c0
 title: 'Fix W5-2/Q30: remove /v1/dnssec (submit refreshes evidence itself)'
-status: draft
+status: todo
 type: task
 priority: normal
 created_at: 2026-11-04T21:34:00Z
-updated_at: 2026-11-04T21:34:00Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -15,3 +15,7 @@ Depends on: **Q30 (open)**; recommendation (a) remove. If (b), fold into the pub
 
 - [ ] Remove the route (and the mingo `appoint` call; mingo-side note)
 - [ ] Acceptance (un-ignore / retarget): matrix `public_mode_dnssec_capture_refuses_a_foreign_origin`, `public_mode_flood_on_dnssec_hits_429`
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).

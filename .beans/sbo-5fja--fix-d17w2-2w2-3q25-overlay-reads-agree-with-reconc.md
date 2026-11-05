@@ -1,11 +1,11 @@
 ---
 # sbo-5fja
 title: 'Fix D17/W2-2/W2-3/Q25: overlay reads agree with reconcile on a missing HLC; tip validation sees pending policies'
-status: draft
+status: todo
 type: bug
 priority: normal
 created_at: 2026-11-04T21:32:42Z
-updated_at: 2026-11-04T21:32:42Z
+updated_at: 2026-11-05T08:40:30Z
 parent: sbo-ax7t
 ---
 
@@ -16,3 +16,7 @@ Depends on: **Q25 (open)**; recommendation (a).
 - [ ] Align `overlay_wins` with `pending_still_wins`
 - [ ] `Overlay::resolve_policy` resolves through the overlay (or documents that tip validation is confirmed-only and the read says so)
 - [ ] Acceptance: WS2 LWW-06..08 and POL-01 out of the daemon runner's `EXPECTED_FAIL`; ws4 `d17_overlay_and_reconcile_disagree_on_missing_hlc` inverts
+
+## Decision
+
+Decided as recommended (Dan, 2026-11-05; see docs/security-audit-2026-11-decisions.md).
