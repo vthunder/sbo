@@ -1,90 +1,104 @@
 //! Fast-sync client bootstrap (State Commitment §Bootstrap and Fast-Sync).
 //!
-//! Fetch a snapshot + a trusted checkpoint root from a serving node, verify the
-//! snapshot reconstructs that root, and load it into a state DB — reaching a
-//! recent height without replaying from genesis. Trust is selectable: an on-chain
-//! `checkpoint.v1` object (authority-signed) when the node advertises one at the
-//! snapshot's height, else the serving node's own advertised root (trust-the-node).
-
+//! Fetch a snapshot from a serving node, verify it reconstructs a root, and
+//! load it into a state DB — reaching a recent height without replaying from
+//! genesis. **The serving node is never a trust root** (audit 2026-11 D26/D27,
+//! Q12 (a)): a checkpoint root counts only when a `checkpoint.v1` object
+//! **signed by a pinned key** is read and verified — either carried in the
+//! manifest (and re-verified here by signature) or observed on the DA chain
+//! during walk-forward replay ([`crate::trust`]). The checkpoint authority is
+//! not a name: it is simply one of the pinned public keys in the client's
+//! [`TrustPolicy`] (D34).
+//!
+//! Three outcomes, in order of preference:
+//! - [`RootTrust::SignedCheckpoints`]: the manifest carried signed checkpoint
+//!   objects for the chosen height and `threshold` distinct pinned keys verified
+//!   — trusted immediately, no gating.
+//! - [`RootTrust::Provisional`]: the snapshot was loaded against its own
+//!   computed root only; the caller persists a [`crate::trust::PendingAnchor`]
+//!   and reads stay gated until the walk-forward observes enough pinned claims.
+//! - [`RootTrust::ServingNode`]: the node's own advertised root, only through
+//!   [`bootstrap_trust_serving_node`] (explicit `--trust-serving-node`).
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 
 use sbo_core::state::{StateDb, StoredObject};
 
 use crate::http::SyncPointsView;
 use crate::snapshot;
+use crate::trust::{claim_from_message, ClaimKind, ObservedClaim};
 
-/// The author id of the checkpoint authority's `checkpoint.v1` claim. In the
-/// unified trust model (State Commitment §Trust Mechanisms) the authority
-/// checkpoint is just one signed `(block, root)` claim; a client's [`TrustPolicy`]
-/// includes this id to count it. `{attestors:[SYS_AUTHORITY], threshold:1}`
-/// reproduces the legacy "trust the on-chain checkpoint" behaviour. This is the
-/// deployment's checkpoint-authority identity — `sys-checkpointer` in the default
-/// mingo genesis (the `sys`-delegated checkpoint key, not `sys` itself).
-pub const SYS_AUTHORITY: &str = "sys-checkpointer";
-
-/// A client's local trust policy over signed `(block, state_root)` claims. The
-/// root is accepted once `threshold` distinct trusted attestors (the authority
-/// checkpoint counting as [`SYS_AUTHORITY`]) agree on it.
-#[derive(Debug, Clone)]
-pub struct TrustPolicy {
-    pub attestors: Vec<String>,
-    pub threshold: usize,
-}
-
-impl Default for TrustPolicy {
-    /// Legacy behaviour: trust the on-chain checkpoint authority alone.
-    fn default() -> Self {
-        Self { attestors: vec![SYS_AUTHORITY.to_string()], threshold: 1 }
-    }
-}
+/// The one trust policy, shared with the walk-forward gate: pinned attestor
+/// **public keys** and a threshold. There is no name-based authority (D34).
+pub use crate::trust::TrustPolicy;
 
 /// How the root a snapshot was verified against was obtained — i.e. what the
 /// bootstrap ultimately trusts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootTrust {
-    /// The authority `checkpoint.v1` alone backed the root (policy `{[sys],1}`).
-    OnChainCheckpoint,
-    /// `n` distinct trusted attestors agreed on the root (web-of-trust).
-    Attested { backers: usize },
-    /// The serving node's advertised snapshot root (trust that node).
+    /// `backers` distinct pinned keys signed `checkpoint.v1` objects for this
+    /// `(block, root)`, carried in the manifest and re-verified by signature.
+    SignedCheckpoints { backers: usize },
+    /// Loaded against its own computed root only; NOT trusted until the
+    /// walk-forward observes `threshold` pinned claims (reads gated meanwhile).
+    Provisional,
+    /// The serving node's advertised root, trusted explicitly by the operator.
     ServingNode,
 }
 
-/// Count how many of `policy`'s trusted attestors back `root` at `block`: the
-/// authority checkpoint counts as [`SYS_AUTHORITY`], plus each matching on-chain
-/// attestation. Returns the distinct backer count, or `None` if `< threshold`.
+/// Count how many distinct pinned keys in `policy` back `(block, root)` among
+/// `claims` — signed `checkpoint.v1` / `checkpoint-attestation.v1` objects whose
+/// signatures were already verified by the caller. Returns the distinct backer
+/// count, or `None` if below `threshold`. A non-enforcing policy (no pinned
+/// keys or threshold 0) backs nothing: with no signature there is no trust.
 pub fn evaluate_trust(
     policy: &TrustPolicy,
     block: u64,
     checkpoint_root: &str,
-    attestations: &[crate::http::AttestationView],
+    claims: &[ObservedClaim],
 ) -> Option<usize> {
     use std::collections::HashSet;
-    let trusted: HashSet<&str> = policy.attestors.iter().map(|s| s.as_str()).collect();
-    let mut backers: HashSet<&str> = HashSet::new();
-    if trusted.contains(SYS_AUTHORITY) {
-        backers.insert(SYS_AUTHORITY);
+    if !policy.is_enforcing() {
+        return None;
     }
-    for a in attestations {
-        if a.block == block
-            && roots_equal(&a.state_root, checkpoint_root)
-            && trusted.contains(a.attestor.as_str())
-        {
-            backers.insert(a.attestor.as_str());
+    let root = crate::trust::parse_state_root(checkpoint_root)?;
+    let mut backers: HashSet<String> = HashSet::new();
+    for c in claims {
+        if c.block == block && c.state_root == root && policy.attestors.iter().any(|k| *k == c.signing_key) {
+            backers.insert(c.signing_key.to_string());
         }
     }
     (backers.len() >= policy.threshold).then_some(backers.len())
 }
 
-/// Two wire-form roots name the same value: `sha256:<hex>` and bare hex
-/// compare equal by bytes (Q34 migration); anything unparseable compares as
-/// the literal string.
-fn roots_equal(a: &str, b: &str) -> bool {
-    match (crate::trust::parse_state_root(a), crate::trust::parse_state_root(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => a == b,
+/// The signed claims a manifest carries: each `checkpoints[].wire` is parsed,
+/// its signature verified, and accepted as a claim only if it is a
+/// `checkpoint.v1` at `/sys/checkpoints/<id>` signed by a pinned key. Entries
+/// without a wire, or that fail any check, yield nothing — a bare
+/// `(block, state_root)` in the manifest is never a claim.
+pub fn verified_manifest_claims(manifest: &SyncPointsView, policy: &TrustPolicy) -> Vec<ObservedClaim> {
+    let mut out = Vec::new();
+    for cp in &manifest.checkpoints {
+        let Some(wire_b64) = cp.wire.as_deref() else { continue };
+        let Ok(wire) = base64::engine::general_purpose::STANDARD.decode(wire_b64) else { continue };
+        let Ok(msg) = sbo_core::wire::parse(&wire) else { continue };
+        if sbo_core::message::verify_message(&msg).is_err() {
+            continue;
+        }
+        if msg.path.to_string() != "/sys/checkpoints/" || msg.id.as_str() != cp.id {
+            continue;
+        }
+        let Some(claim) = claim_from_message(&msg) else { continue };
+        if claim.kind != ClaimKind::Checkpoint || claim.block != cp.block {
+            continue;
+        }
+        if !policy.attestors.iter().any(|k| *k == claim.signing_key) {
+            continue;
+        }
+        out.push(claim);
     }
+    out
 }
 
 #[derive(Debug)]
@@ -120,6 +134,14 @@ pub fn verify_and_load(
 /// `policy.v2` objects, and the still-pinned historical policy versions + their
 /// pin refcounts (P2, cf mingo-cy17) so the fast-synced node can authorize
 /// writes under a pinned child.
+///
+/// Pinned policy versions are **reconstructed from covered objects** (audit
+/// 2026-11 D27, Q12 (a)): an entry `(hash, _)` is loaded only from a snapshot
+/// object (hence covered by the verified root) whose `content_hash` is that
+/// hash, parsed from that object's own payload; the policy value the payload
+/// carries is never trusted. An entry no covered object backs is dropped (a
+/// pin whose version is no longer in state cannot be verified from a snapshot
+/// and is left for a full replay).
 pub fn verify_and_load_payload(
     db: &StateDb,
     payload: &snapshot::SnapshotPayload,
@@ -135,14 +157,21 @@ pub fn verify_and_load_payload(
         ));
     }
 
-    // Load the retained historical policy versions, verifying each blob against
-    // its claimed content-hash so a forged auxiliary payload cannot slip in.
     use std::collections::HashMap;
     let mut versions: HashMap<String, sbo_core::policy::Policy> = HashMap::new();
-    for (hash, policy) in &payload.policy_versions {
-        db.put_policy_version(hash, policy)
+    for (hash, _untrusted) in &payload.policy_versions {
+        let covered = objects
+            .iter()
+            .find(|o| o.content_schema.as_deref() == Some("policy.v2") && o.content_hash.to_string() == *hash);
+        let Some(obj) = covered else {
+            tracing::warn!("snapshot policy version {hash} is not backed by a covered object — dropped");
+            continue;
+        };
+        let policy: sbo_core::policy::Policy = serde_json::from_slice(&obj.payload)
+            .map_err(|e| anyhow!("covered policy object {}/{} does not parse: {e}", obj.path, obj.id.as_str()))?;
+        db.put_policy_version(hash, &policy)
             .map_err(|e| anyhow!("put_policy_version: {e}"))?;
-        versions.insert(hash.clone(), policy.clone());
+        versions.insert(hash.clone(), policy);
     }
 
     for o in objects {
@@ -268,206 +297,125 @@ pub async fn fetch_snapshot(node_url: &str, block: u64) -> Result<snapshot::Snap
     fetch_snapshot_capped(node_url, block, snapshot::MAX_SNAPSHOT_BYTES).await
 }
 
-/// End-to-end bootstrap into `db` from a serving node: pick the newest snapshot,
-/// determine a trusted root (an on-chain checkpoint at that height if advertised,
-/// else the node's own root), verify the snapshot against it, and load. Returns
-/// the height reached — the caller sets the repo head to it and tails from `head+1`.
-pub async fn bootstrap(db: &StateDb, node_url: &str) -> Result<BootstrapResult> {
-    bootstrap_with_policy(db, node_url, &TrustPolicy::default()).await
-}
-
-/// Provisional fast-sync bootstrap for a client under a **key-pinned** trust
-/// policy (see [`crate::trust`]). The serving node's manifest is treated purely
-/// as a HINT for *which* snapshot height to load — it is NOT trusted to establish
-/// the root. We pick the freshest snapshot that (a) has an advertised checkpoint
-/// and (b) already advertises at least `min_attestations` attestations at that
-/// height, so the walk-forward is guaranteed to encounter the on-chain evidence
-/// below the current tip. The loaded root is verified only against the snapshot
-/// bytes ([`verify_and_load`]); trust is deferred to the on-chain walk-forward.
-///
-/// Returns the anchor `(block, computed_root)`. `trust` is always
-/// [`RootTrust::ServingNode`] here — it reflects that nothing is trusted yet.
-pub async fn bootstrap_provisional(
-    db: &StateDb,
-    node_url: &str,
-    min_attestations: usize,
-) -> Result<BootstrapResult> {
-    let manifest = fetch_manifest(node_url).await?;
-    if manifest.snapshots.is_empty() {
-        return Err(anyhow!("node advertises no snapshots"));
-    }
-
-    // Newest-first: prefer the freshest height that has a checkpoint AND enough
-    // advertised attestations for the walk-forward to reach threshold. Fall back
-    // to the freshest height with a checkpoint, else the freshest snapshot.
-    let att_count = |block: u64| -> usize {
-        manifest.attestations.iter().filter(|a| a.block == block).count()
-    };
-    let with_checkpoint = |block: u64| manifest.checkpoints.iter().any(|c| c.block == block);
-
-    let chosen = manifest
-        .snapshots
-        .iter()
-        .find(|s| with_checkpoint(s.block) && att_count(s.block) >= min_attestations)
-        .or_else(|| manifest.snapshots.iter().find(|s| with_checkpoint(s.block)))
-        .unwrap_or(&manifest.snapshots[0]);
-
-    let block = chosen.block;
-    // Use the advertised checkpoint root if present (matches the on-chain
-    // checkpoint's convention), else the snapshot's own advertised root; either
-    // way `verify_and_load` confirms the snapshot bytes reconstruct it.
-    let root_hex = manifest
-        .checkpoints
-        .iter()
-        .find(|c| c.block == block)
-        .map(|c| c.state_root.clone())
-        .unwrap_or_else(|| chosen.state_root.clone());
-    let trusted_root = hex_to_32(&root_hex)?;
-
-    let payload =
-        fetch_snapshot_capped(node_url, block, chosen.uncompressed_bytes as usize).await?;
-    let object_count = payload.objects.len();
-    verify_and_load_payload(db, &payload, trusted_root)?;
-
-    Ok(BootstrapResult {
-        block,
-        state_root: trusted_root,
-        object_count,
-        trust: RootTrust::ServingNode,
-    })
-}
-
-/// Bootstrap under an explicit [`TrustPolicy`]. Selects the **freshest snapshot
-/// whose checkpoint root already satisfies the policy** (§Checkpoint Attestations
-/// — freshest already-attested), so trust is established immediately with no
-/// wait. Falls back to a trust-the-node bootstrap only for the default sys-only
-/// policy when no checkpoint is published at all.
+/// Bootstrap under a key-pinned [`TrustPolicy`] (must be enforcing). Prefers
+/// the **freshest snapshot whose height is backed by `threshold` pinned keys'
+/// signed checkpoints carried in the manifest** (§Checkpoint Attestations —
+/// freshest already-attested; trusted immediately). Otherwise loads the
+/// freshest snapshot **provisionally**: verified only against its own computed
+/// root, returned as [`RootTrust::Provisional`] for the caller to persist as a
+/// pending anchor that the on-chain walk-forward must confirm before reads
+/// are served. The manifest's roots are hints, never trust.
 pub async fn bootstrap_with_policy(
     db: &StateDb,
     node_url: &str,
     policy: &TrustPolicy,
 ) -> Result<BootstrapResult> {
+    if !policy.is_enforcing() {
+        return Err(anyhow!(
+            "fast-sync needs a key-pinned trust policy ([trust] attestors + threshold); \
+             to trust the serving node's own root explicitly, pass --trust-serving-node"
+        ));
+    }
     let manifest = fetch_manifest(node_url).await?;
     if manifest.snapshots.is_empty() {
         return Err(anyhow!("node advertises no snapshots"));
     }
 
+    // Signed checkpoints the manifest carries, verified here (signature + pinned key).
+    let claims = verified_manifest_claims(&manifest, policy);
+
     // Snapshots are newest-first; take the freshest one whose checkpoint root is
-    // backed by enough trusted attestors.
-    let mut chosen: Option<(u64, String, RootTrust)> = None;
+    // backed by enough pinned keys.
+    let mut chosen: Option<(u64, String, usize)> = None;
     for snap in &manifest.snapshots {
         let Some(cp) = manifest.checkpoints.iter().find(|c| c.block == snap.block) else {
-            continue; // no on-chain root to agree on at this height
+            continue;
         };
-        if let Some(backers) = evaluate_trust(policy, snap.block, &cp.state_root, &manifest.attestations) {
-            let trust = if backers == 1 && policy.attestors == [SYS_AUTHORITY] {
-                RootTrust::OnChainCheckpoint
-            } else {
-                RootTrust::Attested { backers }
-            };
-            chosen = Some((snap.block, cp.state_root.clone(), trust));
+        if let Some(backers) = evaluate_trust(policy, snap.block, &cp.state_root, &claims) {
+            chosen = Some((snap.block, cp.state_root.clone(), backers));
             break;
         }
     }
 
-    let (block, root_hex, trust) = match chosen {
-        Some(c) => c,
-        // No checkpoint satisfies the policy. Only the default sys-only policy may
-        // degrade to trusting the serving node's own root; a stricter policy that
-        // is unmet is an error rather than a silent downgrade.
-        None if policy.attestors == [SYS_AUTHORITY] && policy.threshold <= 1 => {
-            let snap = &manifest.snapshots[0];
-            (snap.block, snap.state_root.clone(), RootTrust::ServingNode)
-        }
-        None => {
-            return Err(anyhow!(
-                "no checkpoint satisfies trust policy (need {} of {:?}) at any advertised snapshot height",
-                policy.threshold,
-                policy.attestors
-            ));
-        }
-    };
+    if let Some((block, root_hex, backers)) = chosen {
+        let trusted_root = hex_to_32(&root_hex)?;
+        let payload = fetch_snapshot(node_url, block).await?;
+        let object_count = payload.objects.len();
+        verify_and_load_payload(db, &payload, trusted_root)?;
+        return Ok(BootstrapResult { block, state_root: trusted_root, object_count, trust: RootTrust::SignedCheckpoints { backers } });
+    }
 
-    let trusted_root = hex_to_32(&root_hex)?;
+    // Provisional: the freshest snapshot (prefer one a checkpoint is listed for,
+    // so the walk-forward is likely to meet on-chain claims for it), verified
+    // against the root computed from its own bytes. Nothing is trusted yet.
+    let with_checkpoint = |block: u64| manifest.checkpoints.iter().any(|c| c.block == block);
+    let snap = manifest
+        .snapshots
+        .iter()
+        .find(|s| with_checkpoint(s.block))
+        .unwrap_or(&manifest.snapshots[0]);
+    let block = snap.block;
     let payload = fetch_snapshot(node_url, block).await?;
+    let computed = snapshot::compute_snapshot_root(&payload.objects);
+    let object_count = payload.objects.len();
+    verify_and_load_payload(db, &payload, computed)?;
+    Ok(BootstrapResult { block, state_root: computed, object_count, trust: RootTrust::Provisional })
+}
+
+/// Trust-the-serving-node bootstrap: adopt the node's freshest advertised
+/// snapshot root as-is. Only for an operator who explicitly chose to trust that
+/// node (`--trust-serving-node`); never the default.
+pub async fn bootstrap_trust_serving_node(db: &StateDb, node_url: &str) -> Result<BootstrapResult> {
+    let manifest = fetch_manifest(node_url).await?;
+    let snap = manifest.snapshots.first().ok_or_else(|| anyhow!("node advertises no snapshots"))?;
+    let trusted_root = hex_to_32(&snap.state_root)?;
+    let payload = fetch_snapshot(node_url, snap.block).await?;
     let object_count = payload.objects.len();
     verify_and_load_payload(db, &payload, trusted_root)?;
-
-    Ok(BootstrapResult {
-        block,
-        state_root: trusted_root,
-        object_count,
-        trust,
-    })
+    Ok(BootstrapResult { block: snap.block, state_root: trusted_root, object_count, trust: RootTrust::ServingNode })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::AttestationView;
+    use sbo_core::crypto::{PublicKey, SigningKey};
 
-    fn att(block: u64, attestor: &str, root: &str) -> AttestationView {
-        AttestationView { block, attestor: attestor.to_string(), state_root: root.to_string() }
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
     }
 
-    // The unified verifier: the authority checkpoint counts as SYS_AUTHORITY, and
-    // the default sys-only policy accepts on the checkpoint alone.
-    #[test]
-    fn default_policy_accepts_on_checkpoint_alone() {
-        let p = TrustPolicy::default();
-        assert_eq!(evaluate_trust(&p, 100, "aa", &[]), Some(1));
+    fn policy(keys: &[&SigningKey], threshold: usize) -> TrustPolicy {
+        TrustPolicy { attestors: keys.iter().map(|k| k.public_key()).collect::<Vec<PublicKey>>(), threshold }
     }
 
-    // Web-of-trust: threshold 2 needs a peer agreeing on the SAME root; a peer on
-    // a different root does not count, and an untrusted attestor is ignored.
-    #[test]
-    fn threshold_counts_only_trusted_agreeing_attestors() {
-        let p = TrustPolicy {
-            attestors: vec![SYS_AUTHORITY.into(), "alice".into(), "bob".into()],
-            threshold: 2,
-        };
-        // sys + alice agree on "aa" → 2 backers, meets threshold.
-        assert_eq!(
-            evaluate_trust(&p, 100, "aa", &[att(100, "alice", "aa")]),
-            Some(2)
-        );
-        // alice attests a DIFFERENT root → only sys backs "aa" → below threshold.
-        assert_eq!(evaluate_trust(&p, 100, "aa", &[att(100, "alice", "bb")]), None);
-        // untrusted attestor "mallory" agreeing doesn't count → only sys → below.
-        assert_eq!(evaluate_trust(&p, 100, "aa", &[att(100, "mallory", "aa")]), None);
-        // wrong block → doesn't count.
-        assert_eq!(evaluate_trust(&p, 100, "aa", &[att(99, "alice", "aa")]), None);
-        // duplicate attestor counted once (still needs a distinct 2nd backer).
-        assert_eq!(
-            evaluate_trust(&p, 100, "aa", &[att(100, "alice", "aa"), att(100, "alice", "aa")]),
-            Some(2)
-        );
+    fn claim(block: u64, root: [u8; 32], k: &SigningKey) -> ObservedClaim {
+        ObservedClaim { kind: ClaimKind::Checkpoint, block, state_root: root, signing_key: k.public_key() }
     }
 
-    // Q34: a prefixed checkpoint root and a bare-hex attestation root agree.
+    // D26: with no signed claim nothing backs a root — not under the default
+    // (open) policy, not under a pinned one.
     #[test]
-    fn prefixed_and_bare_roots_agree() {
-        let p = TrustPolicy { attestors: vec!["alice".into(), "bob".into()], threshold: 2 };
-        let bare = "ab".repeat(32);
-        let prefixed = format!("sha256:{bare}");
-        assert_eq!(
-            evaluate_trust(&p, 5, &prefixed, &[att(5, "alice", &bare), att(5, "bob", &prefixed)]),
-            Some(2)
-        );
-        assert_eq!(evaluate_trust(&p, 5, &prefixed, &[att(5, "alice", &"cd".repeat(32)), att(5, "bob", &bare)]), None);
+    fn nothing_backs_a_root_without_a_signed_claim() {
+        let root = hex::encode([7u8; 32]);
+        assert_eq!(evaluate_trust(&TrustPolicy::default(), 100, &root, &[]), None);
+        assert_eq!(evaluate_trust(&policy(&[&key(1)], 1), 100, &root, &[]), None);
     }
 
-    // A policy that excludes the authority trusts only independent attestors.
+    // Only pinned keys count, only on the same (block, root), each once.
     #[test]
-    fn policy_without_authority_ignores_checkpoint() {
-        let p = TrustPolicy { attestors: vec!["alice".into(), "bob".into()], threshold: 2 };
-        // Only alice → below threshold (checkpoint/sys not trusted).
-        assert_eq!(evaluate_trust(&p, 5, "rr", &[att(5, "alice", "rr")]), None);
-        // alice + bob → meets threshold, authority irrelevant.
-        assert_eq!(
-            evaluate_trust(&p, 5, "rr", &[att(5, "alice", "rr"), att(5, "bob", "rr")]),
-            Some(2)
-        );
+    fn threshold_counts_only_pinned_agreeing_keys() {
+        let (a, b, mallory) = (key(1), key(2), key(9));
+        let root = [7u8; 32];
+        let hexroot = hex::encode(root);
+        let p = policy(&[&a, &b], 2);
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a), claim(100, root, &b)]), Some(2));
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a)]), None);
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a), claim(100, root, &a)]), None);
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a), claim(100, [8u8; 32], &b)]), None);
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a), claim(99, root, &b)]), None);
+        assert_eq!(evaluate_trust(&p, 100, &hexroot, &[claim(100, root, &a), claim(100, root, &mallory)]), None);
+        // A `sha256:`-prefixed root hex (checkpoint object convention) is accepted.
+        assert_eq!(evaluate_trust(&policy(&[&a], 1), 100, &format!("sha256:{hexroot}"), &[claim(100, root, &a)]), Some(1));
     }
 
     // Bootstrap's core: a snapshot loads only if it reconstructs the trusted root,
@@ -514,5 +462,46 @@ mod tests {
         let dst2_db = StateDb::open(dst2.path()).unwrap();
         assert!(verify_and_load(&dst2_db, &objects, [0u8; 32]).is_err());
         assert!(dst2_db.list_objects_by_path_prefix("/").unwrap().is_empty());
+    }
+
+    // D27: a policy version loads only from a covered object with that content
+    // hash, parsed from the object's payload — not from the payload's claim.
+    #[test]
+    fn policy_versions_are_reconstructed_from_covered_objects() {
+        let honest = br#"{"grants":[{"to":"owner","can":["update"],"on":"/c/**"}]}"#;
+        let obj = StoredObject {
+            path: sbo_core::message::Path::parse("/c/").unwrap(),
+            id: sbo_core::message::Id::new("root").unwrap(),
+            creator: sbo_core::message::Id::new("sys").unwrap(),
+            owner: sbo_core::message::Id::new("sys").unwrap(),
+            content_type: "application/json".into(),
+            content_hash: sbo_core::crypto::ContentHash::sha256(honest),
+            payload: honest.to_vec(),
+            policy_ref: None, related: None,
+            content_schema: Some("policy.v2".into()),
+            owner_ref: None,
+            block_number: 5,
+            object_hash: [3u8; 32],
+            hlc: None,
+            prev: None,
+        };
+        let hash = obj.content_hash.to_string();
+        let objects = vec![obj];
+        let root = snapshot::compute_snapshot_root(&objects);
+        let forged: sbo_core::policy::Policy =
+            serde_json::from_value(serde_json::json!({"grants": [{"to": "*", "can": ["*"], "on": "/**"}]})).unwrap();
+        let payload = snapshot::SnapshotPayload {
+            objects,
+            policy_versions: vec![(hash.clone(), forged.clone()), ("sha256:not-the-hash".into(), forged.clone())],
+        };
+        let dst = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dst.path()).unwrap();
+        verify_and_load_payload(&db, &payload, root).unwrap();
+        // The covered hash loads the OBJECT's policy, not the forged claim.
+        let loaded = db.get_policy_version(&hash).unwrap().unwrap();
+        let expected: sbo_core::policy::Policy = serde_json::from_slice(honest).unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_ne!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&forged).unwrap());
+        assert!(db.get_policy_version("sha256:not-the-hash").unwrap().is_none());
     }
 }

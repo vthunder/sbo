@@ -784,6 +784,17 @@ impl SyncEngine {
                         // here and emit evidence regardless of the L2 outcome below.
                         if let Some(claim) = crate::trust::claim_from_message(msg) {
                             if sbo_core::message::verify_message(msg).is_ok() {
+                                // Keep the signed checkpoint wire so this node's
+                                // sync-point manifest can carry it (D26).
+                                if claim.kind == crate::trust::ClaimKind::Checkpoint {
+                                    if let Err(e) = crate::trust::save_checkpoint_wire(
+                                        &resolved_uri,
+                                        msg.id.as_str(),
+                                        &sbo_core::wire::serialize(msg),
+                                    ) {
+                                        tracing::warn!("could not retain checkpoint wire {}: {e}", msg.id.as_str());
+                                    }
+                                }
                                 trust_evidence.push(claim);
                             }
                         }

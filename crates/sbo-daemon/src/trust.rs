@@ -39,9 +39,18 @@ pub struct TrustPolicy {
     pub threshold: usize,
 }
 
+impl Default for TrustPolicy {
+    /// No pinned keys: an open (non-enforcing) policy. It backs nothing in
+    /// [`crate::bootstrap::evaluate_trust`] and gates nothing in [`TrustGate`].
+    fn default() -> Self {
+        Self::open()
+    }
+}
+
 impl TrustPolicy {
-    /// A policy that gates nothing: no pinned attestors. A fast-sync client with
-    /// no `[trust]` config keeps the legacy trust-the-serving-node behaviour.
+    /// A policy that gates nothing: no pinned attestors. A full-replay node needs
+    /// none; a fast-sync client without one cannot bootstrap except by explicitly
+    /// trusting the serving node (`--trust-serving-node`).
     pub fn open() -> Self {
         Self { attestors: Vec::new(), threshold: 0 }
     }
@@ -118,6 +127,28 @@ pub fn parse_state_root(s: &str) -> Option<[u8; 32]> {
 /// The spec wire form of a state root: `sha256:<hex>`.
 pub fn format_state_root(root: &[u8; 32]) -> String {
     format!("sha256:{}", hex::encode(root))
+}
+
+/// Where a serving node keeps the raw signed wire of every `checkpoint.v1` it
+/// observed on chain (`<repo dir>/checkpoints/<id>.wire`), so its sync-point
+/// manifest can carry the signed objects and a bootstrapping client can
+/// re-verify them by signature instead of trusting the manifest's bare
+/// `(block, state_root)` (audit 2026-11 D26).
+pub fn checkpoint_wire_dir(repo_uri: &str) -> PathBuf {
+    crate::repo_dir_for_uri(repo_uri).join("checkpoints")
+}
+
+/// Persist a verified checkpoint message's wire bytes for the manifest.
+pub fn save_checkpoint_wire(repo_uri: &str, id: &str, wire: &[u8]) -> Result<()> {
+    let dir = checkpoint_wire_dir(repo_uri);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{id}.wire"));
+    std::fs::write(&path, wire).with_context(|| format!("write {}", path.display()))
+}
+
+/// Load a persisted checkpoint wire, if any.
+pub fn load_checkpoint_wire(repo_uri: &str, id: &str) -> Option<Vec<u8>> {
+    std::fs::read(checkpoint_wire_dir(repo_uri).join(format!("{id}.wire"))).ok()
 }
 
 /// The anchor a fast-sync client loaded provisionally and must verify on chain

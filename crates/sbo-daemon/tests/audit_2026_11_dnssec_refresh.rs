@@ -97,6 +97,7 @@ fn post(key: &SigningKey, path: &str, id: &str, schema: &str, content_type: &str
         auth_cert: None,
         auth_evidence: None,
         auth_warrant: None,
+        extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg

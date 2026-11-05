@@ -3,7 +3,7 @@
 //! All offline, over synthetic chains from `sbo_core::dnssec_fixture`.
 
 use sbo_core::crypto::{ContentHash, Signature, SigningKey};
-use sbo_core::dnssec_fixture::{browserid_txt_for_sbo_key, ChainSpec, SyntheticRoot, ZoneKey};
+use sbo_core::dnssec_fixture::{browserid_txt_for_sbo_key, SyntheticRoot};
 use sbo_core::message::{Action, Id, Message, ObjectType, Path};
 use sbo_core::policy::Policy;
 use sbo_core::state::{StateDb, StoredObject};

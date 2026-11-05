@@ -502,12 +502,10 @@ fn d17_overlay_and_reconcile_disagree_on_missing_hlc() {
 
 // ───────────────────────────── D26 / D27 / D34 / D15: fast-sync trust ─────────────────────────────
 
-/// AUDIT-2026-11 D26: fails today. `evaluate_trust` under the default policy
-/// counts the checkpoint authority as a backer of ANY root at ANY height with
-/// no signed `checkpoint.v1` ever read, so a serving node's forged manifest
-/// root is "trusted" with one backer.
+/// AUDIT-2026-11 D26 (fixed, `sbo-syib`): `evaluate_trust` counts only
+/// signed `checkpoint.v1` claims by pinned keys; with none read, no policy —
+/// the default included — backs a root a serving node merely asserts.
 #[test]
-#[ignore]
 fn d26_authority_does_not_back_a_root_without_a_signed_checkpoint() {
     use sbo_daemon::bootstrap::{evaluate_trust, TrustPolicy};
     let forged = "ff".repeat(32);
@@ -518,11 +516,10 @@ fn d26_authority_does_not_back_a_root_without_a_signed_checkpoint() {
     );
 }
 
-/// AUDIT-2026-11 D27: fails today. Snapshot `policy_versions` are loaded as
-/// given, outside the trie-root check and without checking that the key is the
-/// policy's content hash. A forged pinned version rewrites frozen governance.
+/// AUDIT-2026-11 D27 (fixed, `sbo-syib`): snapshot `policy_versions` are
+/// reconstructed from covered objects whose content hash is the key; a forged
+/// entry nothing covered backs is never loaded.
 #[test]
-#[ignore]
 fn d27_snapshot_policy_versions_are_verified_against_their_hash() {
     use sbo_daemon::bootstrap::verify_and_load_payload;
     use sbo_daemon::snapshot::{compute_snapshot_root, SnapshotPayload};
@@ -545,12 +542,13 @@ fn d27_snapshot_policy_versions_are_verified_against_their_hash() {
     assert!(res.is_err() || loaded.is_none(), "a policy version whose key is not its content hash must not load");
 }
 
-/// Passes today (pins D34, Low): the legacy bootstrap names the authority by
-/// the string `sys-checkpointer`, while the trustless gate pins public keys and
-/// rejects that string, so the two trust models cannot share a config value.
+/// AUDIT-2026-11 D34 (inverted by `sbo-syib`): bootstrap and the walk-forward
+/// gate share ONE key-pinned `TrustPolicy`; there is no name-based authority,
+/// and a name is not a pinnable key.
 #[test]
 fn d34_legacy_authority_name_is_not_a_pinnable_key() {
-    assert_eq!(sbo_daemon::bootstrap::SYS_AUTHORITY, "sys-checkpointer");
+    let shared: sbo_daemon::trust::TrustPolicy = sbo_daemon::bootstrap::TrustPolicy::default();
+    assert!(!shared.is_enforcing(), "the default policy pins nothing and therefore trusts nothing");
     assert!(sbo_daemon::trust::TrustPolicy::from_config(&["sys-checkpointer".to_string()], 1).is_err());
 }
 

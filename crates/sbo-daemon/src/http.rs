@@ -188,6 +188,12 @@ pub struct CheckpointView {
     pub id: String,
     pub block: u64,
     pub state_root: String,
+    /// The on-chain `checkpoint.v1` object's signed wire bytes (base64), when
+    /// the node retained them. A bootstrapping client re-verifies the signature
+    /// against its pinned keys; without it this entry is a bare hint and backs
+    /// nothing (audit 2026-11 D26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<String>,
 }
 
 /// Result of a successful DA submission. The write was validated against

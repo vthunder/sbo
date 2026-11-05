@@ -1874,10 +1874,16 @@ mod dnssec_repro_tests {
         }
     }
 
-    // P2 — a snapshot round-trip carries the pinned historical version, so a
-    // fast-synced node authorizes a write under the pinned child.
+    // P2 under fast-sync after AUDIT-2026-11 D27 (Q12 (a), `sbo-syib`): a
+    // snapshot's `policy_versions` are reconstructed from covered objects only,
+    // so a pinned version whose ancestor has since moved on is NOT carried — the
+    // fast-synced node fails closed (denies the pinned child's governed write)
+    // instead of trusting the serving node's copy of frozen governance. This
+    // test used to assert the opposite (an unverified carry); a full replay, or
+    // a future snapshot format carrying the raw pinned payload bytes, restores
+    // the authorization.
     #[test]
-    fn p2_snapshot_roundtrip_authorizes_pinned_child() {
+    fn p2_snapshot_roundtrip_drops_uncovered_pinned_version() {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
@@ -1900,14 +1906,18 @@ mod dnssec_repro_tests {
         let db2 = StateDb::open(dir2.path()).unwrap();
         crate::bootstrap::verify_and_load_payload(&db2, &payload, root).unwrap();
 
-        // On the fast-synced node the board updates the pinned community policy → authorized.
+        // The pinned V1 is no longer a covered object (root moved on), so the
+        // fast-synced node does not carry it …
+        assert!(db2.get_policy_version(&comm.pin.as_ref().unwrap().hash).unwrap().is_none());
+        // … and the board's governed update under the pinned child is denied
+        // (fail closed), not authorized from an unverifiable version.
         let comm2 = community_policy(comm.pin.clone());
         let l2 = L2Context::for_block(Some(1_700_000_000), &db2);
         let update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm2).unwrap());
-        assert!(
-            matches!(validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
-            "fast-synced node must authorize a write under a pinned child using the snapshotted version"
-        );
+        match validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
+            ValidationResult::Valid { .. } => panic!("an uncovered pinned version must not authorize on a fast-synced node"),
+        }
     }
 
     // P3 — a child grant exceeding the parent's descendant-constraint template is

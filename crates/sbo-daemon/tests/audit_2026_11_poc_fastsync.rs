@@ -3,14 +3,15 @@
 //!
 //! Loopback only: an in-process axum server plays the hostile serving node and
 //! answers `/v1/sync-points` and `/v1/snapshot` with a snapshot the attacker
-//! built. No production host, no Avail, fake keys. `#[ignore]`d; run with
-//! `cargo test -p sbo-daemon --test audit_2026_11_poc_fastsync -- --ignored`.
-//! Backs `docs/security-audit-2026-11-ws8-pocs.md`.
+//! built. No production host, no Avail, fake keys. Backs
+//! `docs/security-audit-2026-11-ws8-pocs.md`. **Inverted by `sbo-syib`**: each
+//! PoC now asserts the hole is closed, and runs in CI.
 
 use sbo_core::crypto::ContentHash;
 use sbo_core::message::{Id, Path};
 use sbo_core::policy::Policy;
 use sbo_core::state::{StateDb, StoredObject};
+use sbo_core::crypto::SigningKey;
 use sbo_daemon::bootstrap::{evaluate_trust, RootTrust, TrustPolicy};
 use sbo_daemon::snapshot::{compute_snapshot_root, SnapshotMeta, SnapshotPayload};
 use tempfile::tempdir;
@@ -35,20 +36,15 @@ fn obj(path: &str, id: &str, hash: u8, schema: Option<&str>, payload: &[u8]) -> 
     }
 }
 
-/// D26: under the DEFAULT trust policy `{[sys-checkpointer], 1}`, a root the
-/// serving node simply asserts counts as backed by the authority with no signed
-/// `checkpoint.v1` ever read. `evaluate_trust` returns `Some(1)` for a root the
-/// attacker invented at an arbitrary height.
+/// D26 (inverted): a root the serving node simply asserts, with no signed
+/// `checkpoint.v1` read, is backed by nobody — under the default policy and
+/// under a pinned one alike.
 #[test]
-#[ignore] // AUDIT-2026-11 D26 PoC: the authority "backs" any root with no signature
-fn poc_d26_authority_backs_a_forged_root_with_no_checkpoint() {
+fn poc_d26_forged_root_with_no_checkpoint_is_backed_by_nobody() {
     let forged_root = "de".repeat(32);
-    let backers = evaluate_trust(&TrustPolicy::default(), 999_999, &forged_root, &[]);
-    assert_eq!(
-        backers,
-        Some(1),
-        "PoC FAILED TO REPRODUCE — the authority did not back the forged root",
-    );
+    assert_eq!(evaluate_trust(&TrustPolicy::default(), 999_999, &forged_root, &[]), None);
+    let pinned = TrustPolicy { attestors: vec![SigningKey::generate().public_key()], threshold: 1 };
+    assert_eq!(evaluate_trust(&pinned, 999_999, &forged_root, &[]), None, "D26 REGRESSION — a forged root was backed");
 }
 
 /// D27: a fast-sync client loads `policy_versions` from the snapshot payload
@@ -60,8 +56,7 @@ fn poc_d26_authority_backs_a_forged_root_with_no_checkpoint() {
 /// passes), then attach a forged `(hash, all-grants-policy)` version whose key
 /// is NOT that policy's content hash, and load it with `verify_and_load_payload`.
 #[test]
-#[ignore] // AUDIT-2026-11 D27 PoC: forged pinned policy versions load unverified
-fn poc_d27_forged_policy_version_loads_into_a_fast_sync_client() {
+fn poc_d27_forged_policy_version_does_not_load_into_a_fast_sync_client() {
     // The honest object set and its true root.
     let objects = vec![
         obj("/communities/cooks/", "community", 7, Some("x.v1"), b"{}"),
@@ -86,61 +81,18 @@ fn poc_d27_forged_policy_version_loads_into_a_fast_sync_client() {
     let db = StateDb::open(dst.path()).unwrap();
     let res = sbo_daemon::bootstrap::verify_and_load_payload(&db, &payload, root);
 
-    // Today: the snapshot root matches (objects are honest), so the load
-    // succeeds AND the forged version is stored under the pinned hash.
+    // The snapshot root matches (objects are honest) so the load succeeds, but
+    // the forged version — backed by no covered object — is dropped.
     assert!(res.is_ok(), "snapshot root check unexpectedly failed: {res:?}");
-    let loaded = db.get_policy_version(pinned_hash).unwrap();
-    let loaded_json = loaded.map(|p| serde_json::to_string(&p).unwrap());
-    let forged_json = serde_json::to_string(&forged).unwrap();
-    assert_eq!(
-        loaded_json.as_deref(),
-        Some(forged_json.as_str()),
-        "PoC FAILED TO REPRODUCE — the forged policy version did not load",
+    assert!(
+        db.get_policy_version(pinned_hash).unwrap().is_none(),
+        "D27 REGRESSION — a forged policy version loaded under the pinned hash",
     );
 }
 
-/// D26 end-to-end shape: a hostile in-process node serves a manifest whose
-/// snapshot reconstructs the root it advertises, and the default policy adopts
-/// it as `OnChainCheckpoint` with no on-chain checkpoint object in sight. Proves
-/// the serving node alone determines what a defaulted client trusts.
-#[tokio::test]
-#[ignore] // AUDIT-2026-11 D26 PoC: a hostile node's root is adopted end to end
-async fn poc_d26_hostile_node_root_adopted_end_to_end() {
+/// Serve `manifest` + `gz` from an in-process node; returns its base URL.
+async fn serve(manifest: sbo_daemon::http::SyncPointsView, gz: Vec<u8>) -> String {
     use axum::routing::get;
-
-    let objects = vec![obj("/x/", "a", 1, None, b"{}")];
-    let root_hex = hex::encode(compute_snapshot_root(&objects));
-    let payload = SnapshotPayload { objects, policy_versions: vec![] };
-
-    // gzip the payload as the real snapshot endpoint does.
-    let gz = {
-        use std::io::Write;
-        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        e.write_all(&serde_json::to_vec(&payload).unwrap()).unwrap();
-        e.finish().unwrap()
-    };
-
-    let manifest = sbo_daemon::http::SyncPointsView {
-        format: "sbo-syncpoints/1".into(),
-        genesis: sbo_daemon::http::GenesisView { first_block: Some(1), genesis_hash: None },
-        head: 100,
-        latest_state_root: sbo_daemon::http::StateRootView { block: 100, state_root: root_hex.clone() },
-        snapshots: vec![SnapshotMeta {
-            format: "sbo-snapshot/2".into(),
-            block: 100,
-            state_root: root_hex.clone(),
-            object_count: 1,
-            created_at: 0,
-            uncompressed_bytes: 0,
-            compressed_bytes: gz.len() as u64,
-            content_sha256: hex::encode(sbo_core::sha256(&gz)),
-            file: "snapshot-100.json.gz".into(),
-        }],
-        // No on-chain checkpoint object at all — the node just asserts the root.
-        checkpoints: vec![],
-        attestations: vec![],
-    };
-
     let manifest_json = serde_json::to_string(&manifest).unwrap();
     let app = axum::Router::new()
         .route("/v1/sync-points", get(move || {
@@ -154,20 +106,129 @@ async fn poc_d26_hostile_node_root_adopted_end_to_end() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+fn gzip(payload: &SnapshotPayload) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(&serde_json::to_vec(payload).unwrap()).unwrap();
+    e.finish().unwrap()
+}
+
+fn manifest(root_hex: &str, gz_len: usize, checkpoints: Vec<sbo_daemon::http::CheckpointView>) -> sbo_daemon::http::SyncPointsView {
+    sbo_daemon::http::SyncPointsView {
+        format: "sbo-syncpoints/1".into(),
+        genesis: sbo_daemon::http::GenesisView { first_block: Some(1), genesis_hash: None },
+        head: 100,
+        latest_state_root: sbo_daemon::http::StateRootView { block: 100, state_root: root_hex.to_string() },
+        snapshots: vec![SnapshotMeta {
+            format: "sbo-snapshot/2".into(),
+            block: 100,
+            state_root: root_hex.to_string(),
+            object_count: 1,
+            created_at: 0,
+            uncompressed_bytes: 0,
+            compressed_bytes: gz_len as u64,
+            content_sha256: String::new(),
+            file: "snapshot-100.json.gz".into(),
+        }],
+        checkpoints,
+        attestations: vec![],
+    }
+}
+
+/// A signed `checkpoint.v1` for `(block, root)` as base64 wire.
+fn checkpoint_wire(signer: &SigningKey, block: u64, root_hex: &str) -> String {
+    use base64::Engine as _;
+    use sbo_core::crypto::{ContentHash, Signature};
+    use sbo_core::message::{Action, Message, ObjectType};
+    let payload = serde_json::to_vec(&serde_json::json!({ "block": block, "state_root": root_hex })).unwrap();
+    let mut msg = Message {
+        action: Action::Post,
+        path: Path::parse("/sys/checkpoints/").unwrap(),
+        id: Id::new(&format!("block-{block}")).unwrap(),
+        object_type: ObjectType::Object,
+        signing_key: signer.public_key(),
+        signature: Signature([0u8; 64]),
+        content_type: Some("application/json".into()),
+        content_hash: Some(ContentHash::sha256(&payload)),
+        payload: Some(payload),
+        owner: None,
+        creator: None,
+        content_encoding: None,
+        content_schema: Some("checkpoint.v1".into()),
+        policy_ref: None,
+        related: None,
+        hlc: None,
+        prev: None,
+        auth_cert: None,
+        auth_evidence: None,
+        auth_warrant: None,
+        extra_headers: Vec::new(),
+    };
+    msg.sign(signer);
+    base64::engine::general_purpose::STANDARD.encode(sbo_core::wire::serialize(&msg))
+}
+
+/// D26 end-to-end (inverted): a hostile in-process node serves a manifest whose
+/// snapshot reconstructs the root it advertises, with no signed checkpoint. A
+/// client with no pinned keys cannot bootstrap at all (only the explicit
+/// `--trust-serving-node` path adopts that root); a client with pinned keys
+/// loads it only PROVISIONALLY — gated until the on-chain walk-forward confirms.
+#[tokio::test]
+async fn poc_d26_hostile_node_root_is_not_adopted_end_to_end() {
+    let objects = vec![obj("/x/", "a", 1, None, b"{}")];
+    let root_hex = hex::encode(compute_snapshot_root(&objects));
+    let payload = SnapshotPayload { objects, policy_versions: vec![] };
+    let gz = gzip(&payload);
+    // No on-chain checkpoint object at all — the node just asserts the root.
+    let node = serve(manifest(&root_hex, gz.len(), vec![]), gz).await;
 
     let dst = tempdir().unwrap();
     let db = StateDb::open(dst.path()).unwrap();
-    let res = sbo_daemon::bootstrap::bootstrap(&db, &format!("http://{addr}")).await;
+    let err = sbo_daemon::bootstrap::bootstrap_with_policy(&db, &node, &TrustPolicy::default()).await.unwrap_err();
+    assert!(err.to_string().contains("trust-serving-node"), "{err}");
+    assert!(db.list_objects_by_path_prefix("/").unwrap().is_empty(), "nothing loaded without a policy");
 
-    let out = res.expect("PoC FAILED TO REPRODUCE — bootstrap from the hostile node errored");
-    assert_eq!(out.block, 100);
-    // The client adopted the node's asserted root, loading its objects, with the
-    // authority counted as the lone backer (RootTrust::OnChainCheckpoint) or the
-    // serving-node fallback — either way the serving node chose the state.
-    assert!(
-        matches!(out.trust, RootTrust::OnChainCheckpoint | RootTrust::ServingNode),
-        "unexpected trust basis {:?}",
-        out.trust,
-    );
+    let pinned = TrustPolicy { attestors: vec![SigningKey::generate().public_key()], threshold: 1 };
+    let out = sbo_daemon::bootstrap::bootstrap_with_policy(&db, &node, &pinned).await.unwrap();
+    assert_eq!(out.trust, RootTrust::Provisional, "D26 REGRESSION — the hostile node's root was trusted: {:?}", out.trust);
+
+    // The explicit opt-in is the only way to adopt the node's root as trusted.
+    let dst2 = tempdir().unwrap();
+    let db2 = StateDb::open(dst2.path()).unwrap();
+    let out = sbo_daemon::bootstrap::bootstrap_trust_serving_node(&db2, &node).await.unwrap();
+    assert_eq!(out.trust, RootTrust::ServingNode);
+}
+
+/// D26 positive path: the manifest carries the signed `checkpoint.v1`; the
+/// client re-verifies it and counts it only when the signer is pinned.
+#[tokio::test]
+async fn signed_checkpoint_in_manifest_counts_only_from_a_pinned_key() {
+    let objects = vec![obj("/x/", "a", 1, None, b"{}")];
+    let root_hex = hex::encode(compute_snapshot_root(&objects));
+    let payload = SnapshotPayload { objects, policy_versions: vec![] };
+    let gz = gzip(&payload);
+    let checkpointer = SigningKey::generate();
+    let cp = sbo_daemon::http::CheckpointView {
+        id: "block-100".into(),
+        block: 100,
+        state_root: root_hex.clone(),
+        wire: Some(checkpoint_wire(&checkpointer, 100, &root_hex)),
+    };
+    let node = serve(manifest(&root_hex, gz.len(), vec![cp]), gz).await;
+
+    let pinned = TrustPolicy { attestors: vec![checkpointer.public_key()], threshold: 1 };
+    let dst = tempdir().unwrap();
+    let db = StateDb::open(dst.path()).unwrap();
+    let out = sbo_daemon::bootstrap::bootstrap_with_policy(&db, &node, &pinned).await.unwrap();
+    assert_eq!(out.trust, RootTrust::SignedCheckpoints { backers: 1 });
     assert_eq!(db.list_objects_by_path_prefix("/").unwrap().len(), 1);
+
+    let other = TrustPolicy { attestors: vec![SigningKey::generate().public_key()], threshold: 1 };
+    let dst2 = tempdir().unwrap();
+    let db2 = StateDb::open(dst2.path()).unwrap();
+    let out = sbo_daemon::bootstrap::bootstrap_with_policy(&db2, &node, &other).await.unwrap();
+    assert_eq!(out.trust, RootTrust::Provisional, "an unpinned signer must not count");
 }
