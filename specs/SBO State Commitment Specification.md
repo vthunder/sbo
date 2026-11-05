@@ -13,6 +13,7 @@ Draft
 
 ## Changelog
 
+- **v2 — `state-commitment/v2` (2026-11, audit; root-changing)**: (1) **Domain separation** (D4): a leaf hashes as `sha256(0x00 ‖ object_hash)` and an internal node as `sha256(0x01 ‖ serialized_json)`, so an object hash can never be read as a subtree hash. (2) **Object-versus-container rule** (W3-4): an object at `(path, id)` and a collection whose segments extend `[path…, id]` coexist; a node carries an optional `object` member beside `children`, and nothing is evicted. (3) `object_hash` is over the **bytes as included on chain**, never a reserialization; consumers never reserialize (Q32, Q35). (4) `state_root` on the wire is `sha256:<hex>` everywhere (Q34). Every state root, snapshot root and proof changes; see [Migration from v1](#migration-from-v1). Earlier entries below describe the v0.x line of this document, which is now **v1** of the commitment.
 - **v0.2**: Changed leaf value from `Content-Hash` to `object_hash` (SHA-256 of complete raw SBO bytes). This ensures proofs commit to the full object including headers, not just payload. Added creator as path segment for disambiguation.
 - **v0.2.1**: Specified that the creator path segment is the author's *resolved controller* (attributed email for email-rooted authors), not the signing key — so an author's objects do not fragment across browserid key rotation. Still deterministic (inclusion-time-pinned).
 - **v0.3**: Expanded the checkpoint model into a bootstrap/fast-sync story: publisher-chosen cadence with a RECOMMENDED (not mandated) max-staleness bound; the *exclude-self* root rule; **snapshots** (a compact, self-verifying object-set at a checkpoint height); **checkpoint attestations** (client-chosen web-of-trust over a checkpoint root); and a **sync-point discovery manifest**. All remain optional performance features — canonical state is still replay.
@@ -39,13 +40,15 @@ The **object hash** is the SHA-256 hash of the complete raw SBO object bytes (he
 object_hash = sha256(raw_sbo_bytes)
 ```
 
-Where `raw_sbo_bytes` is the complete wire-format serialization:
+Where `raw_sbo_bytes` is the message **exactly as included on chain** — the bytes of that message within its DA submission (after any transport decoding such as gzip), from the first byte of `SBO-Version` through the last payload byte:
 ```
 HEADER-NAME: HEADER-VALUE\n
 HEADER-NAME: HEADER-VALUE\n
 \n
 [payload bytes]
 ```
+
+**Never a reserialization.** A consumer computes `object_hash` over the bytes it received and parsed, not over a header block rebuilt from a parsed structure. The [Wire Format](./SBO%20Wire%20Format%20Specification.md#consumers-never-reserialize) rule is *bytes in, bytes out*: the signature covers the received header block, an unknown header is valid only if the signer covered it, and a consumer that does not model a header keeps its bytes. Because a message that is not canonical is invalid, the included bytes of every accepted message equal the canonical serialization its signer produced, and two consumers that model different header subsets compute the same `object_hash` by construction. The same rule defines `genesisHash` in the [Genesis Specification](./SBO%20Genesis%20Specification.md#genesishash-bytes).
 
 **Why object_hash instead of Content-Hash?**
 
@@ -72,7 +75,8 @@ The state tree is a **sparse path-segment trie**. Each node represents a path pr
     "segment1": "sha256:...",
     "segment2": "sha256:...",
     ...
-  }
+  },
+  "object": "sha256:..."
 }
 ```
 
@@ -80,11 +84,28 @@ The state tree is a **sparse path-segment trie**. Each node represents a path pr
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `children` | object | Map of segment name to hash |
+| `children` | object | Map of segment name to the **node hash** of the child (present, possibly empty, on every internal node) |
+| `object` | string | The **object hash** of the object whose segments end exactly at this node (present only when such an object exists **and** the node also has children) |
 
-The hash value can reference:
-- Another node (if the path continues deeper)
-- An object's **object hash** (if it's a leaf)
+A child entry's value is always a node hash. Two kinds of node exist:
+
+- A **leaf**: a segment at which an object sits and nothing continues deeper. It has no JSON form; its node hash is the domain-separated object hash (below).
+- An **internal node**: a segment at which the path continues deeper. If an object *also* sits exactly here, the node carries it in `object`.
+
+### Domain Separation
+
+Leaf and internal preimages are distinguished by a one-byte prefix, so that no object hash can be presented as a subtree hash or vice versa:
+
+```
+leaf_hash(object_hash)   = sha256(0x00 ‖ object_hash_bytes)          # 33-byte preimage
+node_hash(node)          = sha256(0x01 ‖ serialize(node))            # 0x01 ‖ canonical JSON
+```
+
+`object_hash_bytes` is the 32 raw bytes of the object hash. A verifier MUST compute both forms exactly; an inclusion proof whose final step treats a 32-byte value as a bare leaf (v1 behaviour) does not verify against a v2 root.
+
+### Object Versus Container
+
+Under `segments = path ++ [id]`, an object `a` at `/x/` (segments `["x","a"]`) and an object `b` at `/x/a/` (segments `["x","a","b"]`) are both legal writes, and `a` is both an object and the container of `b`. The rule is: **both coexist; neither evicts the other.** The node at `["x","a"]` is an internal node with `children = {"b": …}` and `object = leaf-less object hash of a`. Its hash is `node_hash({"children":{"b":…},"object":"sha256:<object_hash(a)>"})`, with the `object` value being the object hash itself (not `leaf_hash`; the `0x01` prefix of the node already separates the domain). Deleting `a` removes `object`; deleting `b` leaves the node with empty `children`, at which point the node **collapses to a leaf** for `a` (hash `leaf_hash(object_hash(a))`). An implementation MUST produce the same root regardless of the order in which `a` and `b` were written.
 
 ### Example Tree
 
@@ -116,7 +137,7 @@ Root node:
 }
 ```
 
-The leaf hashes (`sha256:111...`, etc.) are the **object hashes** (SHA-256 of complete raw bytes) of the objects at those paths.
+The leaf hashes (`sha256:111...`, etc.) are the **leaf hashes** `sha256(0x00 ‖ object_hash)` of the objects at those paths, where `object_hash` is the SHA-256 of the complete bytes as included. (The example writes `sha256:…` for every value; the prefix names the algorithm, not the domain.)
 
 ### Object Identity in the Trie
 
@@ -177,24 +198,30 @@ This design:
 
 Nodes are serialized deterministically for hashing:
 
-1. JSON object with single key `"children"`
-2. Children keys sorted lexicographically
+1. JSON object with key `"children"`, followed by `"object"` only when an object sits at this node (keys in that order: `children`, `object`)
+2. Children keys sorted by byte value (ASCII; segments are ASCII-only, see Core §Identifier Syntax)
 3. No whitespace
 4. UTF-8 encoded
+5. Hash values written as `sha256:<64 lowercase hex>`
 
-**Node hash:** `sha256(serialized_json)`
+**Node hash:** `sha256(0x01 ‖ serialized_json)` (see [Domain Separation](#domain-separation))
 
-**Example:**
+**Examples:**
 
 ```json
 {"children":{"alice":"sha256:111...","bob":"sha256:222..."}}
+{"children":{"b":"sha256:333..."},"object":"sha256:aaa..."}
 ```
 
 ---
 
 ## State Root
 
-The **state root** is the hash of the root node. It commits to the entire SBO state at a given block.
+The **state root** is the node hash of the root node. It commits to the entire SBO state at a given block. An empty state has the root `node_hash({"children":{}})`.
+
+### Wire Form
+
+Wherever a state root (or any node, leaf, subtree or object hash) appears on the wire — `checkpoint.v1`, `checkpoint-attestation.v1`, `snapshot` metadata, proofs, manifests, HTTP responses — it is written as `sha256:<64 lowercase hex characters>`, the same prefixed form as `Content-Hash`, `Prev` and `genesisHash`. A bare hex string is not a valid state root: a consumer MUST NOT treat a `checkpoint.v1` whose `state_root` is unprefixed as a claim. (Implementations migrating from a bare-hex emitter MAY accept both forms for a bounded migration period but MUST emit the prefixed form.)
 
 ### Computation
 
@@ -219,9 +246,10 @@ The state root is deterministic: given the same block sequence, all implementati
 ```
 post /userA/nft-001
 
-1. Compute object_hash = sha256(raw_sbo_bytes)
+1. Compute object_hash = sha256(bytes as included)
 2. Traverse from root, creating nodes as needed
-3. Set children["nft-001"] = object_hash in /userA node
+3. If no node exists at /userA/nft-001: set children["nft-001"] = leaf_hash(object_hash) in /userA node
+   If an internal node exists there (nft-001 is also a container): set its "object" = object_hash and rehash it
 4. Rehash /userA node
 5. Update root's children["userA"] with new hash
 6. Rehash root node
@@ -233,8 +261,10 @@ post /userA/nft-001
 delete /userA/nft-001
 
 1. Traverse to /userA node
-2. Remove children["nft-001"]
-3. If /userA node is now empty, remove from root
+2. If nft-001 is a leaf: remove children["nft-001"]
+   If nft-001 is an internal node with "object": remove "object" (its children stay)
+3. If /userA node now has no children and no object, remove it from root;
+   if it has no children but an object, it collapses to a leaf
 4. Rehash affected nodes up to root
 ```
 
@@ -306,16 +336,21 @@ Proves that a path has a specific object relative to a state root.
 
 ```
 1. If object is provided:
-   a. Compute sha256(object_bytes)
+   a. Compute sha256(object_bytes)        # the bytes as included; never reserialize
    b. Verify it equals object_hash
 
-2. Start with object_hash (the leaf)
-3. For each proof level (bottom to top):
-   a. Reconstruct node: siblings + {segment: current_hash}
-   b. Serialize and hash the node
-   c. current_hash = result
+2. Start at the target node:
+   a. If the final step has no "children" (the object is a leaf):
+        current_hash = leaf_hash(object_hash) = sha256(0x00 ‖ object_hash)
+   b. If the final step carries "children" (the object is also a container):
+        current_hash = node_hash({"children": children, "object": object_hash})
+3. For each remaining proof level (bottom to top):
+   a. Reconstruct node: siblings + {segment: current_hash} (+ "object" if the step carries one)
+   b. current_hash = node_hash(node) = sha256(0x01 ‖ serialize(node))
 4. Final hash must equal state_root
 ```
+
+A proof step MAY carry an `object` member (the object hash of an object sitting at that intermediate node) and, for the final step, a `children` member; a verifier MUST include them in the reconstruction exactly as given. All proof parsing is over untrusted input: a verifier MUST bounds-check every length and index (a proof with fewer steps than the path has segments, or a `segment: null` first step with an empty path, is rejected, never indexed; see the [Indexer and Client Specification](./SBO%20Indexer%20and%20Client%20Specification.md#hostile-indexer-threats)).
 
 ---
 
@@ -409,8 +444,10 @@ If the subtree contains collections, it can be nested:
 
 ### Verification
 
-1. Serialize and hash `subtree` -> must equal `subtree_root`
+1. Rebuild the subtree bottom-up with the v2 node rules (leaves as `leaf_hash`, internal nodes as `node_hash`, an `object` member where a node is also an object) -> the root of the rebuilt subtree must equal `subtree_root`
 2. Verify `proof` shows `subtree_root` at `path` under `state_root`
+
+A subtree proof is the only **completeness** proof in this specification: it is what a client needs to know that a listing is complete. Note that the reference indexer's `/v1/list` does not yet serve one (see the [Indexer and Client Specification](./SBO%20Indexer%20and%20Client%20Specification.md#completeness-proofs-are-not-served)).
 
 ---
 
@@ -457,7 +494,7 @@ Signature: ...
 | Field | Type | Description |
 |-------|------|-------------|
 | `block` | number | Block number this checkpoint covers |
-| `state_root` | string | State root at this block |
+| `state_root` | string | State root at this block, `sha256:<hex>` (see [Wire Form](#wire-form)); a bare hex value is not a claim |
 | `prev_checkpoint` | string | URI of previous checkpoint (optional) |
 
 ### Trust Mechanisms
@@ -626,5 +663,14 @@ This allows verification of proofs for any block up to `last_processed_block`:
 - All conforming implementations produce identical state roots
 - Proofs are self-contained and verifiable without additional context
 - The tree structure is independent of the underlying DA layer
+
+## Migration from v1
+
+v2 changes every state root, snapshot root and proof, so it cannot be introduced on a live chain by a client upgrade alone: a v1 checkpoint does not verify under v2 and a v2 root does not verify under v1. The protocol has no in-band version negotiation for the commitment; the commitment version is a property of the repository, fixed at genesis.
+
+- A repository is v2 from its genesis onward or not at all. Existing v1 repositories either stay v1 (the reference implementation drops v1 support, so they become read-only history) or are **regenesised**: a new genesis submission on a fresh anchor, with state rebuilt by replay under v2 rules.
+- The reference deployment (mingo, app 506) is regenesised with v2, together with the other genesis-affecting changes of the 2026-11 audit (Genesis spec: self-certifying Mode B, mode objects first; Identity: no bare-key owners; Authorization/Policy: explicit `to: owner` grant, strict policy parsing; `brokers.v1` object form).
+- `checkpoint.v1`, `checkpoint-attestation.v1`, snapshots and proofs produced under v1 MUST NOT be accepted by a v2 client, and vice versa. A checkpointer or attestor upgrading to v2 starts a new claim history at the new genesis.
+- The hashing rule for `object_hash` (bytes as included) does not by itself change any root for a chain whose messages were all canonical; the domain-separation and object-versus-container changes do.
 
 ---
