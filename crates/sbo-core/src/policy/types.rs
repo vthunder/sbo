@@ -5,7 +5,15 @@ use serde::{Deserialize, Serialize};
 use super::path::{IdPattern, PathPattern};
 
 /// Policy document (policy.v2 schema)
+///
+/// Deserializing a `Policy` runs [`super::validate::validate`]: a document with
+/// a role cycle, a reference to an undefined role, a role chain deeper than
+/// [`super::validate::MAX_ROLE_DEPTH`], or a pattern outside the grammar's size
+/// bound is a deserialization error, so it is rejected at write time (audit
+/// 2026-11 D10 / Q17 (a)). The derive below is the plain field mapping;
+/// the `Deserialize` impl further down wraps it with the validation pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Policy {
     #[serde(default)]
     pub roles: HashMap<String, Vec<Identity>>,
@@ -33,6 +41,20 @@ pub struct Policy {
     /// policy imposes on its DIRECT child policies. Absent ⇒ no constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descendant_constraint: Option<DescendantConstraint>,
+}
+
+impl Serialize for Policy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Policy::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Policy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let policy = Policy::deserialize(deserializer)?;
+        super::validate::validate(&policy).map_err(serde::de::Error::custom)?;
+        Ok(policy)
+    }
 }
 
 /// P2 — a version pin: the specific historical ancestor-policy version this

@@ -64,7 +64,16 @@ impl Algorithm {
     }
 }
 
-/// JWT header (RFC 7519)
+/// The header `typ` of an identity JWT (`identity.v1` payloads). Pinned: an
+/// identity token never decodes as a domain token or vice versa (audit
+/// 2026-11 W3-11 — the two claim sets are otherwise mutually decodable).
+pub const IDENTITY_TYP: &str = "identity.v1";
+
+/// The header `typ` of a domain JWT (`domain.v1` payloads).
+pub const DOMAIN_TYP: &str = "domain.v1";
+
+/// JWT header (RFC 7519). `typ` names the SBO object kind the token is
+/// ([`IDENTITY_TYP`] / [`DOMAIN_TYP`]) and is checked on every decode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JwtHeader {
     alg: String,
@@ -72,12 +81,34 @@ struct JwtHeader {
 }
 
 impl JwtHeader {
-    fn new(alg: Algorithm) -> Self {
+    fn new(alg: Algorithm, typ: &str) -> Self {
         Self {
             alg: alg.as_str().to_string(),
-            typ: "JWT".to_string(),
+            typ: typ.to_string(),
         }
     }
+}
+
+/// Split a token into its three parts and check the header: `alg` must be a
+/// supported algorithm and `typ` must be the expected kind.
+fn split_and_check_header<'t>(token: &'t str, typ: &str) -> JwtResult<[&'t str; 3]> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(JwtError::InvalidFormat(format!(
+            "expected 3 parts, got {}",
+            parts.len()
+        )));
+    }
+    let header_bytes = URL_SAFE_NO_PAD.decode(parts[0])?;
+    let header: JwtHeader = serde_json::from_slice(&header_bytes)?;
+    let _alg = Algorithm::from_str(&header.alg)?;
+    if header.typ != typ {
+        return Err(JwtError::InvalidFormat(format!(
+            "expected typ '{}', got '{}'",
+            typ, header.typ
+        )));
+    }
+    Ok([parts[0], parts[1], parts[2]])
 }
 
 /// Issuer type for identity JWTs
@@ -171,8 +202,8 @@ pub struct Profile {
 // ============================================================================
 
 /// Encode a JWT: base64url(header).base64url(payload).base64url(signature)
-fn encode_jwt<T: Serialize>(claims: &T, signing_key: &SigningKey) -> JwtResult<String> {
-    let header = JwtHeader::new(Algorithm::EdDSA);
+fn encode_jwt<T: Serialize>(claims: &T, signing_key: &SigningKey, typ: &str) -> JwtResult<String> {
+    let header = JwtHeader::new(Algorithm::EdDSA, typ);
 
     // Encode header and payload
     let header_json = serde_json::to_vec(&header)?;
@@ -191,38 +222,22 @@ fn encode_jwt<T: Serialize>(claims: &T, signing_key: &SigningKey) -> JwtResult<S
     Ok(format!("{}.{}", signing_input, signature_b64))
 }
 
-/// Decode JWT claims without verification (for inspection)
-fn decode_claims<T: for<'de> Deserialize<'de>>(token: &str) -> JwtResult<T> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(JwtError::InvalidFormat(format!(
-            "expected 3 parts, got {}",
-            parts.len()
-        )));
-    }
-
+/// Decode JWT claims without verification (for inspection). The header `typ`
+/// must be the expected kind.
+fn decode_claims<T: for<'de> Deserialize<'de>>(token: &str, typ: &str) -> JwtResult<T> {
+    let parts = split_and_check_header(token, typ)?;
     let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1])?;
     let claims: T = serde_json::from_slice(&payload_bytes)?;
     Ok(claims)
 }
 
-/// Decode and verify a JWT with a given public key
+/// Decode and verify a JWT of the expected kind with a given public key
 fn decode_and_verify<T: for<'de> Deserialize<'de>>(
     token: &str,
     public_key: &PublicKey,
+    typ: &str,
 ) -> JwtResult<T> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(JwtError::InvalidFormat(format!(
-            "expected 3 parts, got {}",
-            parts.len()
-        )));
-    }
-
-    // Verify header algorithm
-    let header_bytes = URL_SAFE_NO_PAD.decode(parts[0])?;
-    let header: JwtHeader = serde_json::from_slice(&header_bytes)?;
-    let _alg = Algorithm::from_str(&header.alg)?;
+    let parts = split_and_check_header(token, typ)?;
 
     // Decode signature
     let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2])?;
@@ -268,7 +283,7 @@ pub fn create_self_signed_identity(
         iat: now,
     };
 
-    encode_jwt(&claims, signing_key)
+    encode_jwt(&claims, signing_key, IDENTITY_TYP)
 }
 
 /// Create a domain-certified identity JWT (signed by domain key)
@@ -292,7 +307,7 @@ pub fn create_domain_certified_identity(
         iat: now,
     };
 
-    encode_jwt(&claims, domain_signing_key)
+    encode_jwt(&claims, domain_signing_key, IDENTITY_TYP)
 }
 
 /// Create a self-signed domain JWT
@@ -310,23 +325,23 @@ pub fn create_domain(signing_key: &SigningKey, domain_name: &str) -> JwtResult<S
         iat: now,
     };
 
-    encode_jwt(&claims, signing_key)
+    encode_jwt(&claims, signing_key, DOMAIN_TYP)
 }
 
 /// Decode identity JWT without verification (for inspection)
 pub fn decode_identity_claims(token: &str) -> JwtResult<IdentityClaims> {
-    decode_claims(token)
+    decode_claims(token, IDENTITY_TYP)
 }
 
 /// Decode domain JWT without verification (for inspection)
 pub fn decode_domain_claims(token: &str) -> JwtResult<DomainClaims> {
-    decode_claims(token)
+    decode_claims(token, DOMAIN_TYP)
 }
 
 /// Verify a self-signed JWT (signature matches public_key in payload)
 pub fn verify_self_signed_identity(token: &str) -> JwtResult<IdentityClaims> {
     // First decode without verification to get the public key
-    let claims: IdentityClaims = decode_claims(token)?;
+    let claims: IdentityClaims = decode_claims(token, IDENTITY_TYP)?;
 
     if claims.iss != "self" {
         return Err(JwtError::InvalidIssuer(format!(
@@ -340,7 +355,7 @@ pub fn verify_self_signed_identity(token: &str) -> JwtResult<IdentityClaims> {
         .map_err(|e| JwtError::InvalidPublicKey(format!("{}", e)))?;
 
     // Verify with that key
-    decode_and_verify(token, &public_key)
+    decode_and_verify(token, &public_key, IDENTITY_TYP)
 }
 
 /// Verify a domain-certified JWT (signature matches provided domain key)
@@ -348,7 +363,7 @@ pub fn verify_domain_certified_identity(
     token: &str,
     domain_key: &PublicKey,
 ) -> JwtResult<IdentityClaims> {
-    let claims: IdentityClaims = decode_and_verify(token, domain_key)?;
+    let claims: IdentityClaims = decode_and_verify(token, domain_key, IDENTITY_TYP)?;
 
     // Verify issuer is domain type
     if !claims.iss.starts_with("domain:") {
@@ -364,7 +379,7 @@ pub fn verify_domain_certified_identity(
 /// Verify a self-signed domain JWT
 pub fn verify_domain(token: &str) -> JwtResult<DomainClaims> {
     // First decode without verification to get the public key
-    let claims: DomainClaims = decode_claims(token)?;
+    let claims: DomainClaims = decode_claims(token, DOMAIN_TYP)?;
 
     if claims.iss != "self" {
         return Err(JwtError::InvalidIssuer(format!(
@@ -378,7 +393,7 @@ pub fn verify_domain(token: &str) -> JwtResult<DomainClaims> {
         .map_err(|e| JwtError::InvalidPublicKey(format!("{}", e)))?;
 
     // Verify with that key
-    decode_and_verify(token, &public_key)
+    decode_and_verify(token, &public_key, DOMAIN_TYP)
 }
 
 #[cfg(test)]
@@ -490,4 +505,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// W3-11: identity and domain tokens are distinct kinds. A domain token
+    /// never decodes as identity claims (and vice versa), even though the two
+    /// claim sets would deserialize from each other's JSON; a legacy `typ: JWT`
+    /// header is rejected too.
+    #[test]
+    fn identity_and_domain_tokens_are_not_mutually_decodable() {
+        let key = SigningKey::generate();
+        let dom = create_domain(&key, "example.com").unwrap();
+        let idt = create_self_signed_identity(&key, "example.com", None).unwrap();
+        assert!(decode_identity_claims(&dom).is_err());
+        assert!(verify_self_signed_identity(&dom).is_err());
+        assert!(verify_domain_certified_identity(&dom, &key.public_key()).is_err());
+        assert!(decode_domain_claims(&idt).is_err());
+        assert!(verify_domain(&idt).is_err());
+        // Re-headered as a generic JWT: rejected.
+        let parts: Vec<&str> = dom.split('.').collect();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+        assert!(decode_domain_claims(&format!("{}.{}.{}", header, parts[1], parts[2])).is_err());
+    }
 }

@@ -328,12 +328,28 @@ fn d5_genesis_validate_rejects_a_batch_without_a_root_policy() {
 // ---------------------------------------------------------------------------
 
 fn cyclic_policy_eval() {
-    use sbo_core::policy::{evaluate, ActionType, Policy, PolicyVars};
-    let policy: Policy = serde_json::from_str(
-        r#"{"roles":{"a":[{"role":"b"}],"b":[{"role":"a"}]},
-            "grants":[{"to":{"role":"a"},"can":["post"],"on":"/x/**"}]}"#,
-    )
-    .unwrap();
+    use sbo_core::policy::{evaluate, ActionType, Grant, Identity, PathPattern, Policy, PolicyVars};
+    // Built in code, not parsed: the validation pass (D10 fix) rejects this
+    // document at parse time, and the evaluator's own bound is what is under
+    // test here — a cyclic policy that reached it by any route must terminate.
+    let policy = Policy {
+        roles: [
+            ("a".to_string(), vec![Identity::Role { role: "b".into() }]),
+            ("b".to_string(), vec![Identity::Role { role: "a".into() }]),
+        ]
+        .into_iter()
+        .collect(),
+        deny: vec![],
+        grants: vec![Grant {
+            to: Identity::Role { role: "a".into() },
+            can: vec![ActionType::Post],
+            on: PathPattern::new("/x/**"),
+            id: None,
+        }],
+        restrictions: vec![],
+        pin: None,
+        descendant_constraint: None,
+    };
     let key = SigningKey::generate();
     let msg = signed(&key, b"{}");
     let actor = Id::new("mallory").unwrap();
@@ -355,7 +371,6 @@ fn cyclic_policy_eval() {
 /// evaluation in a child process so a stack overflow does not take the test
 /// runner down.
 #[test]
-#[ignore] // AUDIT-2026-11 D10: fails today — identity_matches recurses without a visited set
 fn d10_cyclic_role_policy_does_not_crash_the_evaluator() {
     if std::env::var_os("AUDIT_WS6_CHILD").is_some() {
         cyclic_policy_eval();
@@ -363,7 +378,7 @@ fn d10_cyclic_role_policy_does_not_crash_the_evaluator() {
     }
     let exe = std::env::current_exe().unwrap();
     let status = std::process::Command::new(exe)
-        .args(["--exact", "d10_cyclic_role_policy_does_not_crash_the_evaluator", "--ignored", "--nocapture"])
+        .args(["--exact", "d10_cyclic_role_policy_does_not_crash_the_evaluator", "--nocapture"])
         .env("AUDIT_WS6_CHILD", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -374,7 +389,6 @@ fn d10_cyclic_role_policy_does_not_crash_the_evaluator() {
 
 /// Q17 (a): a cyclic policy must also be rejected when it is parsed for a write.
 #[test]
-#[ignore] // AUDIT-2026-11 D10: fails today — no policy validation pass exists
 fn d10_cyclic_role_policy_is_rejected_at_parse() {
     let r = serde_json::from_str::<sbo_core::policy::Policy>(
         r#"{"roles":{"a":[{"role":"b"}],"b":[{"role":"a"}]},"grants":[]}"#,
@@ -393,9 +407,8 @@ fn d10_cyclic_role_policy_is_rejected_at_parse() {
 /// otherwise any signer satisfies it by writing `iss: domain:<d>`. The fix must
 /// make both halves of this test hold.
 #[test]
-#[ignore] // AUDIT-2026-11 D24: fails today — issuer path never parses; signature never verified
 fn d24_payload_signed_by_admits_the_domain_key_and_rejects_a_forged_issuer() {
-    use sbo_core::policy::{evaluate, ActionType, Policy, PolicyResult, PolicyVars};
+    use sbo_core::policy::{evaluate_with, ActionType, Policy, PolicyResult, PolicyVars};
     let policy: Policy = serde_json::from_str(
         r#"{"grants":[{"to":"*","can":["post"],"on":"/sys/names/**"}],
             "restrictions":[{"on":"/sys/names/**","require":{"require_payload_signed_by":{"path":"/sys/domains/*"}}}]}"#,
@@ -403,17 +416,22 @@ fn d24_payload_signed_by_admits_the_domain_key_and_rejects_a_forged_issuer() {
     .unwrap();
     let domain = SigningKey::generate();
     let user = SigningKey::generate();
+    // The on-chain `/sys/domains/mingo.place` object's key, as the daemon
+    // supplies it from state (`SignerKeyLookup`).
+    let domain_pk = domain.public_key();
+    let signer_key = |path: &Path, id: &Id| -> Option<sbo_core::crypto::PublicKey> {
+        (path.to_string() == "/sys/domains/" && id.as_str() == "mingo.place").then(|| domain_pk.clone())
+    };
     let run = |jwt: String| {
         let mut msg = signed(&user, jwt.as_bytes());
         msg.path = Path::parse("/sys/names/").unwrap();
         msg.id = Id::new("victim").unwrap();
         msg.content_schema = Some("identity.v1".to_string());
         msg.sign(&user);
-        evaluate(&policy, &Id::new("user").unwrap(), ActionType::Create, "/sys/names/",
-            &PolicyVars::default(), false, &|_| false, &msg, None)
+        evaluate_with(&policy, &Id::new("user").unwrap(), ActionType::Create, "/sys/names/",
+            &PolicyVars::default(), false, &|_| false, &signer_key, &msg, None)
     };
-    // Signed by the domain key: must be allowed. (The evaluator cannot know the
-    // domain key today; the fix supplies it through a lookup.)
+    // Signed by the domain key: must be allowed.
     let legit = sbo_core::jwt::create_domain_certified_identity(
         &domain, "mingo.place", "victim.place", &user.public_key(), None).unwrap();
     let r = run(legit);
