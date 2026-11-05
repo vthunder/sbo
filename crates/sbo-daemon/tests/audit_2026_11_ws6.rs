@@ -29,7 +29,7 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg
@@ -66,7 +66,6 @@ fn d5_without_a_root_policy_a_policy_write_outside_genesis_is_invalid() {
 /// D1 at the daemon's gate: a message whose payload does not hash to its
 /// `Content-Hash` must be rejected before any state check.
 #[test]
-#[ignore] // AUDIT-2026-11 D1: fails today — no layer recomputes Content-Hash
 fn d1_daemon_rejects_a_payload_that_does_not_match_content_hash() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();

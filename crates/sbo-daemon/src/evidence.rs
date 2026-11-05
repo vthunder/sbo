@@ -200,7 +200,7 @@ mod tests {
             prev: None,
             auth_cert: cert.map(str::to_string),
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         msg

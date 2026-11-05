@@ -46,24 +46,9 @@ fn judge(suite: &str, results: Vec<(String, bool, bool, String)>, expected_fail:
 
 /// Wire vectors sbo-core gets wrong today.
 const WIRE_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D3: import headers are dropped by the parser and absent
-    // from the rebuilt signing content, so a correctly signed message that
-    // carries one cannot be verified.
-    ("W-OK-05", "D3"),
-    // AUDIT-2026-11 D1: Content-Hash is never checked against the payload.
-    ("W-CH-01", "D1"),
-    // AUDIT-2026-11 D2: the signature is verified over a reconstruction, so
-    // reordered, duplicated, injected and non-canonically encoded headers
-    // verify as long as they parse to the same fields.
-    ("W-ORD-01", "D2"),
-    ("W-DUP-01", "D2"),
-    ("W-DUP-02", "D2"),
-    ("W-CL-01", "D2"),
-    ("W-CL-02", "D2"),
-    ("W-HEX-01", "D2"),
-    ("W-HEX-02", "D2"),
-    ("W-INJ-01", "D2"),
-    ("W-INJ-02", "D2"),
+    // D1 (W-CH-01), D2 (W-ORD/W-DUP/W-CL/W-HEX/W-INJ) and D3 (W-OK-05) fixed
+    // by sbo-xd6u, sbo-zom8 and sbo-cusw; D21/D13/D54 (W-ID-*) by the
+    // identity group.
 ];
 
 #[test]
@@ -86,26 +71,14 @@ fn wire_vectors_core_parser_and_verifier() {
     judge("wire/core", results, WIRE_EXPECTED_FAIL);
 }
 
-/// Object-hash vectors where the daemon's rule (`sha256(serialize(parse(b)))`,
-/// sync.rs:1122) differs from the spec's `sha256(raw bytes)`.
-const OBJECT_HASH_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D3: for every non-canonical-but-accepted encoding (D2) the
-    // re-serialized bytes differ from the received bytes, so two nodes that
-    // disagree on acceptance already disagree on the root, and a node that
-    // accepts them commits to bytes that were never on chain.
-    ("W-DUP-01", "D3"),
-    ("W-DUP-02", "D3"),
-    ("W-ORD-01", "D3"),
-    ("W-CL-01", "D3"),
-    ("W-CL-02", "D3"),
-    ("W-HEX-01", "D3"),
-    ("W-HEX-02", "D3"),
-    ("W-INJ-01", "D3"),
-    ("W-INJ-02", "D3"),
-];
+/// The daemon now hashes the received bytes (sbo-xypz), and the parser admits
+/// only canonical input, so no vector is expected to disagree.
+const OBJECT_HASH_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 /// I4: for every vector the parser accepts (whatever the spec says), the
 /// object_hash the daemon would store must equal sha256 of the received bytes.
+/// Pinned through the reserialization: an accepted message is canonical, so
+/// its reserialization is byte-identical to what was received.
 #[test]
 fn object_hash_is_over_the_received_bytes() {
     let doc = load("wire.json");
@@ -217,11 +190,8 @@ fn identity_vectors_core_resolution_and_email_split() {
 
 // ------------------------------------------------------------- ed25519 ----
 
-const ED_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D30: both wrappers use dalek's non-strict `verify`, which
-    // admits small-order keys (a non-canonical S is rejected by dalek itself).
-    ("ED-REJ-04", "D30"),
-];
+/// Both wrappers use `verify_strict` (sbo-cusw): nothing expected to fail.
+const ED_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn ed25519_vectors_core_wrapper() {

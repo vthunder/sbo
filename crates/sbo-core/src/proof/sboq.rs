@@ -164,15 +164,17 @@ pub fn parse_sboq(data: &[u8]) -> Result<SboqMessage, SboqError> {
     };
 
     // Parse object if Object-Length was specified
-    let obj_start = body_start + proof_end;
+    // Length headers come from an untrusted indexer (W3-6): checked
+    // arithmetic, and never a slice the buffer cannot hold.
+    let obj_start = body_start + proof_end; // both derived from `data`, so in range
     let object_bytes = if let Some(obj_len) = object_length {
         if obj_len > 0 {
-            let obj_end = obj_start + obj_len;
-            if obj_end > data.len() {
+            let obj_end = obj_start.checked_add(obj_len).filter(|&e| e <= data.len());
+            let Some(obj_end) = obj_end else {
                 return Err(SboqError::InvalidFormat(
-                    format!("Data too short for object: need {} bytes, have {}", obj_len, data.len() - obj_start)
+                    format!("Data too short for object: need {} bytes, have {}", obj_len, data.len().saturating_sub(obj_start))
                 ));
-            }
+            };
             Some(data[obj_start..obj_end].to_vec())
         } else {
             None

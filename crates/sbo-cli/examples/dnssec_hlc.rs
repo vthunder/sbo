@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(&key);
 

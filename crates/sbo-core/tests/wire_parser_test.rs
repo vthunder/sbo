@@ -37,7 +37,7 @@ ID: hello\n\
 Type: object\n\
 Content-Type: application/json\n\
 Content-Length: 17\n\
-Content-Hash: sha256:4b7a3c8f2e1d5a9b0c6e3f7a2d4b8c1e5f9a3d7b0c4e8f2a6d9b3c7e1f5a9d3b\n\
+Content-Hash: sha256:93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588\n\
 Public-Key: ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 Signature: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 \n\
@@ -60,7 +60,7 @@ ID: hello\n\
 Type: object\n\
 Content-Type: application/json\n\
 Content-Length: 17\n\
-Content-Hash: sha256:4d7953c30e8f2c3a7b6d0f1e5a9c8b2d4f6e3a1b0c9d8e7f6a5b4c3d2e1f0a9b\n\
+Content-Hash: sha256:93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588\n\
 Public-Key: ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 Signature: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 \n\
@@ -85,7 +85,7 @@ ID: first\n\
 Type: object\n\
 Content-Type: application/json\n\
 Content-Length: 9\n\
-Content-Hash: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+Content-Hash: sha256:db4a7ecb114bc66c623a06c4ff6fe8daa2f49cc270ebbf7a1f81e22ab061c837\n\
 Public-Key: ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 Signature: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 \n\
@@ -99,7 +99,7 @@ ID: second\n\
 Type: object\n\
 Content-Type: application/json\n\
 Content-Length: 9\n\
-Content-Hash: sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\n\
+Content-Hash: sha256:44b601ca630eafcddd257452f3fa699f0c98cee534c0578e26cbeb5e09542a58\n\
 Public-Key: ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 Signature: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 \n\
@@ -126,7 +126,7 @@ ID: only\n\
 Type: object\n\
 Content-Type: application/json\n\
 Content-Length: 2\n\
-Content-Hash: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+Content-Hash: sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\n\
 Public-Key: ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 Signature: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
 \n\

@@ -65,11 +65,9 @@ fuzz_target!(|input: Input| {
         for (k, h) in &after { u.insert(k.clone(), *h); }
         assert_eq!(got, u.root_hash(), "witness root != rebuilt root");
     }
-    // Totality on unstructured proofs — only where path_segments covers the
-    // steps (W3-8: the shorter case panics today; lift with the fix).
-    let raw_steps = input.raw_steps.len().min(6);
-    let mut path_segments = segs(&input.absent);
-    while path_segments.len() < raw_steps { path_segments.push("s0".to_string()); }
+    // Totality on unstructured proofs, including a path shorter than the
+    // steps (W3-8 fixed by sbo-ch88: the verifier answers Err, never panics).
+    let path_segments = segs(&input.absent);
     let proof = TrieProof {
         state_root: input.raw_root,
         path_segments,

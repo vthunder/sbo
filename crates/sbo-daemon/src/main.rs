@@ -599,8 +599,15 @@ impl RepoApi for DaemonState {
 
         // Parse the wire envelope(s). A malformed body is a hard 400 — far
         // better UX than today's silent DA-layer filtering.
-        let client_messages = sbo_core::wire::parse_batch(&data)
-            .map_err(|e| ApiError::bad_request(format!("wire parse failed: {e}")))?;
+        // Keep each message with the bytes it was parsed from: `object_hash`
+        // is sha256 of those bytes, the same bytes forwarded to the DA layer
+        // (Q32 (c), Q35 (a)).
+        let (client_messages, client_raws): (Vec<sbo_core::message::Message>, Vec<Vec<u8>>) =
+            sbo_core::wire::parse_batch_raw(&data)
+                .map_err(|e| ApiError::bad_request(format!("wire parse failed: {e}")))?
+                .into_iter()
+                .map(|(m, raw)| (m, raw.to_vec()))
+                .unzip();
         if client_messages.is_empty() {
             return Err(ApiError::bad_request("no SBO messages in submit body"));
         }
@@ -666,19 +673,24 @@ impl RepoApi for DaemonState {
             .map_err(|e| ApiError::internal(format!("issuer evidence: {e}")))?;
         let evidence_refreshed: Vec<String> = refreshes.iter().map(|(d, _)| d.clone()).collect();
         let mut messages: Vec<sbo_core::message::Message> = Vec::new();
+        let mut raws: Vec<Vec<u8>> = Vec::new();
         let mut refresh_wires: Vec<Vec<u8>> = Vec::new();
         for (domain, wire) in refreshes {
-            let mut parsed = sbo_core::wire::parse_batch(&wire)
+            let parsed = sbo_core::wire::parse_batch_raw(&wire)
                 .map_err(|e| ApiError::internal(format!("evidence refresh for {domain}: {e}")))?;
-            messages.append(&mut parsed);
+            for (m, raw) in parsed {
+                messages.push(m);
+                raws.push(raw.to_vec());
+            }
             refresh_wires.push(wire);
         }
         messages.extend(client_messages);
+        raws.extend(client_raws);
 
         // Fully validate every message and pre-build its overlay object before
         // mutating the pool, so a rejected message leaves the pool untouched.
         let mut staged: Vec<(StoredObject, [u8; 32])> = Vec::with_capacity(messages.len());
-        for msg in &messages {
+        for (msg, raw) in messages.iter().zip(raws.iter()) {
             let l2 = L2Context::for_block(Some(now), &overlay)
                 .with_db(repo.uri.clone(), repo.expected_genesis.clone());
             match validate_message(msg, &overlay, &repo.path, &l2) {
@@ -726,7 +738,7 @@ impl RepoApi for DaemonState {
                     return Err(ApiError::bad_request(format!("revocation: {reason}")));
                 }
             }
-            let object_hash = sbo_core::sha256(&sbo_core::wire::serialize(msg));
+            let object_hash = sbo_core::sha256(raw);
             // Only content-bearing writes (Post) produce an overlay object;
             // Deletes have no stored object and simply wait for confirmation.
             if let Some(obj) = message_to_stored_object(
@@ -1092,7 +1104,7 @@ fn build_attestation_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)
@@ -1154,7 +1166,7 @@ fn build_checkpoint_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)

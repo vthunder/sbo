@@ -38,6 +38,7 @@ fn signed(key: &SigningKey, payload: &[u8]) -> Message {
         auth_cert: None,
         auth_evidence: None,
         auth_warrant: None,
+        extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg
@@ -65,7 +66,6 @@ fn replace_line(wire_bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
 /// Swapping the payload for other bytes of the same length must be rejected,
 /// at parse or at verification.
 #[test]
-#[ignore] // AUDIT-2026-11 D1: fails today — parser.rs:169 skips the Content-Hash check
 fn d1_payload_swap_on_a_signature_valid_envelope_is_rejected() {
     let key = SigningKey::generate();
     let msg = signed(&key, br#"{"amount":1}"#);
@@ -82,7 +82,6 @@ fn d1_payload_swap_on_a_signature_valid_envelope_is_rejected() {
 /// Wire Format spec: a `Type: object` message with a payload carries the
 /// content headers; the hash is REQUIRED when a payload is present.
 #[test]
-#[ignore] // AUDIT-2026-11 D1: fails today — a payload without Content-Hash parses and verifies
 fn d1_payload_without_content_hash_is_rejected() {
     let key = SigningKey::generate();
     let mut msg = signed(&key, b"{}");
@@ -97,7 +96,6 @@ fn d1_payload_without_content_hash_is_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — parser does not enforce canonical header order
 fn d2_non_canonical_header_order_is_rejected() {
     let key = SigningKey::generate();
     let bytes = wire::serialize(&signed(&key, b"{}"));
@@ -112,7 +110,6 @@ fn d2_non_canonical_header_order_is_rejected() {
 /// Two `Path` lines: the HashMap parse keeps the last one, so the signer's
 /// `/audit/` verifies while a first-wins parser reads `/evil/`.
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — duplicate headers collapse last-wins
 fn d2_duplicate_header_is_rejected() {
     let key = SigningKey::generate();
     let bytes = wire::serialize(&signed(&key, b"{}"));
@@ -122,7 +119,6 @@ fn d2_duplicate_header_is_rejected() {
 
 /// Encoding rules: `Content-Length` is a canonical decimal integer.
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — usize::from_str accepts "+2" and "002"
 fn d2_non_canonical_content_length_is_rejected() {
     let key = SigningKey::generate();
     let bytes = wire::serialize(&signed(&key, b"{}"));
@@ -135,7 +131,6 @@ fn d2_non_canonical_content_length_is_rejected() {
 /// Encoding rules: hex is lowercase. Uppercase hex re-serializes to lowercase,
 /// so the signature still verifies while the raw bytes differ.
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — hex::decode accepts uppercase in every field
 fn d2_uppercase_hex_is_rejected() {
     let key = SigningKey::generate();
     let msg = signed(&key, b"{}");
@@ -150,11 +145,10 @@ fn d2_uppercase_hex_is_rejected() {
     assert!(!accepts(&b), "uppercase Signature hex was accepted");
 }
 
-/// A relay appends a header the parser does not model. The message still
-/// verifies, so the raw bytes (and a raw-bytes `object_hash`, State Commitment
-/// spec) are malleable by anyone on the path. See decisions Q22.
+/// A relay appends a header the parser does not model. Under Q32 (c) the
+/// signature covers the received header block, so an unknown header is valid
+/// only if the signer put it there; one injected on the path fails to verify.
 #[test]
-#[ignore] // AUDIT-2026-11 D2/D3: fails today — unknown headers are silently ignored, not signed
 fn d2_unsigned_unknown_header_is_rejected() {
     let key = SigningKey::generate();
     let bytes = wire::serialize(&signed(&key, b"{}"));
@@ -167,7 +161,6 @@ fn d2_unsigned_unknown_header_is_rejected() {
 /// otherwise `sha256(raw)` (spec) and `sha256(serialize(parse(raw)))` (code)
 /// disagree across implementations.
 #[test]
-#[ignore] // AUDIT-2026-11 D3: fails today — accepted bytes are not always canonical
 fn d3_every_accepted_message_is_canonical() {
     let key = SigningKey::generate();
     let bytes = wire::serialize(&signed(&key, b"{}"));
@@ -196,7 +189,6 @@ fn d3_every_accepted_message_is_canonical() {
 /// satisfies `[S]B = R + [k]A` for every message. Non-strict verification
 /// accepts it; `verify_strict` rejects small-order keys.
 #[test]
-#[ignore] // AUDIT-2026-11 W6-1: fails today — both wrappers use non-strict verify
 fn w6_1_small_order_public_key_universal_signature_is_rejected() {
     let mut pk_bytes = [0u8; 32];
     pk_bytes[0] = 1; // the identity point, compressed
@@ -266,9 +258,10 @@ fn signature_covers_every_modelled_header() {
         let b = replace_line(&bytes, from, to);
         assert!(!accepts(&b), "tampered {from:?} still verified");
     }
-    // A header in the canonical signing order that the Message does not model
-    // (`Origin`) is dropped at parse, so a signer that covered it fails to verify
-    // rather than having it silently stripped.
+    // A listed header the Message does not model (`Origin`), covered by the
+    // signer in its canonical slot: under Q32 (c) the parser keeps it in place
+    // and the received block verifies (it used to be dropped at parse and the
+    // message rejected; changed by sbo-zom8). Unsigned, it still rejects.
     let mut with_origin = msg.clone();
     with_origin.signature = Signature([0u8; 64]);
     let mut content = with_origin.canonical_signing_content();
@@ -277,7 +270,82 @@ fn signature_covers_every_modelled_header() {
     content.splice(at..at, b"Origin: x\n".iter().copied());
     with_origin.signature = key.sign(&content);
     let b = replace_line(&wire::serialize(&with_origin), "Public-Key: ", "Origin: x\nPublic-Key: ");
-    assert!(!accepts(&b));
+    assert!(accepts(&b), "a signed, listed-but-unmodelled header must verify");
+    let parsed = wire::parse(&b).unwrap();
+    assert_eq!(parsed.extra_headers, vec![("Origin".to_string(), "x".to_string())]);
+    assert_eq!(wire::serialize(&parsed), b, "bytes in, bytes out");
+    let unsigned = replace_line(&bytes, "Public-Key: ", "Origin: x\nPublic-Key: ");
+    assert!(!accepts(&unsigned));
+}
+
+/// Q32 (c): a `Critical` header names headers a consumer must understand. One
+/// naming a header this implementation does not model rejects at parse; one
+/// naming only modelled headers is carried like any extension header.
+#[test]
+fn critical_header_rejects_unknown_names_and_x_headers_are_carried() {
+    let key = SigningKey::generate();
+    let mut msg = signed(&key, b"{}");
+    msg.auth_cert = Some("cert".to_string());
+    msg.extra_headers = vec![
+        ("X-Zeta".to_string(), "2".to_string()),
+        ("Critical".to_string(), "Content-Hash".to_string()),
+        ("X-Experiment".to_string(), "1".to_string()),
+    ];
+    msg.sign(&key);
+    let bytes = wire::serialize(&msg);
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    // Slot 26 `Critical`, slot 27 unknown headers in byte order, then Auth-Cert.
+    assert!(text.contains("\nCritical: Content-Hash\nX-Experiment: 1\nX-Zeta: 2\nAuth-Cert: cert\nPublic-Key: "), "{text}");
+    assert!(accepts(&bytes));
+    let parsed = wire::parse(&bytes).unwrap();
+    assert_eq!(parsed.extra_headers, vec![
+        ("Critical".to_string(), "Content-Hash".to_string()),
+        ("X-Experiment".to_string(), "1".to_string()),
+        ("X-Zeta".to_string(), "2".to_string()),
+    ]);
+    assert_eq!(wire::serialize(&parsed), bytes);
+    assert!(sbo_core::message::verify_received(&parsed, &bytes).is_ok());
+
+    let b = replace_line(&bytes, "Critical: Content-Hash\n", "Critical: Content-Hash,X-Experiment\n");
+    assert!(matches!(wire::parse(&b), Err(sbo_core::error::ParseError::UnknownCriticalHeader(n)) if n == "X-Experiment"));
+
+    // Unknown headers belong in slot 27: before a modelled header, or out of
+    // byte order among themselves, is non-canonical (§Validation 15).
+    let b = replace_line(&bytes, "Action: post\n", "Action: post\nX-Early: 1\n");
+    assert!(matches!(wire::parse(&b), Err(sbo_core::error::ParseError::HeaderOrder(_))));
+    let b = replace_line(&bytes, "X-Experiment: 1\nX-Zeta: 2\n", "X-Zeta: 2\nX-Experiment: 1\n");
+    assert!(matches!(wire::parse(&b), Err(sbo_core::error::ParseError::HeaderOrder(_))));
+    let b = replace_line(&bytes, "X-Zeta: 2\nAuth-Cert: cert\n", "Auth-Cert: cert\nX-Zeta: 2\n");
+    assert!(matches!(wire::parse(&b), Err(sbo_core::error::ParseError::HeaderOrder(_))));
+}
+
+/// §Size Bounds: the bounds are checked, never wrapped or allocated.
+#[test]
+fn size_bounds_reject_before_any_slice() {
+    let key = SigningKey::generate();
+    let bytes = wire::serialize(&signed(&key, b"{}"));
+    let b = replace_line(&bytes, "Content-Length: 2\n", &format!("Content-Length: {}\n", wire::MAX_MESSAGE_BYTES + 1));
+    assert!(wire::parse(&b).is_err());
+    let big = vec![b'x'; wire::MAX_SUBMISSION_BYTES + 1];
+    assert!(wire::parse_batch(&big).is_err());
+    let mut huge_header = b"SBO-Version: 0.5\nAction: post\nPath: /a/\nID: x\nType: object\nContent-Type: ".to_vec();
+    huge_header.extend(std::iter::repeat(b'a').take(wire::MAX_HEADER_BLOCK_BYTES));
+    huge_header.extend_from_slice(b"\n\n");
+    assert!(wire::parse(&huge_header).is_err());
+}
+
+/// Q32 (c): the signing content of a received message is its header block
+/// minus the `Signature` line, and it is what the signer produced.
+#[test]
+fn signing_content_of_received_bytes_equals_what_the_signer_signed() {
+    let key = SigningKey::generate();
+    let msg = signed(&key, b"{}");
+    let bytes = wire::serialize(&msg);
+    assert_eq!(wire::signing_content(&bytes).unwrap(), msg.canonical_signing_content());
+    let parsed = wire::parse(&bytes).unwrap();
+    assert!(sbo_core::message::verify_received(&parsed, &bytes).is_ok());
+    let tampered = replace_line(&bytes, "ID: obj\n", "ID: other\n");
+    assert!(sbo_core::message::verify_received(&parsed, &tampered).is_err());
 }
 
 // ---------------------------------------------------------------------------

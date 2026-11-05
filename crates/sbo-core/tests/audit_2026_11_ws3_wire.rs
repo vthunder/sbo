@@ -170,7 +170,6 @@ proptest! {
 /// `Content-Hash`, and the parser never checks it. A signature-valid envelope
 /// carrying an arbitrary swapped payload parses and verifies.
 #[test]
-#[ignore] // AUDIT-2026-11 D1: fails today — Content-Hash is never verified against the payload
 fn d1_swapped_payload_is_rejected() {
     proptest!(cfg(), |(payload in prop::collection::vec(any::<u8>(), 1..64), flip in 0usize..64)| {
         let key = key_from_seed(9);
@@ -201,7 +200,6 @@ fn d1_swapped_payload_is_rejected() {
 /// the same message and verifies, although the signer never produced those
 /// bytes and the Wire spec says non-canonical order is invalid (I2).
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — non-canonical header order is accepted
 fn d2_non_canonical_header_order_is_rejected() {
     proptest!(cfg(), |(id in plain_id_str(), payload in payload(), seed in any::<u8>(), swap in (0usize..9, 0usize..9))| {
         let msg = signed("/d2/", &id, payload, &key_from_seed(seed));
@@ -219,7 +217,6 @@ fn d2_non_canonical_header_order_is_rejected() {
 /// D2 (High): a duplicated header is accepted and the LAST value wins
 /// (`HashMap` collect), so two different byte-strings share one signature.
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — duplicate headers are accepted, last wins
 fn d2_duplicate_header_is_rejected() {
     proptest!(cfg(), |(id in plain_id_str(), other in plain_id_str(), payload in payload())| {
         prop_assume!(id != other);
@@ -239,7 +236,6 @@ fn d2_duplicate_header_is_rejected() {
 /// `+5` and leading zeros; the Wire spec's Encoding Rules require canonical
 /// decimal integers.
 #[test]
-#[ignore] // AUDIT-2026-11 D2: fails today — non-canonical Content-Length accepted
 fn d2_non_canonical_content_length_is_rejected() {
     proptest!(cfg(), |(payload in prop::collection::vec(any::<u8>(), 1..64), form in 0u8..3)| {
         let msg = signed("/d2/", "len", payload.clone(), &key_from_seed(5));
@@ -257,7 +253,6 @@ fn d2_non_canonical_content_length_is_rejected() {
 /// received bytes (I4). The parser must either reject the unknown header or
 /// preserve it; today it silently loses it.
 #[test]
-#[ignore] // AUDIT-2026-11 D3: fails today — unknown headers are dropped on parse
 fn d3_unknown_header_survives_or_rejects() {
     proptest!(cfg(), |(id in plain_id_str(), payload in payload(), name in prop::sample::select(vec!["Attestation", "Origin", "Proof", "Proof-Type", "Registry-Path", "Object-Path"]), val in "[a-z]{1,8}")| {
         let msg = signed("/d3/", &id, payload, &key_from_seed(6));
@@ -299,7 +294,6 @@ fn d21_dot_segments_are_rejected() {
 /// submission carrying that header kills the sync task of every node that
 /// parses the app id (and the daemon's `/v1/submit`, which parses first).
 #[test]
-#[ignore] // AUDIT-2026-11 W3-10: fails today — Content-Length arithmetic in the batch splitter is unchecked
 fn w3_10_huge_content_length_does_not_panic() {
     let msg = signed("/u/", "x", vec![], &key_from_seed(1));
     let img = set_header(&wire::serialize(&msg), "Content-Length", &u64::MAX.to_string());

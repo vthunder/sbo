@@ -125,7 +125,7 @@ fn lww_vectors_confirmed_path_overlay_and_reconciliation_agree() {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         let admits = lww_admits(&msg, Some(&old_obj), &new_hash);
         let overlay = overlay_wins(&new_obj, &old_obj);
@@ -246,7 +246,7 @@ fn checkpoint_claim_vectors() {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         let got = claim_from_message(&msg).map(|c| (c.block, hex::encode(c.state_root)));
         let expected = v["claim"].as_object().map(|c| (c["block"].as_u64().unwrap(), c["state_root"].as_str().unwrap().to_string()));
@@ -303,7 +303,7 @@ fn inclusion_time_vectors_nodes_with_and_without_timestamp_agree() {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     post.sign(&alice);
 

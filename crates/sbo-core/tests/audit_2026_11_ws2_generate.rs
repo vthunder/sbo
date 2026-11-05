@@ -54,7 +54,7 @@ fn base_message(key: &SigningKey) -> Message {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     m.sign(key);
     m

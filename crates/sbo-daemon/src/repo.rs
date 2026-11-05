@@ -371,7 +371,7 @@ mod tests {
             payload: Some(b"hi".to_vec()),
             owner: None, creator: None, content_encoding: None, content_schema: None,
             policy_ref: None, related: None, hlc: None, prev: None,
-            auth_cert: None, auth_evidence: None, auth_warrant: None,
+            auth_cert: None, auth_evidence: None, auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         let wire = sbo_core::wire::serialize(&msg);

@@ -31,10 +31,8 @@ fn judge(suite: &str, results: Vec<(String, bool, bool, String)>, expected_fail:
     assert!(fixed.is_empty(), "{suite}:\n{}", fixed.join("\n"));
 }
 
-const ED_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D30: non-strict `verify` admits small-order keys.
-    ("ED-REJ-04", "D30"),
-];
+/// `verify_strict` since sbo-cusw: nothing expected to fail.
+const ED_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn ed25519_vectors_sbo_crypto_wrapper() {

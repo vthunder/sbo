@@ -138,6 +138,7 @@ pub fn build_message(spec: &EnvelopeSpec) -> Result<Message, KitError> {
         auth_cert: spec.auth_cert.clone(),
         auth_evidence: spec.auth_evidence.clone(),
         auth_warrant: spec.auth_warrant.clone(),
+        extra_headers: Vec::new(),
     })
 }
 

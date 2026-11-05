@@ -51,7 +51,7 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg
@@ -66,9 +66,10 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
 /// recomputed. A relay swaps the payload for equal-length bytes and the daemon
 /// still accepts it as authored by the victim. Impact measured: a 12-byte JSON
 /// body `{"amount":1}` becomes `{"amount":9}` under an untouched signature.
+/// Inverted after the fix (sbo-xd6u): the swap is rejected at the daemon gate
+/// and at the parser.
 #[test]
-#[ignore] // AUDIT-2026-11 D1 PoC: the swap is accepted today
-fn poc_d1_payload_swap_is_accepted_by_the_daemon_gate() {
+fn poc_d1_payload_swap_is_rejected_by_the_daemon_gate() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let victim = SigningKey::generate();
@@ -78,21 +79,22 @@ fn poc_d1_payload_swap_is_accepted_by_the_daemon_gate() {
     let mut msg = signed(&victim, "/audit/", "invoice", None, br#"{"amount":1}"#);
     msg.payload = Some(br#"{"amount":9}"#.to_vec());
 
-    // The envelope signature still verifies (it never covered the payload).
+    // The envelope signature still verifies (it never covered the payload) —
+    // the payload is bound only through Content-Hash.
     assert!(
         sbo_core::message::verify_message(&msg).is_ok(),
         "precondition: the envelope signature is still valid after the swap",
     );
 
-    // And the daemon's full validation accepts it.
+    // The daemon's full validation rejects it.
     let r = validate_message(&msg, &db, dir.path(), &ctx(&db));
-    assert!(
-        is_valid(&r),
-        "PoC FAILED TO REPRODUCE — the daemon rejected the swapped payload: {r:?}",
-    );
-    // Confirm the swap actually changed the semantic content that rides the
-    // victim's signature.
-    assert_eq!(msg.payload.as_deref(), Some(&b"{\"amount\":9}"[..]));
+    assert!(!is_valid(&r), "the daemon accepted a swapped payload: {r:?}");
+    // And so does the parser, before any state check.
+    let bytes = sbo_core::wire::serialize(&msg);
+    assert!(matches!(
+        sbo_core::wire::parse(&bytes),
+        Err(sbo_core::error::ParseError::ContentHashMismatch)
+    ));
 }
 
 /// P2 pin confusion: a child policy pins an ancestor by `{ancestor, hash}`.
@@ -101,10 +103,14 @@ fn poc_d1_payload_swap_is_accepted_by_the_daemon_gate() {
 /// can be filed under the benign hash a child pinned. This PoC shows the two
 /// ingredients compose: a policy message whose header hash does not match its
 /// body is accepted (D1), and the index keys on the header hash.
+/// Inverted after the fix (sbo-xd6u): a policy whose header hash does not
+/// match its body is rejected by the parser and by the daemon gate, and the
+/// policy index keys versions by the hash of the body (sync.rs), so no child
+/// pin can resolve to a body other than the one hashed.
 #[test]
-#[ignore] // AUDIT-2026-11 D1/P2 PoC: a policy body can be filed under a chosen hash
-fn poc_d1_policy_version_filed_under_a_mismatched_hash() {
-    let _dir = tempdir().unwrap();
+fn poc_d1_policy_version_with_a_mismatched_hash_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path()).unwrap();
     let sys = SigningKey::generate();
 
     let benign = br#"{"grants":[{"to":"owner","can":["update"],"on":"/c/**"}]}"#;
@@ -116,19 +122,19 @@ fn poc_d1_policy_version_filed_under_a_mismatched_hash() {
     let mut msg = signed(&sys, "/c/", "root", Some("policy.v2"), hostile_body);
     msg.content_hash = Some(ContentHash::parse(&benign_hash).unwrap());
     msg.sign(&sys);
-
-    // Parse+verify accepts the mismatch (D1): the header hash is not checked
-    // against the body, so this message would be indexed under `benign_hash`
-    // while carrying the all-grants body.
-    assert!(
-        sbo_core::message::verify_message(&msg).is_ok(),
-        "PoC FAILED — a policy whose header hash != body hash did not verify",
-    );
     assert_ne!(
         ContentHash::sha256(hostile_body).to_string(),
         benign_hash,
         "sanity: the hostile body does not actually hash to the benign hash",
     );
+
+    let bytes = sbo_core::wire::serialize(&msg);
+    assert!(matches!(
+        sbo_core::wire::parse(&bytes),
+        Err(sbo_core::error::ParseError::ContentHashMismatch)
+    ));
+    let r = validate_message(&msg, &db, dir.path(), &ctx(&db));
+    assert!(!is_valid(&r), "the daemon accepted a policy whose header hash != body hash: {r:?}");
 }
 
 // ===========================================================================
