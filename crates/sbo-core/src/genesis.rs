@@ -33,13 +33,13 @@ pub fn genesis_hash(messages: &[Message]) -> ContentHash {
     ContentHash::sha256(&bytes)
 }
 
-/// Compute the genesis hash from raw genesis-batch wire bytes by parsing the batch and
-/// re-serializing each message canonically (so the result is independent of any
-/// incidental framing in the input). Equivalent to [`genesis_hash`] applied to the parsed
-/// messages.
+/// Compute the genesis hash from the genesis-batch bytes as included on chain
+/// (decision Q35 (a)): the batch must parse, and the hash is taken over the
+/// received bytes themselves. Because the parser admits only canonical
+/// messages this equals [`genesis_hash`] of the parsed messages.
 pub fn genesis_hash_from_wire(wire_bytes: &[u8]) -> Result<ContentHash, crate::error::ParseError> {
-    let messages = wire::parse_batch(wire_bytes)?;
-    Ok(genesis_hash(&messages))
+    wire::parse_batch(wire_bytes)?;
+    Ok(ContentHash::sha256(wire_bytes))
 }
 
 #[cfg(test)]
@@ -73,7 +73,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 

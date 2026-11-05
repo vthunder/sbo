@@ -323,7 +323,8 @@ mod tests {
     // A minimal, valid SBO 0.5 wire message with a distinct ID and body, so we
     // can assert parse_batch round-trips the batch back into ordered messages.
     fn wire_msg(id: &str, body: &str) -> Vec<u8> {
-        let content_hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // The parser checks Content-Hash against the payload (audit D1).
+        let content_hash = sbo_core::crypto::ContentHash::sha256(body.as_bytes()).to_string();
         let pk = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let sig = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

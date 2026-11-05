@@ -85,7 +85,7 @@ fn post(key: &SigningKey, path: &str, id: &str, payload: &[u8]) -> Message {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg

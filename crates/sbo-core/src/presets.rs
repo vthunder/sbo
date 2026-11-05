@@ -37,7 +37,7 @@ pub fn genesis(signing_key: &SigningKey) -> Vec<u8> {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     sys_msg.sign(signing_key);
 
@@ -72,7 +72,7 @@ pub fn genesis(signing_key: &SigningKey) -> Vec<u8> {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     policy_msg.sign(signing_key);
 
@@ -120,7 +120,7 @@ pub fn genesis_with_domain(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     domain_msg.sign(domain_signing_key);
 
@@ -157,7 +157,7 @@ pub fn genesis_with_domain(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     sys_msg.sign(sys_signing_key);
 
@@ -195,7 +195,7 @@ pub fn genesis_with_domain(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     policy_msg.sign(sys_signing_key);
 
@@ -246,7 +246,7 @@ pub fn genesis_with_domain_and_restriction(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     domain_msg.sign(domain_signing_key);
 
@@ -283,7 +283,7 @@ pub fn genesis_with_domain_and_restriction(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     sys_msg.sign(sys_signing_key);
 
@@ -330,7 +330,7 @@ pub fn genesis_with_domain_and_restriction(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     policy_msg.sign(sys_signing_key);
 
@@ -366,7 +366,7 @@ pub fn post(signing_key: &SigningKey, path: &str, id: &str, payload: &[u8]) -> V
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -403,7 +403,7 @@ pub fn claim_name(signing_key: &SigningKey, name: &str) -> Vec<u8> {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -451,7 +451,7 @@ pub fn claim_name_attributed(
         prev: None,
         auth_cert: Some(auth_cert.to_string()),
         auth_evidence: Some(auth_evidence.to_string()),
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -487,7 +487,7 @@ pub fn claim_name_with_profile(signing_key: &SigningKey, name: &str, profile_pat
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -536,7 +536,7 @@ pub fn claim_email_identity(
         prev: None,
         auth_cert: Some(auth_cert.to_string()),
         auth_evidence: Some(auth_evidence.to_string()),
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -579,7 +579,7 @@ pub fn set_trust_brokers(signing_key: &SigningKey, brokers: &[&str]) -> Vec<u8> 
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -622,7 +622,7 @@ pub fn set_dnssec(signing_key: &SigningKey, domain: &str, proof: &[u8]) -> Vec<u
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -690,7 +690,7 @@ pub fn create_domain(signing_key: &SigningKey, domain_name: &str) -> Vec<u8> {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -727,7 +727,7 @@ pub fn post_to_own_namespace(signing_key: &SigningKey, name: &str, subpath: &str
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -763,7 +763,7 @@ pub fn post_unauthorized(signing_key: &SigningKey, target_namespace: &str, id: &
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -811,7 +811,7 @@ pub fn policy_with_restrictions(signing_key: &SigningKey, target_path: &str, max
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -870,7 +870,7 @@ pub fn signed_object(
         prev: prev.map(|s| s.to_string()),
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -914,7 +914,7 @@ pub fn post_object(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -965,7 +965,7 @@ pub fn transfer(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(signing_key);
 
@@ -1244,7 +1244,7 @@ mod tests {
             content_type: None, content_hash: None, payload: None,
             owner: None, creator: None, content_encoding: None, content_schema: None,
             policy_ref: None, related: None, hlc: None, prev: None,
-            auth_cert: None, auth_evidence: None, auth_warrant: None,
+            auth_cert: None, auth_evidence: None, auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         let wire = wire::serialize(&msg);

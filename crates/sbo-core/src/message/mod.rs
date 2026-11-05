@@ -6,4 +6,4 @@ mod validate;
 
 pub use envelope::{Message, ObjectType, Id, Path, Related};
 pub use actions::Action;
-pub use validate::verify_message;
+pub use validate::{verify_message, verify_received};

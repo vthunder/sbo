@@ -48,6 +48,15 @@ pub enum ParseError {
 
     #[error("Missing blank line separator")]
     MissingBlankLine,
+
+    #[error("Duplicate header: {0}")]
+    DuplicateHeader(String),
+
+    #[error("Header out of canonical order: {0}")]
+    HeaderOrder(String),
+
+    #[error("Critical header not understood: {0}")]
+    UnknownCriticalHeader(String),
 }
 
 /// The identifier grammar lives in `sbo-types`; its errors fold into the wire

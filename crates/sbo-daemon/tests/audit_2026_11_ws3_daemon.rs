@@ -20,7 +20,7 @@ fn msg(auth_cert: Option<String>) -> Message {
         action: Action::Post, path: Path::parse("/a/").unwrap(), id: Id::new("x").unwrap(), object_type: ObjectType::Object,
         signing_key: key.public_key(), signature: Signature([0u8; 64]), content_type: None, content_hash: Some(ContentHash::sha256(b"")),
         payload: Some(vec![]), owner: None, creator: None, content_encoding: None, content_schema: None, policy_ref: None, related: None,
-        hlc: None, prev: None, auth_cert, auth_evidence: None, auth_warrant: None,
+        hlc: None, prev: None, auth_cert, auth_evidence: None, auth_warrant: None, extra_headers: Vec::new(),
     }
 }
 

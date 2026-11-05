@@ -41,17 +41,6 @@ fn judge(suite: &str, results: Vec<(String, bool, bool, String)>, expected_fail:
 
 /// Same table as `sbo-core/tests/audit_2026_11_ws2_core.rs` — same source.
 const WIRE_EXPECTED_FAIL: &[(&str, &str)] = &[
-    ("W-OK-05", "D3"),
-    ("W-CH-01", "D1"),
-    ("W-ORD-01", "D2"),
-    ("W-DUP-01", "D2"),
-    ("W-DUP-02", "D2"),
-    ("W-CL-01", "D2"),
-    ("W-CL-02", "D2"),
-    ("W-HEX-01", "D2"),
-    ("W-HEX-02", "D2"),
-    ("W-INJ-01", "D2"),
-    ("W-INJ-02", "D2"),
 ];
 
 #[test]
@@ -129,7 +118,7 @@ fn identifier_vectors_wasm_grammar() {
     judge("identifiers/wasm", results, ID_EXPECTED_FAIL);
 }
 
-const ED_EXPECTED_FAIL: &[(&str, &str)] = &[("ED-REJ-04", "D30")];
+const ED_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn ed25519_vectors_wasm_wrapper() {

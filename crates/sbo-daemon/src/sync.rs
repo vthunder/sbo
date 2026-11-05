@@ -717,7 +717,10 @@ impl SyncEngine {
                 let payload = extract_sbo_payload(&tx.data);
 
                 // Parse SBO messages (may be a batch with multiple messages)
-                let messages = match sbo_core::wire::parse_batch(&payload) {
+                // Each message is kept with the exact bytes it was parsed from:
+                // the daemon verifies, hashes and stores those bytes, never a
+                // reserialization (Q32 (c), Q35 (a)).
+                let messages = match sbo_core::wire::parse_batch_raw(&payload) {
                     Ok(msgs) => {
                         if msgs.len() > 1 {
                             tracing::debug!(
@@ -742,7 +745,17 @@ impl SyncEngine {
                 };
 
                 for repo in matching_repos {
-                    for msg in &messages {
+                    for (msg, raw) in &messages {
+                        // The signature covers the received header block (minus
+                        // the Signature line) as it was sent, not a reconstruction.
+                        if let Err(e) = sbo_core::message::verify_received(msg, raw) {
+                            tracing::warn!(
+                                "[{}/{}] {:?} {}{} → sig:✗ ({})",
+                                block_number, tx.index, msg.action, msg.path, msg.id, e
+                            );
+                            continue;
+                        }
+
                         // Check path prefix filter
                         if let Some(ref prefix) = repo.uri.path {
                             if !msg.path.to_string().starts_with(prefix) {
@@ -811,9 +824,8 @@ impl SyncEngine {
 
                         // Log raw data if verbose
                         if self.verbose_raw {
-                            // Serialize message to show wire format
-                            let wire_data = sbo_core::wire::serialize(msg);
-                            match std::str::from_utf8(&wire_data) {
+                            let wire_data: &[u8] = raw;
+                            match std::str::from_utf8(wire_data) {
                                 Ok(s) => {
                                     tracing::info!("  --- Wire format ---");
                                     for line in s.lines().take(30) {
@@ -834,7 +846,7 @@ impl SyncEngine {
                         // Write to filesystem and update state. Pass the same
                         // L2 context so creator derivation (attributed-email)
                         // matches what validation used.
-                        self.write_object(repo, msg, block_number, &l2, &mut touched_objects)?;
+                        self.write_object(repo, msg, raw, block_number, &l2, &mut touched_objects)?;
                     }
                 }
             }
@@ -1080,10 +1092,13 @@ impl SyncEngine {
     }
 
     /// Write an SBO object to the filesystem and update state
+    /// `raw` is the message exactly as included on chain; `object_hash` is
+    /// `sha256(raw)` (State Commitment §Object Hash, decision Q35 (a)).
     fn write_object(
         &mut self,
         repo: &Repo,
         msg: &sbo_core::message::Message,
+        raw: &[u8],
         block_number: u64,
         l2: &crate::validate::L2Context,
         touched: &mut TouchedObjects,
@@ -1097,11 +1112,10 @@ impl SyncEngine {
             return self.apply_transfer_or_delete(repo, msg, l2, touched);
         }
 
-        // Serialize to wire format
-        let wire_data = sbo_core::wire::serialize(msg);
-
-        // Compute object hash for trie (hash of complete raw bytes)
-        let object_hash = sbo_core::sha256(&wire_data);
+        // The bytes as included on chain: hashed for the trie and written to
+        // the mirror unchanged ("bytes in, bytes out").
+        let wire_data: &[u8] = raw;
+        let object_hash = sbo_core::sha256(wire_data);
 
         // Check if object exists and track the touch operation
         let uri = repo.uri.to_string();
@@ -1224,11 +1238,11 @@ impl SyncEngine {
                     if let Some(ref payload) = msg.payload {
                         match serde_json::from_slice::<sbo_core::policy::Policy>(payload) {
                             Ok(policy) => {
-                                // Index the version with its on-chain content-hash
-                                // so child pins (P2) resolve deterministically.
-                                let content_hash = msg.content_hash.as_ref()
-                                    .map(|h| h.to_string())
-                                    .unwrap_or_else(|| sbo_core::crypto::ContentHash::sha256(payload).to_string());
+                                // Index the version under the hash computed over
+                                // the body — never the claimed header value — so
+                                // child pins (P2) resolve to the policy that was
+                                // actually written (audit 2026-11 D1 / WS8 P1b).
+                                let content_hash = sbo_core::crypto::ContentHash::sha256(payload).to_string();
                                 if let Err(e) = db.put_policy_at(&msg.path, &policy, &content_hash, block_number) {
                                     tracing::warn!("Failed to index policy at {}: {}", msg.path, e);
                                 } else {

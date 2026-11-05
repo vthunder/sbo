@@ -338,7 +338,7 @@ fn required_issuers_are_read_from_unverified_presentation_claims() {
         prev: None,
         auth_cert: Some(pres),
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(&key);
     let issuers = sbo_daemon::evidence::required_issuers(&msg);

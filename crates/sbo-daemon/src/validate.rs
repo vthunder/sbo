@@ -532,6 +532,27 @@ pub fn validate_message(
         };
     }
 
+    // 1.5. The payload is bound to the signed headers only through
+    // `Content-Hash` (audit 2026-11 D1): recompute it here, independently of
+    // the parser, so an in-memory message with a swapped payload cannot pass.
+    if let Some(payload) = msg.payload.as_deref() {
+        match msg.content_hash.as_ref() {
+            Some(h) if *h == sbo_core::crypto::ContentHash::sha256(payload) => {}
+            Some(_) => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Signature,
+                    reason: "Content-Hash does not match the payload".to_string(),
+                };
+            }
+            None => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Signature,
+                    reason: "payload without Content-Hash".to_string(),
+                };
+            }
+        }
+    }
+
     // 2. Validate payload against Content-Schema (if specified). Transfer/delete
     // are exempt: they act on an *existing* object and carry no new payload, but
     // may still name the target's `Content-Schema` (e.g. so a delegated-signer
@@ -1093,7 +1114,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 
@@ -1226,7 +1247,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&owner_key);
 
@@ -1292,7 +1313,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(key);
         msg

@@ -73,6 +73,7 @@ pub fn message(path: &str, id: &str, payload: Vec<u8>, key: &SigningKey) -> Mess
         auth_cert: None,
         auth_evidence: None,
         auth_warrant: None,
+        extra_headers: Vec::new(),
     }
 }
 

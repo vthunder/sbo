@@ -98,7 +98,7 @@ fn device_write(a: &Artifacts, action: Action, path: &str, schema: Option<&str>)
         // Real writes carry `inline:<dnssec>`; the smoke test verifies the
         // presentation against the provider key directly (DNSSEC is the live test).
         auth_evidence: Some("inline:placeholder".into()),
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(&key);
     msg

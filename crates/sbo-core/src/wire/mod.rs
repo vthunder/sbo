@@ -4,9 +4,13 @@ mod parser;
 mod serializer;
 mod headers;
 
-pub use parser::{parse, parse_batch, parse_header_line, split_message};
+pub use parser::{parse, parse_batch, parse_batch_raw, parse_header_line, signing_content, split_message};
 pub use serializer::serialize;
-pub use headers::HeaderMap;
+pub(crate) use serializer::signing_content_of;
+pub use headers::{
+    HeaderMap, HEADER_ORDER, MODELLED_HEADERS, CRITICAL_HEADER, EXPERIMENTAL_PREFIX,
+    MAX_MESSAGE_BYTES, MAX_SUBMISSION_BYTES, MAX_HEADER_BLOCK_BYTES, header_rank, is_modelled,
+};
 
 #[cfg(test)]
 mod related_tests {
@@ -23,13 +27,14 @@ mod related_tests {
             signing_key: key.public_key(),
             signature: Signature([0u8; 64]),
             content_type: Some("application/json".into()),
-            content_hash: None,
+            content_hash: Some(crate::crypto::ContentHash::sha256(b"{}")),
             payload: Some(b"{}".to_vec()),
             owner: None, creator: None, content_encoding: None,
             content_schema: Some("post.v1".into()),
             policy_ref: None,
             related,
             hlc: None, prev: None, auth_cert: None, auth_evidence: None, auth_warrant: None,
+            extra_headers: Vec::new(),
         };
         m.sign(&key);
         m
