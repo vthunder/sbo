@@ -64,6 +64,8 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+# Offline DNSSEC fixtures for the audit tests (synthetic chains + pinned root).
+sbo-core = { workspace = true, features = ["dnssec-fixtures"] }
 chrono = "0.4"
 tempfile = "3"
 proptest = "1"

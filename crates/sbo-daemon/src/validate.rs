@@ -10,7 +10,7 @@ use sbo_core::authorize::{
 use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
-use sbo_core::policy::{evaluate_with, ActionType, AttestedSource, PolicyResult};
+use sbo_core::policy::{evaluate_with_dnssec, ActionType, AttestedSource, PolicyResult};
 use sbo_core::resolve::{resolve_controller, Controller, NameRecord, DEFAULT_HOP_LIMIT};
 use sbo_core::schema::{parse_attestation, validate_schema, SchemaError};
 use sbo_core::state::StoredObject;
@@ -131,26 +131,45 @@ impl L2Context {
     }
 }
 
-/// Trust-anchor path: the pinned authorized-broker list.
-const TRUST_BROKERS_PATH: &str = "/sys/trust/";
+/// Trust-anchor path: the pinned authorized-broker list and DNS root KSK history.
+const TRUST_PATH: &str = "/sys/trust/";
 const TRUST_BROKERS_ID: &str = "brokers";
+const TRUST_DNS_ROOT_ID: &str = "dns-root";
 
-/// Load the pinned trust anchors from `/sys/trust/brokers`.
+/// Load the pinned trust anchors from `/sys/trust/brokers` and
+/// `/sys/trust/dns-root` as of the current state (Authorization Spec §On-Chain
+/// Trust Anchors).
 ///
-/// The object payload is expected to be a JSON array of authorized broker
-/// provider domains. Absent or unparseable → an empty broker set (only
-/// primary-IdP attribution will succeed). The DNS root KSK is hardcoded inside
-/// `dnssec-prover`, so `/sys/trust/dns-root` is not consulted here.
+/// Brokers: a JSON array of authorized broker provider domains; absent or
+/// unparseable → an empty broker set (only primary-IdP attribution succeeds).
+///
+/// DNS root (audit 2026-11 D6, Q3 (a)): the `dns-root.v1` key history is the
+/// single a-priori DNSSEC anchor; the verifier selects the key(s) active at the
+/// write's inclusion time. An absent object leaves the root unpinned, which
+/// falls back to the validator library's compiled-in IANA anchors (see
+/// [`TrustAnchors::root_keys`]); an unparseable one pins an EMPTY history so
+/// nothing validates (fail closed, rather than silently reverting to the
+/// library's set).
 fn load_trust_anchors(state: &dyn StateView) -> TrustAnchors {
-    let brokers = (|| {
-        let path = SboPath::parse(TRUST_BROKERS_PATH).ok()?;
-        let id = Id::new(TRUST_BROKERS_ID).ok()?;
-        let obj = state.get_object(&path, &id).ok()??;
-        serde_json::from_slice::<Vec<String>>(&obj.payload).ok()
-    })()
-    .unwrap_or_default();
-    // TODO: also surface /sys/trust/dns-root for out-of-band auditing.
-    TrustAnchors::with_brokers(brokers)
+    let read = |id: &str| -> Option<Vec<u8>> {
+        let path = SboPath::parse(TRUST_PATH).ok()?;
+        let id = Id::new(id).ok()?;
+        Some(state.get_object(&path, &id).ok()??.payload)
+    };
+    let brokers = read(TRUST_BROKERS_ID)
+        .and_then(|p| serde_json::from_slice::<Vec<String>>(&p).ok())
+        .unwrap_or_default();
+    let mut anchors = TrustAnchors::with_brokers(brokers);
+    if let Some(payload) = read(TRUST_DNS_ROOT_ID) {
+        anchors = match TrustAnchors::parse_dns_root(&payload) {
+            Ok(keys) => anchors.with_dns_root(keys),
+            Err(e) => {
+                tracing::error!("/sys/trust/dns-root is unparseable ({e}); pinning an empty root history");
+                anchors.with_dns_root(Vec::new())
+            }
+        }
+    }
+    anchors
 }
 
 /// Build a `/sys/names/<name>` resolver closure over the state DB, mapping each
@@ -690,6 +709,31 @@ pub fn validate_message(
         }
     }
 
+    // 2.7. Domain self-certification (Identity Spec §Domain Objects, Validation
+    // Rule 4). A `domain.v1` MAY carry DNSSEC self-certification; when the
+    // evidence is present it MUST verify at this block's inclusion time, and a
+    // domain whose self-certification is present but fails MUST be rejected.
+    // Absence of evidence falls back to a plain self-signed domain object.
+    // AUDIT-2026-11 D7: this used to be a warn-only check in the apply path.
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DOMAIN_SCHEMA) {
+        if let Err(reason) = check_domain_self_cert(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason,
+            };
+        }
+    }
+
+    // 2.8. Monotonic `/sys/dnssec` refresh (AUDIT-2026-11 D33, Q16 (a)).
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DNSSEC_SCHEMA) {
+        if let Err(reason) = check_dnssec_refresh_monotonic(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason,
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
@@ -714,6 +758,75 @@ pub fn validate_message(
             }
         }
     }
+}
+
+/// Content-Schema of a repository root-of-trust domain object.
+const DOMAIN_SCHEMA: &str = "domain.v1";
+
+/// Resolve and verify a `domain.v1` write's DNSSEC self-certification
+/// (Identity Spec Validation Rule 4). The evidence is the message's own
+/// `Auth-Evidence` (`inline:` or `ref:<sbo-path>`), else the conventional
+/// `/sys/dnssec/<domain>` object as-of this block. `Ok(())` when no evidence
+/// resolves (plain self-signed domain); `Err` when evidence is present but
+/// cannot be verified — including when the block carries no inclusion time,
+/// since the RRSIG window cannot be checked (fail closed).
+fn check_domain_self_cert(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let domain = msg.id.as_str();
+    let evidence = match msg.auth_evidence.as_deref() {
+        Some(inline) if inline.starts_with("inline:") => {
+            Some(parse_auth_evidence(inline).map_err(|e| format!("Domain {domain}: bad inline Auth-Evidence: {e}"))?)
+        }
+        Some(reference) if reference.starts_with("ref:") => {
+            let target = reference.trim_start_matches("ref:");
+            Some(fetch_evidence_object(state, target).ok_or_else(|| {
+                format!("Domain {domain}: Auth-Evidence ref {target} does not resolve")
+            })?)
+        }
+        Some(other) => return Err(format!("Domain {domain}: unrecognized Auth-Evidence form: {other}")),
+        None => fetch_evidence_object(state, &format!("/sys/dnssec/{domain}")),
+    };
+    let Some(raw) = evidence else {
+        return Ok(());
+    };
+    let Some(t) = l2.inclusion_time else {
+        return Err(format!("Domain {domain}: self-certification present but block has no inclusion time"));
+    };
+    sbo_core::attribution::verify_domain_self_cert_with_anchors(
+        &msg.signing_key.to_string(),
+        &raw,
+        domain,
+        t,
+        &l2.anchors,
+    )
+    .map_err(|e| format!("Domain {domain}: self-certification failed: {e}"))
+}
+
+/// Content-Schema of a self-authorizing DNSSEC evidence object.
+const DNSSEC_SCHEMA: &str = "dnssec.v1";
+
+/// Monotonic `/sys/dnssec/<domain>` refresh (Q16 (a), audit 2026-11 D33): a
+/// `dnssec.v1` write that replaces an existing evidence object must not lower
+/// the incumbent's RRSIG expiration nor carry an older DNSKEY set. Both proofs
+/// are validated against the pinned anchors as of this block; an incumbent that
+/// no longer validates (e.g. a root rollover) does not block the refresh.
+fn check_dnssec_refresh_monotonic(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let Some(new_proof) = msg.payload.as_deref() else {
+        return Ok(()); // the schema/policy gates reject a payload-less dnssec.v1
+    };
+    let incumbent = match state.get_object(&msg.path, &msg.id) {
+        Ok(Some(o)) => o.payload,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("dnssec refresh: cannot read incumbent: {e}")),
+    };
+    let domain = msg.id.as_str();
+    let t = l2.inclusion_time;
+    let new_f = sbo_core::attribution::dnssec_proof_freshness(new_proof, domain, &l2.anchors, t)
+        .map_err(|e| format!("dnssec refresh for {domain}: new proof invalid: {e}"))?;
+    let Ok(old_f) = sbo_core::attribution::dnssec_proof_freshness(&incumbent, domain, &l2.anchors, t) else {
+        return Ok(());
+    };
+    sbo_core::attribution::check_dnssec_refresh_monotonic(&new_f, &old_f)
+        .map_err(|e| format!("dnssec refresh for {domain} rejected: {e}"))
 }
 
 /// Whether the root policy (`/sys/policies/root`) is present in `state`.
@@ -1761,10 +1874,16 @@ mod dnssec_repro_tests {
         }
     }
 
-    // P2 — a snapshot round-trip carries the pinned historical version, so a
-    // fast-synced node authorizes a write under the pinned child.
+    // P2 under fast-sync after AUDIT-2026-11 D27 (Q12 (a), `sbo-syib`): a
+    // snapshot's `policy_versions` are reconstructed from covered objects only,
+    // so a pinned version whose ancestor has since moved on is NOT carried — the
+    // fast-synced node fails closed (denies the pinned child's governed write)
+    // instead of trusting the serving node's copy of frozen governance. This
+    // test used to assert the opposite (an unverified carry); a full replay, or
+    // a future snapshot format carrying the raw pinned payload bytes, restores
+    // the authorization.
     #[test]
-    fn p2_snapshot_roundtrip_authorizes_pinned_child() {
+    fn p2_snapshot_roundtrip_drops_uncovered_pinned_version() {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
@@ -1787,14 +1906,18 @@ mod dnssec_repro_tests {
         let db2 = StateDb::open(dir2.path()).unwrap();
         crate::bootstrap::verify_and_load_payload(&db2, &payload, root).unwrap();
 
-        // On the fast-synced node the board updates the pinned community policy → authorized.
+        // The pinned V1 is no longer a covered object (root moved on), so the
+        // fast-synced node does not carry it …
+        assert!(db2.get_policy_version(&comm.pin.as_ref().unwrap().hash).unwrap().is_none());
+        // … and the board's governed update under the pinned child is denied
+        // (fail closed), not authorized from an unverifiable version.
         let comm2 = community_policy(comm.pin.clone());
         let l2 = L2Context::for_block(Some(1_700_000_000), &db2);
         let update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm2).unwrap());
-        assert!(
-            matches!(validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
-            "fast-synced node must authorize a write under a pinned child using the snapshotted version"
-        );
+        match validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
+            ValidationResult::Valid { .. } => panic!("an uncovered pinned version must not authorize on a fast-synced node"),
+        }
     }
 
     // P3 — a child grant exceeding the parent's descendant-constraint template is
@@ -2219,8 +2342,11 @@ fn evaluate_policy_for(
         sbo_core::crypto::PublicKey::parse(&claims.public_key).ok()
     };
 
-    // Evaluate the policy
-    let outcome = evaluate_with(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref());
+    // Evaluate the policy. The pinned DNS root anchors (and this block's
+    // inclusion time) reach the `dnssec_proof` restriction through here
+    // (AUDIT-2026-11 D6).
+    let dns = sbo_core::policy::DnssecContext { anchors: &l2.anchors, at: l2.inclusion_time };
+    let outcome = evaluate_with_dnssec(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref(), Some(&dns));
     if let Some(e) = attestation_read_error.into_inner() {
         tracing::error!("Cannot evaluate attestation condition for {:?} on {}: {}", action, target_path, e);
         return Err(PolicyError::State(format!("Cannot evaluate attestation condition: {e}")));

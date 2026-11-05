@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "crates/sbo-zkvm/methods"]
+# `vendor/dnssec-prover` is reached only through `[patch.crates-io]` below; it is
+# excluded from the workspace so `cargo test --workspace` does not build its
+# (un-vendored) upstream test suite.
+exclude = ["vendor/dnssec-prover"]
 
 # `default-members` is what a bare `cargo build`/`cargo test` (no `-p`) operates
 # on. It excludes the RISC Zero crates (`sbo-zkvm` and its `methods` guest),
@@ -28,6 +32,12 @@ default-members = [
 # on purpose — lowering it WOULD rebuild every dep.
 [profile.release]
 incremental = true
+
+# The vendored DNSSEC validator does big-integer RSA/ECDSA math in software; at
+# opt-level 0 a single chain validation takes seconds, which the offline DNSSEC
+# tests multiply. Upstream ships `opt-level = 1` for the same reason.
+[profile.dev.package.dnssec-prover]
+opt-level = 2
 
 [workspace.package]
 version = "0.1.0"
@@ -85,3 +95,9 @@ sbo-crypto = { path = "crates/sbo-crypto" }
 sbo-avail = { path = "crates/sbo-avail" }
 sbo-daemon = { path = "crates/sbo-daemon" }
 sbo-rpc = { path = "crates/sbo-rpc" }
+
+# dnssec-prover with trust-anchor injection (`verify_rr_stream_with_anchors`),
+# audit 2026-11 D6/S4 (Q3 (a)). See vendor/dnssec-prover/Cargo.toml for the
+# exact delta against the registry 0.6.10 release.
+[patch.crates-io]
+dnssec-prover = { path = "vendor/dnssec-prover" }

@@ -24,6 +24,8 @@ pub mod dns;
 pub mod uri;
 pub mod jwt;
 pub mod attribution;
+#[cfg(feature = "dnssec-fixtures")]
+pub mod dnssec_fixture;
 pub mod device_attribution;
 pub mod resolve;
 pub mod authorize;

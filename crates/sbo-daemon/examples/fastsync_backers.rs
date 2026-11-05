@@ -1,69 +1,51 @@
-//! Phase 3 verification: fast-sync backer counting against the live node.
+//! Fast-sync backer counting against the live node.
 //!
-//! Runs the REAL `bootstrap_with_policy` path against da.sandmill.org:
-//!  1. Positive: a threshold-2 policy trusting {sys-checkpointer, attestor2}
-//!     must bootstrap with 2 distinct backers (RootTrust::Attested{backers:2}).
-//!  2. Negative control: threshold-2 trusting {sys-checkpointer, UNKNOWN} must
-//!     FAIL — proving the count is real, not rubber-stamped.
+//! Runs the REAL `bootstrap_with_policy` path against da.sandmill.org under a
+//! key-pinned policy (the checkpoint authority is just a pinned key, D34):
+//!  1. Positive: threshold-1 pinning the sys-checkpointer key must bootstrap as
+//!     `RootTrust::SignedCheckpoints{backers:1}` once the node's manifest carries
+//!     the signed checkpoint wire; until it does, the result is `Provisional`
+//!     (gated, to be confirmed by `start`'s walk-forward).
+//!  2. Negative control: pinning an UNKNOWN key must never yield
+//!     `SignedCheckpoints` — proving the count is real, not rubber-stamped.
 //!
 //! Run: cargo run -p sbo-daemon --example fastsync_backers
 
 use sbo_core::state::StateDb;
-use sbo_daemon::bootstrap::{bootstrap_with_policy, RootTrust, TrustPolicy, SYS_AUTHORITY};
+use sbo_daemon::bootstrap::{bootstrap_with_policy, RootTrust, TrustPolicy};
 use std::path::Path;
 
 const NODE: &str = "https://da.sandmill.org";
-const ATTESTOR2: &str = "ed25519:a7cfa800d359e889ed98a2e2faa2b45903921205288a0283f2f5a1f33d32dc6b";
+/// The mingo `sys-checkpointer` key (see the mingo genesis fixture).
+const CHECKPOINTER: &str = "ed25519:937fc1e8073a1d3939bb59fa744e4fd2d7ff365c2cd573ca8a931b47e7949c00";
 const UNKNOWN: &str = "ed25519:0000000000000000000000000000000000000000000000000000000000000000";
-const DBROOT: &str = "/private/tmp/claude-501/-Users-thunder-src-browserid-ng/917e2196-7719-44f6-af29-0b1398fccba2/scratchpad";
 
 #[tokio::main]
 async fn main() {
-    // Positive: two distinct trusted backers must satisfy threshold 2.
-    run(
-        "threshold-2 {sys-checkpointer, attestor2}",
-        TrustPolicy { attestors: vec![SYS_AUTHORITY.to_string(), ATTESTOR2.to_string()], threshold: 2 },
-        &format!("{DBROOT}/fs-pos"),
-        true,
-    )
-    .await;
-
-    // Negative control: attestor2 replaced by an unknown key → only 1 real
-    // backer (the checkpoint) → threshold 2 unmet → must error.
-    run(
-        "threshold-2 {sys-checkpointer, UNKNOWN}  (expected FAIL)",
-        TrustPolicy { attestors: vec![SYS_AUTHORITY.to_string(), UNKNOWN.to_string()], threshold: 2 },
-        &format!("{DBROOT}/fs-neg"),
-        false,
-    )
-    .await;
+    let root = std::env::temp_dir().join("sbo-fastsync-backers");
+    run("threshold-1 {sys-checkpointer}", &[CHECKPOINTER], &root.join("pos"), true).await;
+    run("threshold-1 {UNKNOWN}  (SignedCheckpoints must NOT appear)", &[UNKNOWN], &root.join("neg"), false).await;
 }
 
-async fn run(label: &str, policy: TrustPolicy, db_path: &str, expect_ok: bool) {
+async fn run(label: &str, keys: &[&str], db_path: &Path, expect_signed: bool) {
     let _ = std::fs::remove_dir_all(db_path);
-    let db = StateDb::open(Path::new(db_path)).expect("open temp state db");
+    let db = StateDb::open(db_path).expect("open temp state db");
+    let policy = TrustPolicy::from_config(&keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(), 1).unwrap();
     println!("\n=== {label} ===");
     match bootstrap_with_policy(&db, NODE, &policy).await {
         Ok(r) => {
-            let backers = match r.trust {
-                RootTrust::Attested { backers } => backers,
-                other => {
-                    println!("  bootstrapped but trust = {other:?} (not Attested)");
-                    0
-                }
-            };
-            println!(
-                "  OK: block {} | {} objects | trust {:?}",
-                r.block, r.object_count, r.trust
-            );
+            println!("  block {} | {} objects | trust {:?}", r.block, r.object_count, r.trust);
+            let signed = matches!(r.trust, RootTrust::SignedCheckpoints { .. });
             println!(
                 "  => {}",
-                if expect_ok && backers >= 2 { "PASS (2+ distinct backers counted)" } else { "UNEXPECTED" }
+                match (expect_signed, signed) {
+                    (true, true) => "PASS (signed checkpoint by the pinned key counted)",
+                    (true, false) => "PROVISIONAL (manifest carried no signed wire; walk-forward will confirm)",
+                    (false, false) => "PASS (unknown key never counts)",
+                    (false, true) => "UNEXPECTED",
+                }
             );
         }
-        Err(e) => {
-            println!("  ERR: {e}");
-            println!("  => {}", if expect_ok { "UNEXPECTED FAILURE" } else { "PASS (correctly rejected — count is real)" });
-        }
+        Err(e) => println!("  ERR: {e}"),
     }
 }

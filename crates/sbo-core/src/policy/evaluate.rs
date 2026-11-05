@@ -68,6 +68,33 @@ pub fn evaluate_with(
     message: &Message,
     primary_domain: Option<&str>,
 ) -> PolicyResult {
+    evaluate_with_dnssec(policy, actor, action, target_path, vars, signer_is_owner, is_attested, signer_key, message, primary_domain, None)
+}
+
+/// What a `dnssec_proof` restriction validates against: the pinned trust
+/// anchors (`/sys/trust/dns-root`) and the write's inclusion time (audit
+/// 2026-11 D6). `None` in [`evaluate`] means the library's default anchors.
+#[derive(Debug, Clone, Copy)]
+pub struct DnssecContext<'a> {
+    pub anchors: &'a crate::attribution::TrustAnchors,
+    pub at: Option<i64>,
+}
+
+/// [`evaluate_with`] plus an explicit DNSSEC anchor context.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_with_dnssec(
+    policy: &Policy,
+    actor: &Id,
+    action: ActionType,
+    target_path: &str,
+    vars: &PolicyVars,
+    signer_is_owner: bool,
+    is_attested: &AttestedCheck,
+    signer_key: &SignerKeyLookup,
+    message: &Message,
+    primary_domain: Option<&str>,
+    dnssec: Option<&DnssecContext>,
+) -> PolicyResult {
     tracing::debug!(
         "Policy eval: actor={}, action={:?}, path={}, vars={:?}",
         actor, action, target_path, vars
@@ -112,7 +139,7 @@ pub fn evaluate_with(
         let path_matches = restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars);
         let id_matches = restriction.id.as_ref().is_none_or(|p| p.matches(message.id.as_str(), vars));
         if path_matches && id_matches {
-            if let Some(reason) = check_requirements(&restriction.require, message, is_attested, signer_key) {
+            if let Some(reason) = check_requirements(&restriction.require, message, is_attested, signer_key, dnssec) {
                 return PolicyResult::Denied(reason);
             }
         }
@@ -158,6 +185,7 @@ fn check_requirements(
     message: &Message,
     is_attested: &AttestedCheck,
     signer_key: &SignerKeyLookup,
+    dnssec: Option<&DnssecContext>,
 ) -> Option<String> {
     // Attestation conditions: the acting user must (not) be the in-force
     // subject of the named attestation.
@@ -254,7 +282,7 @@ fn check_requirements(
     // Domain-binding is intrinsic: the proof must carry `_browserid.<domain>` for
     // this exact id, so a valid proof for a *different* domain is rejected.
     if require.dnssec_proof {
-        if let Some(reason) = check_dnssec_proof(message) {
+        if let Some(reason) = check_dnssec_proof(message, dnssec) {
             return Some(reason);
         }
     }
@@ -264,7 +292,7 @@ fn check_requirements(
 
 /// Verify the payload is a valid RFC 9102 DNSSEC proof bound to the object's id
 /// (the `<domain>` of a `/sys/dnssec/<domain>` object).
-fn check_dnssec_proof(message: &Message) -> Option<String> {
+fn check_dnssec_proof(message: &Message, dnssec: Option<&DnssecContext>) -> Option<String> {
     let domain = message.id.as_str();
     if domain.is_empty() {
         return Some("dnssec_proof: object id (domain) is empty".to_string());
@@ -275,7 +303,12 @@ fn check_dnssec_proof(message: &Message) -> Option<String> {
         None => return Some("dnssec_proof: missing payload (expected RFC 9102 proof)".to_string()),
     };
 
-    match crate::attribution::verify_dnssec_proof_for_domain(payload, domain) {
+    let default_anchors = crate::attribution::TrustAnchors::default();
+    let (anchors, at) = match dnssec {
+        Some(d) => (d.anchors, d.at),
+        None => (&default_anchors, None),
+    };
+    match crate::attribution::verify_dnssec_proof_for_domain_with_anchors(payload, domain, anchors, at) {
         Ok(_window) => None,
         Err(e) => Some(format!("dnssec_proof: invalid proof for '{}': {}", domain, e)),
     }
@@ -855,7 +888,7 @@ mod tests {
         let mut msg = dnssec_msg("mingo.place", vec![]);
         msg.payload = None;
         let no = |_: &AttestedSource| false;
-        assert!(check_requirements(&require, &msg, &no, &|_, _| None).is_some());
+        assert!(check_requirements(&require, &msg, &no, &|_, _| None, None).is_some());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -71,6 +72,10 @@ enum Commands {
         /// State directory to load into (default: the configured repo's state dir).
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Adopt the serving node's own advertised root without any signed
+        /// checkpoint: trusts that node completely. Never the default.
+        #[arg(long)]
+        trust_serving_node: bool,
     },
 }
 
@@ -520,10 +525,14 @@ impl RepoApi for DaemonState {
             .into_iter()
             .filter_map(|o| {
                 let v: serde_json::Value = serde_json::from_slice(&o.payload).ok()?;
+                let id = o.id.as_str().to_string();
+                let wire = sbo_daemon::trust::load_checkpoint_wire(&repo.uri.to_string(), &id)
+                    .map(|w| base64::engine::general_purpose::STANDARD.encode(w));
                 Some(sbo_daemon::http::CheckpointView {
-                    id: o.id.as_str().to_string(),
+                    id,
                     block: v.get("block")?.as_u64()?,
                     state_root: v.get("state_root")?.as_str()?.to_string(),
+                    wire,
                 })
             })
             .collect();
@@ -1238,7 +1247,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => {
             show_status(&config).await?;
         }
-        Commands::Bootstrap { node, state_dir } => {
+        Commands::Bootstrap { node, state_dir, trust_serving_node } => {
             // repos.json is only needed to derive the default state dir and to set
             // the head afterward; tolerate its absence when --state-dir is given.
             let repos = RepoManager::load(config.daemon.repos_index.clone()).ok();
@@ -1256,32 +1265,39 @@ async fn main() -> anyhow::Result<()> {
             };
             let db = sbo_daemon::shared_state_db(&dir)?;
             println!("Bootstrapping from {node} into {} …", dir.display());
-            // Under a key-pinned trust policy the snapshot root is UNTRUSTED until
-            // verified on chain: load provisionally, persist a pending anchor, and
-            // let `start`'s walk-forward promote it. With no `[trust]` config, keep
-            // the legacy trust-the-node bootstrap.
+            // The serving node is never a trust root (D26). A snapshot is trusted
+            // only through `checkpoint.v1` objects signed by the pinned keys of
+            // the `[trust]` policy — carried in the manifest and re-verified here,
+            // else observed on chain by `start`'s walk-forward (reads gated until
+            // then). `--trust-serving-node` is the explicit opt-in to adopt the
+            // node's own root.
             let policy = sbo_daemon::trust::TrustPolicy::from_config(
                 &config.trust.attestors,
                 config.trust.threshold,
             )?;
-            let result = if policy.is_enforcing() {
-                let min_att = config.trust.threshold.saturating_sub(1);
-                let r = sbo_daemon::bootstrap::bootstrap_provisional(&db, &node, min_att).await?;
-                let anchor = sbo_daemon::trust::PendingAnchor {
-                    block: r.block,
-                    state_root: hex::encode(r.state_root),
-                    attestors: config.trust.attestors.clone(),
-                    threshold: config.trust.threshold,
-                };
-                anchor.save(&dir)?;
-                println!(
-                    "⚠ provisional anchor at block {} — reads GATED until {} pinned attestors \
-                     verify the root on chain (walk-forward via `start`)",
-                    r.block, config.trust.threshold
-                );
-                r
+            let result = if trust_serving_node {
+                println!("⚠ --trust-serving-node: adopting {node}'s advertised root without a signed checkpoint");
+                sbo_daemon::bootstrap::bootstrap_trust_serving_node(&db, &node).await?
             } else {
-                sbo_daemon::bootstrap::bootstrap(&db, &node).await?
+                let r = sbo_daemon::bootstrap::bootstrap_with_policy(&db, &node, &policy).await?;
+                match r.trust {
+                    sbo_daemon::bootstrap::RootTrust::Provisional => {
+                        let anchor = sbo_daemon::trust::PendingAnchor {
+                            block: r.block,
+                            state_root: hex::encode(r.state_root),
+                            attestors: config.trust.attestors.clone(),
+                            threshold: config.trust.threshold,
+                        };
+                        anchor.save(&dir)?;
+                        println!(
+                            "⚠ provisional anchor at block {} — reads GATED until {} pinned attestors \
+                             verify the root on chain (walk-forward via `start`)",
+                            r.block, config.trust.threshold
+                        );
+                    }
+                    _ => sbo_daemon::trust::PendingAnchor::clear(&dir)?,
+                }
+                r
             };
             println!(
                 "✓ loaded snapshot at block {} ({} objects); trust={:?}; state_root={}",

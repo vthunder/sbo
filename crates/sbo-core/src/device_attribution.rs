@@ -49,7 +49,7 @@
 
 use browserid_core::device::{AccessPresentation, Holder, VerifiedAccess};
 
-use crate::attribution::{extract_provider_key, AttributionError, TrustAnchors};
+use crate::attribution::{extract_provider_key_with_anchors, AttributionError, TrustAnchors};
 
 /// A successful device-model attribution: the SBO `key` speaks for `email`
 /// (via the opaque `holder`), the warrant grants `scopes` for the write's audience, valid
@@ -173,7 +173,8 @@ pub fn verify_device_attribution(
         }
         let evidence = get_evidence(iss)
             .ok_or_else(|| AttributionError::MissingIssuerEvidence(iss.to_string()))?;
-        let (key, inception, expiration) = extract_provider_key(&evidence, iss)?;
+        let (key, inception, expiration) =
+            extract_provider_key_with_anchors(&evidence, iss, anchors, Some(inclusion_time))?;
         proven.push((iss.to_string(), key, inception, expiration));
     }
 

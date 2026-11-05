@@ -2156,8 +2156,6 @@ dependencies = [
 [[package]]
 name = "dnssec-prover"
 version = "0.6.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9468f1a08c50bd1e5ad91b151e11ce8e806f8fa1c1eb9b07f66c7011de45a2e"
 dependencies = [
  "bitcoin_hashes",
  "tokio",
@@ -6242,7 +6240,9 @@ dependencies = [
  "hickory-resolver",
  "proptest",
  "rand 0.8.8",
+ "ring",
  "rocksdb",
+ "sbo-core",
  "sbo-crypto",
  "sbo-types",
  "serde",

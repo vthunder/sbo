@@ -1,0 +1,54 @@
+# Vendored copy of dnssec-prover 0.6.10 (Matt Corallo, MIT OR Apache-2.0),
+# wired in through the workspace `[patch.crates-io]`.
+#
+# The ONLY functional change is in src/validation.rs:
+# `verify_rr_stream_with_anchors(rrs, anchors)` validates an RFC 9102 chain
+# against caller-supplied root DS anchors instead of the compiled-in IANA
+# `root_hints()`. `verify_rr_stream` is kept as a thin wrapper over the IANA
+# set, so every other consumer behaves exactly as upstream. SBO needs this so
+# `/sys/trust/dns-root` (the spec's single a-priori anchor) is what evidence is
+# verified against (audit 2026-11 D6/S4, Q3 (a)). No upstream fork exists; the
+# crate's test suite (Wycheproof vectors) and the HTTP proof-gen binary are not
+# vendored. Re-vendor from the registry when bumping the upstream version.
+#
+# Still absent, as upstream: Ed25519 (DNSSEC alg 15) — a zone signed only with
+# alg 15 fails closed with `UnsupportedAlgorithm` (audit W6-2).
+
+[package]
+name = "dnssec-prover"
+version = "0.6.10"
+authors = ["Matt Corallo"]
+license = "MIT OR Apache-2.0"
+repository = "https://git.bitcoin.ninja/index.cgi?p=dnssec-prover"
+description = "A simple crate which allows for the creation and validation of transferrable proofs of entries in the DNS. (SBO vendored copy with trust-anchor injection.)"
+edition = "2021"
+rust-version = "1.61.0"
+publish = false
+
+[features]
+default = ["validation"]
+std = []
+validation = ["bitcoin_hashes"]
+tokio = ["tokio_crate/net", "tokio_crate/io-util", "std"]
+build_server = ["tokio", "tokio_crate/rt-multi-thread", "tokio_crate/macros"]
+slower_smaller_binary = []
+
+[dependencies]
+bitcoin_hashes = { version = "0.14", default-features = false, optional = true }
+tokio_crate = { package = "tokio", version = "1.0", default-features = false, optional = true }
+
+[target.'cfg(fuzzing)'.dependencies]
+ibig = { version = "0.3", optional = true }
+
+[lib]
+name = "dnssec_prover"
+path = "src/lib.rs"
+
+[lints.rust.unexpected_cfgs]
+level = "forbid"
+check-cfg = [
+	"cfg(fuzzing)",
+	"cfg(dnssec_prover_fuzzing)",
+	"cfg(dnssec_validate_bench)",
+	"cfg(dnssec_prover_c_hashers)",
+]
