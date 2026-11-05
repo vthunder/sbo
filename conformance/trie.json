@@ -1,5 +1,5 @@
 {
-  "description": "State Commitment §State Tree Structure: node hash = sha256 of canonical JSON {\"children\":{seg:\"sha256:<hex>\",…}} with sorted keys; leaf value = object_hash. Threat-model I30: a leaf and an internal node are distinguishable (D4). Implementations: sbo-crypto `SparseTrie` (builder), `PartialTrie` via `verify_state_transition` (verifier, also the zkVM guest's code), sbo-core `StateDb::compute_trie_state_root` (daemon, rocksdb). `root` is what the builder computes today and every other implementation must reproduce; `distinct_from` names a vector whose root the spec requires to differ.",
+  "description": "State Commitment v2 §Domain Separation / §Object Versus Container: leaf = sha256(0x00 || object_hash); node = sha256(0x01 || canonical JSON {\"children\":{seg:\"sha256:<hex>\",…}[,\"object\":\"sha256:<hex>\"]}) with sorted keys; an object and a container at the same segments coexist. Threat-model I30: a leaf and an internal node are distinguishable (D4). Implementations: sbo-crypto `SparseTrie` (builder), `PartialTrie` via `verify_state_transition` (verifier, also the zkVM guest's code), sbo-core `StateDb::compute_trie_state_root` (daemon, rocksdb). `root` is what the builder computes today and every other implementation must reproduce; `distinct_from` names a vector whose root the spec requires to differ.",
   "suite": "sbo conformance 2026-11 / state trie",
   "vectors": [
     {
@@ -13,7 +13,7 @@
           ]
         }
       ],
-      "root": "d2ce21c00970cfe53484b505a48534f563ec9ba9ebed7e3940196f202c2ec25d"
+      "root": "34f855b6a9808928b743d7826c5004f6e10d945077dc78125a9378a792c64d07"
     },
     {
       "id": "TRIE-02",
@@ -39,7 +39,7 @@
           ]
         }
       ],
-      "root": "6eb189447ae1c89396f793b150313ee6f9033ed8776989feb938053c4c56861b"
+      "root": "a19be3e212c181d93ed691774446cdc516fd4e9dc6e040f8ea6b9148cbe34483"
     },
     {
       "description": "object at [a] whose object_hash equals the hash of the node {b: H}",
@@ -47,19 +47,40 @@
       "id": "TRIE-03",
       "objects": [
         {
-          "object_hash": "5cd6338b0a9ebfbb60aec3e8a8e119b875be827a664d4283e790134d38b81493",
+          "object_hash": "0267595e3ab7748a26f7b94b21b4897ef47c67c83b494dc1fb6d51ae974b24ae",
           "segments": [
             "a"
           ]
         }
       ],
-      "root": "d2ce21c00970cfe53484b505a48534f563ec9ba9ebed7e3940196f202c2ec25d"
+      "root": "40e0aeec7d58ba3c161170ee3b4ec50693ebcc7bc79be5cfd9f08147ad2fcc6d"
     },
     {
       "description": "empty state",
       "id": "TRIE-04",
       "objects": [],
       "root": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "description": "object at [a] and object at [a,b] coexist (object-versus-container); order-independent",
+      "distinct_from": "TRIE-01",
+      "id": "TRIE-05",
+      "objects": [
+        {
+          "object_hash": "1244d48bb80500bdb33fa00d6ce8464f3b027486d5b4c0de7bba92d5046d1072",
+          "segments": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "object_hash": "61d4a2ad6b2027dea5399f3cae620e6ed775b8c5ad5e5f6db3d5e6f47dc048ef",
+          "segments": [
+            "a"
+          ]
+        }
+      ],
+      "root": "3d02b179ba1ac01d25e9d623c1531ac9d1746ccd31a8c46948ec6851f27f2ba5"
     }
   ]
 }

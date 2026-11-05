@@ -25,7 +25,7 @@ fn steps() -> impl Strategy<Value = Vec<TrieProofStep>> {
         (prop::option::of("[a-z0-9_.-]{1,6}"), prop::collection::btree_map("[a-z0-9]{1,4}", hash32(), 0..3)),
         0..4,
     )
-    .prop_map(|v| v.into_iter().map(|(segment, siblings)| TrieProofStep { segment, siblings }).collect())
+    .prop_map(|v| v.into_iter().map(|(segment, siblings)| TrieProofStep::new(segment, siblings)).collect())
 }
 
 proptest! {
@@ -138,7 +138,7 @@ fn w3_6_sboq_huge_object_length_does_not_panic() {
 /// accepted today. Recorded as an observation, not a finding.
 #[test]
 fn sboq_proof_length_header_is_advisory_today() {
-    let proof = TrieProof { state_root: [0; 32], path_segments: vec![], object_hash: None, proof: vec![TrieProofStep { segment: None, siblings: BTreeMap::new() }] };
+    let proof = TrieProof { state_root: [0; 32], path_segments: vec![], object_hash: None, proof: vec![TrieProofStep::new(None, BTreeMap::new())] };
     let m = SboqMessage { version: "0.2".into(), path: "/".into(), id: "x".into(), creator: "c".into(), block: 1, state_root: [0; 32], object_hash: None, trie_proof: proof, object: None };
     let img = String::from_utf8(serialize_sboq(&m)).unwrap().replace("Proof-Length: 1", "Proof-Length: 99");
     assert!(parse_sboq(img.as_bytes()).is_ok());

@@ -14,7 +14,6 @@ fn seg(parts: &[&str]) -> Vec<String> {
 /// `object_hash` equals a subtree's node hash yields the same root as that
 /// subtree: a second preimage of the state root.
 #[test]
-#[ignore] // AUDIT-2026-11 D4: fails today — no leaf/internal domain separation (July sbo-hedq)
 fn d4_leaf_and_internal_node_hashes_are_domain_separated() {
     let h1 = [1u8; 32];
     let h2 = [2u8; 32];

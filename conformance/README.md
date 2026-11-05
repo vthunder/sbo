@@ -18,7 +18,7 @@ double as the open ledger for these layers.
 | `identifiers.json` | id / path / action / type grammar | 50 | sbo-types, sbo-core `message`, sbo-wasm |
 | `identity.json` | identity comparison and domain extraction (Q5) | 18 | sbo-core `resolve_controller`, `dns::parse_email` |
 | `ed25519.json` | signature acceptance (canonical S, small-order keys, lengths) | 7 | sbo-core wrapper, sbo-crypto wrapper, sbo-wasm |
-| `trie.json` | state-trie roots, leaf/internal distinction | 4 | sbo-crypto `SparseTrie`, `PartialTrie`, `compute_trie_root`; daemon `StateDb` |
+| `trie.json` | state-trie roots (v2: domain separation, object-versus-container) | 5 | sbo-crypto `SparseTrie`, `PartialTrie`, `compute_trie_root`; daemon `StateDb` |
 | `lww.json` | last-writer-wins pairs incl. missing HLC | 8 | daemon `lww_admits`, `overlay_wins`, `reconcile_applied` |
 | `checkpoint.json` | `checkpoint.v1` claim parsing (`state_root` form) | 5 | daemon `claim_from_message` |
 
