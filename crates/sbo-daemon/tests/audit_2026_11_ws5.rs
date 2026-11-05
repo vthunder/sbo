@@ -19,10 +19,8 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use sbo_daemon::http::{
-    create_router, ApiError, ListSelector, ObjectView, RepoApi, SignRequestStore, StateRootView,
-    SubmitResultView,
+    create_router, ApiError, ListSelector, ObjectView, RepoApi, StateRootView, SubmitResultView,
 };
-use sbo_daemon::ipc::SignRequest;
 use sbo_daemon::status::StatusChecker;
 use sbo_core::browserid_core::{KeyPair, StatusRef};
 
@@ -346,23 +344,11 @@ fn required_issuers_are_read_from_unverified_presentation_claims() {
 }
 
 // ---------------------------------------------------------------------------
-// W5-10 (WS1 D37): the auth popup
+// W5-10 (WS1 D37): the auth popup — removed (Q31)
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct PopupState {
-    requests: HashMap<String, SignRequest>,
-}
-impl SignRequestStore for PopupState {
-    fn create_sign_request(&mut self, request: SignRequest) -> String {
-        let id = request.request_id.clone();
-        self.requests.insert(id.clone(), request);
-        id
-    }
-    fn get_sign_request(&self, request_id: &str) -> Option<&SignRequest> {
-        self.requests.get(request_id)
-    }
-}
+struct PopupState;
 #[async_trait::async_trait]
 impl RepoApi for PopupState {
     fn get_object(&self, _: Option<&str>, _: &str, _: &str, _: bool) -> Result<ObjectView, ApiError> {
@@ -404,86 +390,25 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-/// Passes today: the `origin` query parameter is HTML-escaped into both the
-/// page text and the `ORIGIN` JS string, so `"`, `<` and `</script>` cannot
-/// break out (no reflected XSS on `/auth`).
+/// AUDIT-2026-11 W5-10, decided Q31 (a): the popup flow is removed, so an
+/// unauthenticated `GET /auth` creates nothing — it is a 404 and the daemon
+/// holds no sign-request table at all (`SignRequest` storage is gone from
+/// `DaemonState`). Retargeted from "pending requests are bounded" to "the
+/// route does not exist".
 #[tokio::test]
-async fn auth_popup_escapes_the_origin_parameter() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
-    let hostile = r#"https://a.test/"></script><script>alert(1)</script>"#;
-    let (status, body) = popup(state, hostile).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(!body.contains("<script>alert(1)"), "origin reflected unescaped");
-    assert!(!body.contains(r#"ORIGIN = "https://a.test/">"#));
-}
-
-/// Passes today (I35 asks for ≥ 64 bits): request ids are 8 random bytes.
-/// Recorded as an observation, not a finding: the id is a bearer for the
-/// assertion at `/auth/status/:id`, and 64 bits with no expiry and no
-/// per-source limit is the floor, not a comfortable margin.
-#[tokio::test]
-async fn auth_popup_request_id_is_64_random_bits() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
-    let (_, body) = popup(state.clone(), "https://a.test").await;
-    let id = body.split("const REQUEST_ID = \"").nth(1).unwrap().split('"').next().unwrap().to_string();
-    assert_eq!(id.len(), 16);
-    assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
-    assert!(state.read().await.requests.contains_key(&id));
-}
-
-/// AUDIT-2026-11 W5-10: fails today. Every unauthenticated `GET /auth`
-/// creates a pending sign request that is never swept (no expiry in
-/// `DaemonState`, `SignRequestStatus::Expired` is never assigned), so the
-/// request table grows without bound and the operator's `sbo auth approve`
-/// list fills with junk from any web page (D37). Expected: a cap on pending
-/// requests per source and a TTL sweep.
-#[tokio::test]
-#[ignore]
 async fn auth_popup_pending_requests_are_bounded() {
-    let state = Arc::new(RwLock::new(PopupState::default()));
+    let state = Arc::new(RwLock::new(PopupState));
     for _ in 0..1000 {
-        let _ = popup(state.clone(), "https://a.test").await;
+        let (status, body) = popup(state.clone(), "https://a.test").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!body.contains("REQUEST_ID"), "popup page was served");
     }
-    let n = state.read().await.requests.len();
-    assert!(n < 1000, "{n} pending sign requests created by unauthenticated GETs");
-}
-
-/// Passes today: `/auth/status/:id` carries the assertion to any holder of
-/// the id, with no origin check — by design (the popup polls without
-/// credentials). Pinned so a future change that adds a binding is a
-/// deliberate one.
-#[tokio::test]
-async fn auth_status_serves_the_assertion_to_any_holder_of_the_id() {
-    use sbo_daemon::ipc::SignRequestStatus;
-    let mut st = PopupState::default();
-    st.requests.insert(
-        "deadbeefdeadbeef".into(),
-        SignRequest {
-            request_id: "deadbeefdeadbeef".into(),
-            app_name: "a.test".into(),
-            app_origin: Some("https://a.test".into()),
-            email: None,
-            challenge: "c".into(),
-            purpose: None,
-            status: SignRequestStatus::Approved,
-            created_at: 0,
-            assertion_jwt: Some("eyJ.fake.jwt".into()),
-            session_binding_jwt: None,
-            rejection_reason: None,
-        },
-    );
-    let resp = create_router(Arc::new(RwLock::new(st)))
-        .oneshot(
-            Request::builder()
-                .uri("/auth/status/deadbeefdeadbeef")
-                .header("origin", "https://evil.example")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["assertion_jwt"], "eyJ.fake.jwt");
+    // The companion routes are gone too.
+    for (m, uri) in [(Method::POST, "/auth/request"), (Method::GET, "/auth/status/deadbeefdeadbeef")] {
+        let resp = create_router(state.clone())
+            .oneshot(Request::builder().method(m.clone()).uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{m} {uri}");
+    }
 }

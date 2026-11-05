@@ -22,6 +22,8 @@ pub struct Config {
     pub attest: AttestConfig,
     #[serde(default)]
     pub trust: TrustConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +241,104 @@ impl Default for TrustConfig {
     }
 }
 
+/// HTTP exposure (security audit 2026-11, Q15). `mode` defaults from the
+/// bind address: a loopback bind runs the localhost convenience server
+/// (open CORS, private-network header, no limits); any other bind is
+/// `public` (origin allowlist, no private-network header, per-source limits,
+/// `/v1/submit` gated on an allowlisted `Origin` or a bearer token).
+/// Binding a routable address with `mode = "loopback"` is refused at start.
+///
+/// Env overrides (`apply_env_overrides`): `SBO_HTTP_BIND`, `SBO_HTTP_MODE`,
+/// `SBO_HTTP_ALLOWED_ORIGINS` (comma-separated), `SBO_HTTP_BEARER_TOKENS`
+/// (comma-separated; keeps secrets out of the committed config).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Listen address, `host:port`.
+    #[serde(default = "default_http_bind")]
+    pub bind: String,
+    /// `loopback` | `public`; derived from `bind` when unset.
+    #[serde(default)]
+    pub mode: Option<crate::http::HttpMode>,
+    /// Browser origins (`https://host[:port]`) CORS reflects and that may
+    /// `POST /v1/submit`. Public mode only.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    /// Bearer tokens admitting non-browser clients to `/v1/submit`
+    /// (`Authorization: Bearer <token>`). Public mode only.
+    #[serde(default)]
+    pub bearer_tokens: Vec<String>,
+    /// Per-source read budget (requests/minute, also the burst). Public mode only.
+    #[serde(default = "default_reads_per_minute")]
+    pub reads_per_minute: u32,
+    /// Per-source `/v1/submit` budget (requests/minute, also the burst). Public mode only.
+    #[serde(default = "default_spends_per_minute")]
+    pub spends_per_minute: u32,
+}
+
+fn default_http_bind() -> String { "127.0.0.1:7890".to_string() }
+fn default_reads_per_minute() -> u32 { crate::http::RateLimits::default().reads_per_minute }
+fn default_spends_per_minute() -> u32 { crate::http::RateLimits::default().spends_per_minute }
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_http_bind(),
+            mode: None,
+            allowed_origins: Vec::new(),
+            bearer_tokens: Vec::new(),
+            reads_per_minute: default_reads_per_minute(),
+            spends_per_minute: default_spends_per_minute(),
+        }
+    }
+}
+
+impl HttpConfig {
+    /// The effective mode: explicit `mode`, else loopback iff `bind` names a
+    /// loopback address. An unparseable bind (e.g. a hostname) is treated as
+    /// public, the conservative choice.
+    pub fn effective_mode(&self) -> crate::http::HttpMode {
+        use crate::http::HttpMode;
+        if let Some(m) = self.mode {
+            return m;
+        }
+        match self.bind.parse::<std::net::SocketAddr>() {
+            Ok(a) if a.ip().is_loopback() => HttpMode::Loopback,
+            _ => HttpMode::Public,
+        }
+    }
+
+    /// Resolve into router options, refusing the one unsafe combination: a
+    /// non-loopback bind in loopback mode (open CORS + private-network header
+    /// on a routable address — the W5-1 shape).
+    pub fn resolve(&self) -> crate::Result<crate::http::HttpOptions> {
+        use crate::http::{HttpMode, HttpOptions, RateLimits};
+        let mode = self.effective_mode();
+        let bind_is_loopback = matches!(
+            self.bind.parse::<std::net::SocketAddr>(),
+            Ok(a) if a.ip().is_loopback()
+        );
+        if mode == HttpMode::Loopback && !bind_is_loopback {
+            return Err(crate::DaemonError::Config(format!(
+                "[http] mode = \"loopback\" but bind {} is not a loopback address; \
+                 set mode = \"public\" (with allowed_origins / bearer_tokens) or bind 127.0.0.1",
+                self.bind
+            )));
+        }
+        let mut opts = match mode {
+            HttpMode::Loopback => HttpOptions::loopback(),
+            HttpMode::Public => HttpOptions::public(
+                self.allowed_origins.iter().map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect(),
+                self.bearer_tokens.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            ),
+        };
+        opts.limits = RateLimits {
+            reads_per_minute: self.reads_per_minute,
+            spends_per_minute: self.spends_per_minute,
+        };
+        Ok(opts)
+    }
+}
+
 /// Light client mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightModeConfig {
@@ -299,6 +399,7 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             attest: AttestConfig::default(),
             trust: TrustConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 }
@@ -343,6 +444,30 @@ impl Config {
         // Checkpoint/snapshot cadence — overridable at runtime so it can be tuned
         // (e.g. a faster cadence for testing) via `dokku config:set` + restart,
         // without rebuilding the image.
+        // HTTP exposure (Q15). SBO_HTTP_BIND predates [http] and keeps working;
+        // the allowlist and bearer tokens are env-settable so the public
+        // deploy config stays secret-free.
+        if let Ok(v) = std::env::var("SBO_HTTP_BIND") {
+            if !v.trim().is_empty() {
+                self.http.bind = v.trim().to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("SBO_HTTP_MODE") {
+            self.http.mode = match v.trim().to_ascii_lowercase().as_str() {
+                "loopback" => Some(crate::http::HttpMode::Loopback),
+                "public" => Some(crate::http::HttpMode::Public),
+                _ => self.http.mode,
+            };
+        }
+        let split = |v: String| -> Vec<String> {
+            v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        };
+        if let Ok(v) = std::env::var("SBO_HTTP_ALLOWED_ORIGINS") {
+            self.http.allowed_origins = split(v);
+        }
+        if let Ok(v) = std::env::var("SBO_HTTP_BEARER_TOKENS") {
+            self.http.bearer_tokens = split(v);
+        }
         if let Ok(v) = std::env::var("SBO_CHECKPOINT_ENABLED") {
             self.checkpoint.enabled = matches!(v.trim(), "1" | "true" | "yes" | "on");
         }
@@ -452,6 +577,34 @@ endpoint = "https://staging.turbo-api.availproject.org"
 # api_key = "..."
 
 # ------------------------------------------------------------------------------
+# HTTP Settings (browser read + submit API)
+# ------------------------------------------------------------------------------
+[http]
+# Listen address. A loopback bind runs the localhost convenience server (open
+# CORS, private-network header, no limits). Any other bind is "public" mode:
+# CORS reflects only allowed_origins, no private-network header, per-source
+# rate limits, and /v1/submit is admitted only for an allowed origin or a
+# bearer token. Env override: SBO_HTTP_BIND.
+bind = "127.0.0.1:7890"
+
+# Force the mode ("loopback" | "public"); derived from bind when unset.
+# A non-loopback bind with mode = "loopback" is refused at start.
+# mode = "public"
+
+# Public mode: browser origins that may read with CORS and POST /v1/submit.
+# Env override: SBO_HTTP_ALLOWED_ORIGINS="https://a.example,https://b.example"
+# allowed_origins = ["https://mingo.place"]
+
+# Public mode: bearer tokens for non-browser clients of /v1/submit
+# (Authorization: Bearer <token>). Prefer the env override so the secret
+# stays out of this file: SBO_HTTP_BEARER_TOKENS="tok1,tok2"
+# bearer_tokens = []
+
+# Public mode: per-source budgets (requests per minute; also the burst size).
+# reads_per_minute = 600
+# spends_per_minute = 60
+
+# ------------------------------------------------------------------------------
 # Alerts Settings (Optional)
 # ------------------------------------------------------------------------------
 [alerts]
@@ -547,5 +700,65 @@ mod turbo_credentials_tests {
         std::env::remove_var("SBO_TURBO_DA_API_KEY_777");
         assert_eq!(c.turbo_da.api_key_for(Some(530)).unwrap(), "env-530");
         assert_eq!(c.turbo_da.api_key_for(Some(777)).unwrap(), "env-777");
+    }
+}
+
+#[cfg(test)]
+mod http_exposure_tests {
+    use super::*;
+    use crate::http::HttpMode;
+
+    #[test]
+    fn mode_defaults_from_the_bind_address() {
+        let mut c = HttpConfig::default();
+        assert_eq!(c.effective_mode(), HttpMode::Loopback);
+        c.bind = "0.0.0.0:5000".into();
+        assert_eq!(c.effective_mode(), HttpMode::Public);
+        c.bind = "[::1]:5000".into();
+        assert_eq!(c.effective_mode(), HttpMode::Loopback);
+        c.bind = "[::]:5000".into();
+        assert_eq!(c.effective_mode(), HttpMode::Public);
+    }
+
+    #[test]
+    fn loopback_mode_on_a_routable_bind_is_refused() {
+        let c = HttpConfig { bind: "0.0.0.0:5000".into(), mode: Some(HttpMode::Loopback), ..Default::default() };
+        let err = c.resolve().unwrap_err().to_string();
+        assert!(err.contains("not a loopback address"), "{err}");
+    }
+
+    #[test]
+    fn public_mode_carries_the_allowlist_and_limits() {
+        let c = HttpConfig {
+            bind: "0.0.0.0:5000".into(),
+            allowed_origins: vec!["https://mingo.place/".into(), " ".into()],
+            bearer_tokens: vec!["tok".into()],
+            reads_per_minute: 10,
+            spends_per_minute: 2,
+            ..Default::default()
+        };
+        let o = c.resolve().unwrap();
+        assert_eq!(o.mode, HttpMode::Public);
+        assert_eq!(o.allowed_origins, vec!["https://mingo.place".to_string()]);
+        assert_eq!(o.bearer_tokens, vec!["tok".to_string()]);
+        assert_eq!(o.limits.reads_per_minute, 10);
+        assert_eq!(o.limits.spends_per_minute, 2);
+    }
+
+    #[test]
+    fn env_overrides_set_bind_mode_origins_and_tokens() {
+        std::env::set_var("SBO_HTTP_BIND", "0.0.0.0:5000");
+        std::env::set_var("SBO_HTTP_MODE", "public");
+        std::env::set_var("SBO_HTTP_ALLOWED_ORIGINS", "https://a.example, https://b.example");
+        std::env::set_var("SBO_HTTP_BEARER_TOKENS", "t1,t2");
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        for k in ["SBO_HTTP_BIND", "SBO_HTTP_MODE", "SBO_HTTP_ALLOWED_ORIGINS", "SBO_HTTP_BEARER_TOKENS"] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(c.http.bind, "0.0.0.0:5000");
+        assert_eq!(c.http.mode, Some(HttpMode::Public));
+        assert_eq!(c.http.allowed_origins, vec!["https://a.example", "https://b.example"]);
+        assert_eq!(c.http.bearer_tokens, vec!["t1", "t2"]);
     }
 }
