@@ -22,8 +22,12 @@ dirs = "5"
 hickory-resolver = "0.24"
 browserid-core.workspace = true
 dnssec-prover = "0.6.8"
+# Test-only synthetic DNSSEC zone signer (ECDSA P-256), feature `dnssec-fixtures`.
+ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
+# Enable the offline DNSSEC fixture builder for this crate's own tests.
+sbo-core = { path = ".", features = ["dnssec-fixtures"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tempfile = "3"
 chrono = "0.4.45"
@@ -37,3 +41,6 @@ proptest = "1"
 default = ["storage"]
 storage = ["dep:rocksdb"]
 bls = ["sbo-crypto/bls"]
+# Offline DNSSEC fixtures (`crate::dnssec_fixture`): synthetic RFC 9102 chains
+# signed with a test P-256 zone key. Test-only; never enable in a release build.
+dnssec-fixtures = ["dep:ring"]
