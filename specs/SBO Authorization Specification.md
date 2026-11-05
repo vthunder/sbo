@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: The browserid-ng four-object **device presentation** carried in `Auth-Cert` is the one normative attributed credential (Q1/S1); the single-JWT `Auth-Cert` and the `Auth-Warrant` header are retired. `sign:sbo:<action>` scope grammar documented. An empty scope list authorizes nothing (Q40). Wildcard cap of 8 on `path:` scopes with a polynomial matcher (Q38). The assertion is judged at the authoring instant bounded by a capped `W`; everything else at inclusion time (Q9). Owner references are never bare keys outside genesis (Q6).
+
 ## Abstract
 
 This specification defines how an SBO message is **authorized**: how a signing key is **attributed** to an email identity using a browserid certificate plus DNSSEC evidence anchored to the pinned DNS root key-signing key (KSK), and how that attribution combines with ownership resolution to authorize a write.
@@ -34,10 +38,111 @@ This specification does **not** redefine any of those. It defines only what SBO 
 | Mode | Owner kind | Evidence carried | Verified by |
 |------|------------|------------------|-------------|
 | **Direct** | Key-rooted identity | none | `Public-Key` equals the owner's key; envelope signature |
-| **Attributed** | Email-rooted identity | `Auth-Cert` + DNSSEC evidence | certificate + DNSSEC chain to the pinned root KSK |
-| **Agent-attributed** | Email-rooted identity, written by a delegated agent | `Auth-Cert` (a **typed agent certificate**) + `Auth-Warrant` + DNSSEC evidence | as Attributed, **plus** a delegator-signed warrant scoping the agent to this database |
+| **Attributed** | Email-rooted identity | `Auth-Cert` (a four-object **device presentation**) + DNSSEC evidence | the presentation's join (access cert, assertion, warrant, config cert) + DNSSEC chains for its issuer(s) to the pinned root KSK |
 
-Direct mode is used by genesis roots and self-sovereign users (see [Self-Sovereign Authorization](#self-sovereign-authorization)). Attributed mode is the default path for email-rooted identities and is the bulk of this document. **Agent-attributed** mode ([The Agent Warrant](#the-agent-warrant-auth-warrant)) is a strict refinement of Attributed mode for browserid *agent* identities: the credential is a typed agent certificate that is **inert on its own** and MUST be accompanied by a warrant. It exists because a browserid agent certificate is fail-closed by construction — it authorizes nothing without a per-audience, user-signed warrant (browserid-ng agent spec v0.4 §5.3) — and this specification is what supplies the "audience" on chain.
+Direct mode is used by genesis roots and self-sovereign users (see [Self-Sovereign Authorization](#self-sovereign-authorization)). Attributed mode is the only path for email-rooted identities and is the bulk of this document. There is **one** attributed credential: the browserid-ng **device presentation** ([The Device Presentation](#the-device-presentation-auth-cert)), which always contains a warrant. A write by the user's own device and a write by a delegated agent are the same object shape; they differ only in whether the warrant's `grantor` and `grantee` are the same identity. The presentation is fail-closed by construction: no object in it authorizes anything on its own, and the warrant names the one database it is good for. There is no separate `Auth-Warrant` header; the earlier single-certificate `Auth-Cert` and the standalone agent warrant are **retired** and MUST be rejected (a value that does not parse as a four-object presentation is not a credential).
+
+## The Device Presentation (`Auth-Cert`)
+
+`Auth-Cert` carries a browserid-ng **access presentation** (browserid-ng Protocol §6.1): four JWS objects joined by `~`:
+
+```
+Auth-Cert: <access_cert>~<assertion>~<warrant>~<config_cert>
+```
+
+| # | Object | `typ` | Signed by | Role in the write |
+|---|--------|-------|-----------|-------------------|
+| 1 | **access cert** | `browserid-access-cert-v1` | the grantee's IdP (`iss`) | Binds a short-lived **access key** to the `identity` (the grantee) and an opaque `holder`. The access key MUST equal the envelope's `Public-Key`: this is the key that signs the message. |
+| 2 | **assertion** | browserid assertion | the access key | Proves possession of the access key **for this audience** (`aud` = this database, below). Short-lived (minutes). |
+| 3 | **warrant** | `browserid-warrant-v1` / `-v2` | the config cert's key | A grant from `grantor` (the identity the write is attributed to) to `grantee` (the actor) over `(holder matcher) → audience [+ scopes]`. |
+| 4 | **config cert** | `browserid-device-cert-v1`, `purpose: authorization` | the grantor's IdP (`iss`) | Binds the device key that signed the warrant to the grantor's identity, and MAY carry managed-identity `constraints`. |
+
+Objects 1 and 4 are IdP-signed; their issuers' keys are what `Auth-Evidence` proves (one DNSSEC chain when `access_cert.iss == config_cert.iss`, two when a delegated grant crosses issuers). Every other signature in the bundle chains from those two keys, so the whole presentation verifies offline.
+
+### Claims that SBO reads
+
+```json
+access_cert:  { "typ": "browserid-access-cert-v1", "iss": "example.com", "identity": "alice@example.com",
+                "holder": "…", "public-key": "<access key>", "iat": …, "exp": … }
+assertion:    { "aud": "sbo+raw://avail:turing:506/", "iat": …, "exp": … }
+warrant:      { "typ": "browserid-warrant-v2", "grantor": "alice@example.com", "grantee": "alice@example.com",
+                "binding": { … holder matcher … }, "audience": "sbo+raw://avail:turing:506/",
+                "scopes": ["sign:sbo:post", "path:/u/alice@example.com/**"], "iat": …, "exp": … }
+config_cert:  { "typ": "browserid-device-cert-v1", "purpose": "authorization", "iss": "example.com",
+                "identities": ["alice@example.com"], "holder": "…", "public-key": "<device key>", "iat": …, "exp": … }
+```
+
+| Claim | Rule |
+|-------|------|
+| `access_cert.public-key` | MUST equal the envelope `Public-Key` (the SBO signing key). |
+| `access_cert.identity` | The **grantee** (actor of record). MUST equal `warrant.grantee`. |
+| `access_cert.iss` | MUST be authoritative for the grantee: equal to the grantee's email domain, or a recognized broker. |
+| `warrant.grantor` | The identity the write is **attributed to** (the effective author, unless `as:` selects otherwise — see below). An exact email, never a pattern. |
+| `config_cert.iss` | MUST be authoritative for the grantor (its domain, or a recognized broker); `config_cert.identities` MUST cover the grantor (exact, or the §4.6 subaddress rule: a cert for `user@d` covers `user+tag@d`). |
+| `warrant.audience`, `assertion.aud` | MUST both identify **this database** ([The audience rule](#the-audience-rule-canonical-offline-verifiable)). |
+| `warrant.binding` / `holder` | The warrant's holder matcher MUST cover `access_cert.holder` (the join that stops a warrant being wielded by a different device or agent). |
+| `warrant.scopes` | MUST permit this write ([Warrant Scopes](#warrant-scopes)). |
+| windows | Access cert, config cert, warrant: `[iat, exp]` MUST contain the **inclusion time**. Assertion: `[iat, exp]` MUST contain the **authoring instant** ([The Inclusion-Time Clock](#the-inclusion-time-clock)). |
+| revocation `status` refs | NOT evaluated on replay (they need the network); a submitting node checks them fail-closed at its submit gate, which is advisory ([Validity Layers](./SBO%20Specification.md#validity-layers)). |
+
+### Envelope binding
+
+browserid-ng pairs an access cert with an audience-bound assertion. SBO keeps the assertion (it is what confines the presentation to this database) and adds a second binding: the **SBO envelope itself** is signed by the access key, which proves possession for this exact message. `Auth-Cert` and `Auth-Evidence` precede `Public-Key` in the header block, so they are inside the signature and cannot be stripped or swapped (see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)). A presentation cannot be replayed to authorize a different message, and a message cannot be re-homed under a different presentation.
+
+### Self-grant and delegated grant
+
+- **Self-grant** (`grantor == grantee`): the user's own device acts. The write is attributed to the user.
+- **Delegated grant** (`grantor != grantee`): an agent or another person acts under a warrant the grantor's device signed. By default the write authorizes as the **grantee** (the agent as itself); with an `as:<grantor>` scope it authorizes **as the grantor** ([On-behalf writes](#on-behalf-writes)). A delegated grant can never exceed what the grantor's own config cert and IdP vouch for: `config_cert.iss` must be authoritative for the grantor, which is what makes cross-issuer delegation (grantor and grantee certified by different IdPs) safe.
+
+### The audience rule (canonical, offline-verifiable)
+
+**`audience` MUST be an `sbo+raw://` reference that identifies *this* database — never an `sbo://` DNS name.** The `_sbo` DNS record is discovery-only and is not a trust root (see the [URI Specification](./SBO%20URI%20Specification.md) and [Identity Specification](./SBO%20Identity%20Specification.md)); a validator replaying offline neither performs nor trusts DNS. An `sbo://` audience is therefore not verifiable on chain and MUST be rejected. (`sbo://mingo.place` remains the human-facing label a consent surface may *display*; the warrant it signs carries the resolved `sbo+raw://` form.) The assertion's `aud` MUST equal the warrant's `audience` byte-for-byte.
+
+Given the database's canonical identity `(chain, appId, firstBlock, genesisHash)`, an audience `A` **identifies this database** iff `A` parses as an `sbo+raw://` reference and:
+
+1. its authority equals `chain:appId` (**required**); and
+2. if `A` carries an `@firstBlock` anchor, it equals this database's `firstBlock`; and
+3. if `A` carries `?genesis=sha256:…`, it equals this database's `genesisHash`.
+
+A **bare-authority** audience (`sbo+raw://avail:turing:506/`) thus authorizes the app across a regenesis; a **pinned** audience (`sbo+raw://avail:turing:506@3567386/?genesis=sha256:7c42…`) confines the grant to one genesis instance. Both are valid; the wallet chooses per request how broad a grant to ask for. The reference MUST be **bare** in the sense of the URI spec (no `path`/`creator`/`id`) — path-level restriction is expressed by scopes, not by the audience.
+
+### Warrant Scopes
+
+Scopes are opaque to the broker and IdP (browserid never interprets them); this specification defines the grammar SBO validators enforce. Each scope is a string `<dimension>:<value>`:
+
+| Dimension | Constrains | Value |
+|-----------|-----------|-------|
+| `sign:sbo:<action>` | the message `Action` | `post` \| `transfer` \| `delete` \| `import`. This is the **browserid signing-grant form** (browserid-ng Protocol §5: `sign:<kind>:<what>` names what the user's wallet may be asked to sign); for an SBO write it constrains the action exactly like `action:`. Any other `sign:` kind (`sign:ledger:…`) is not an SBO write authorization and fails closed. |
+| `action` | the message `Action` | `post` \| `transfer` \| `delete` \| `import` (synonym of `sign:sbo:<action>`; both forms accumulate into the one action dimension) |
+| `path` | the message `Path` | a glob (`*` within a segment, `**` across segments), e.g. `/attestor/*`. Subject to the [wildcard cap](#wildcard-cap). |
+| `schema` | the message `Content-Schema` | exact schema id, e.g. `nft.v1` |
+| `as` | the **effective author** of the write (see [On-behalf writes](#on-behalf-writes)) | an email — MUST equal the warrant's `grantor`. At most one per warrant. Not a write constraint. |
+
+Evaluation is deterministic (offline-replayable): **OR within a dimension** (any matching `path:` scope satisfies the path dimension) and **AND across dimensions** (every dimension that appears must be satisfied). A dimension that appears in no scope is unconstrained. A write is scope-authorized iff the scope list is non-empty (below) and the write satisfies every present dimension. The grammar is intentionally open to extension (`owner:`, `policy:`, `size:`, …); an **unrecognized dimension MUST cause the write to be UNAUTHORIZED** (fail-closed — a validator that does not understand a restriction must not ignore it).
+
+**An empty scope list authorizes nothing.** A warrant for a ledger audience MUST carry at least one write-permitting scope (`sign:sbo:<action>` or `action:<action>`); a warrant whose `scopes` is empty or absent authorizes **no** write on this database. This is the on-chain analogue of browserid's "inert without a warrant" posture: a warrant minted for a web audience, or one minted without asking for a ledger grant, does not silently become a blanket write permission. (A warrant carrying only `path:` or `schema:` scopes is likewise not write-permitting; the action dimension must be granted explicitly.)
+
+### Wildcard cap
+
+A `path:` scope MUST contain at most **8 wildcards** (each `*` and each `**` counts as one). A scope exceeding the cap is a malformed scope and the write is UNAUTHORIZED; a submitting node SHOULD reject such a presentation at its submit gate. The matcher MUST run in time polynomial in the pattern and path lengths (the memoised matcher shared with the [Policy Specification](./SBO%20Policy%20Specification.md#wildcard-cap); a backtracking matcher is exponential in the wildcard count and does not conform even under the cap). The cap is a size bound a second implementation can be held to, like the 256-character identifier limit; the polynomial requirement is what makes it a bound on work rather than on syntax alone.
+
+### On-behalf writes
+
+By default a delegated write authorizes as the **grantee's own identity** (`access_cert.identity`, e.g. `attestor@example.com`). To write to an object owned by the *grantor* — or to set the grantor as `Creator` — the agent must be authorized *as the grantor*, which the base grantee identity is not. The `as:` scope grants exactly that, scoped:
+
+- A warrant carrying **`as:<email>`** (where `<email>` MUST equal the warrant's `grantor`) makes the **effective author** of writes under that warrant the **grantor** rather than the grantee. The write's owner-authorization, `Creator` integrity, policy actor (`$user`, `$email`), attestation subject and name-claim checks all evaluate against the grantor.
+- Because the warrant is signed by the grantor's own config cert, `as:` can only ever name the grantor — an agent cannot be warranted to act as a third party.
+- A self-grant with `as:` is a no-op (grantor and grantee coincide).
+
+**Safety — delegation never exceeds the delegator.** An on-behalf write authorizes *as the grantor, under the same on-chain policy the grantor faces*. So it can do **at most what the grantor can do**, narrowed by the warrant's other scopes. It is not a policy bypass: a restriction the grantor is subject to still applies. The warrant can only ever *narrow* the grantor's authority, never widen it.
+
+**Accountability — delegated, not silent.** The object's `Owner`/`Creator` is the grantor, but the presentation is part of the (message-bound) proof, so the write's provenance always names the grantee. Indexers MUST be able to surface "written by `<grantee>` acting as `<grantor>`." This is accountable delegation, not untraceable impersonation.
+
+**Guardrails.**
+1. An `as:` warrant MUST also carry at least one `path:` scope — an unrestricted act-as-grantor grant MUST be rejected. Impersonation is never repository-wide.
+2. A repository MAY, by policy, decline to honor on-behalf warrants at all (a `direct-writes-only` repo); this hook is reserved (see [Policy Specification](./SBO%20Policy%20Specification.md)). Absent such a policy, on-behalf warrants are honored.
+
+**One warrant, one author.** `as:` is a *per-warrant* mode: a warrant is either grantee-as-itself or on-behalf, never both (a single write has exactly one author). An agent that needs both — e.g. post to a shared area as itself *and* draft in the grantor's namespace as the grantor — holds **two warrants** at the same audience, distinguished by their scopes. Consequently a warrant's identity for grant/registry purposes is `(audience, scopes)`, not audience alone; two warrants may share an audience and differ only in mode.
 
 ## On-Chain Trust Anchors
 
@@ -79,127 +184,9 @@ A governed list of broker domains permitted to vouch for emails whose own domain
 
 A broker's signing key is itself DNSSEC-proven (under `_browserid.<broker-domain>`); only the **designation** "this domain may act as a broker" is a governance decision. An empty or absent list means only primary providers are accepted.
 
-## The Authentication Certificate (`Auth-Cert`)
-
-`Auth-Cert` carries a **browserid certificate**: a JWT signed by the issuing provider's key that binds the SBO signing key to an email address.
-
-### Claims
-
-```json
-{
-  "iss": "example.com",
-  "principal": { "email": "alice@example.com" },
-  "public-key": "ed25519:<EPHEMERAL_KEY>",
-  "iat": 1703001234,
-  "exp": 1703087634
-}
-```
-
-| Claim | Required | Description |
-|-------|----------|-------------|
-| `iss` | Yes | Issuing provider domain (a primary provider, or a recognized broker) |
-| `principal.email` | Yes | The attributed email address |
-| `public-key` | Yes | The certified key — MUST equal the message's `Public-Key` header |
-| `iat` / `exp` | Yes | Validity window |
-
-### Envelope-as-assertion
-
-browserid normally pairs a certificate with a short, audience-bound *assertion* proving possession of the certified key. SBO does not use a separate assertion: the **SBO envelope itself** is signed by the certified `Public-Key`, which proves possession and binds the credential to that specific message. Consequences:
-
-- No `aud` and no separate assertion are needed.
-- A signature cannot be replayed to authorize a different message (the signature covers the message, including `Auth-Cert` — see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)).
-
-### Constraints
-
-- `public-key` MUST equal the envelope `Public-Key`.
-- The inclusion time (below) MUST fall within `[iat, exp]`.
-- `principal.email` MUST equal the email controller the message is authorized for.
-
-## The Agent Warrant (`Auth-Warrant`)
-
-A browserid **agent identity** (e.g. `attestor@browserid.me`) is an ordinary email controller on chain, but its certificate is a *typed agent certificate* (`typ: "browserid-agent-cert-v1"`) that carries an `agent.parent` claim naming the human it acts for. Per browserid-ng v0.4 such a certificate is **fail-closed**: it never authorizes a presentation on its own — it must be paired with a **warrant**, a short claim signed by the *delegator's* identity key that names one audience and the scopes granted there.
-
-SBO's base Attributed mode has no audience (the [Envelope-as-assertion](#envelope-as-assertion)), so nothing in it would confine an agent to one ledger. This section supplies that confinement.
-
-### When a warrant is required
-
-- If `Auth-Cert` is a **plain** certificate (no `typ`, no `agent` claim), Attributed mode applies unchanged and `Auth-Warrant` MUST be absent.
-- If `Auth-Cert` is an **agent** certificate (`typ == "browserid-agent-cert-v1"`), the message MUST carry an `Auth-Warrant` header, and Agent-attributed mode applies. An agent certificate **without** a warrant is UNAUTHORIZED — the on-chain analogue of browserid's fail-closed rule; a leaked agent certificate + key cannot write.
-
-### `Auth-Warrant`
-
-A `browserid-agent-warrant-v1` JWS (base64url), signed by the delegator's identity key, embedding the delegator's own certificate (`parent-cert`) so the whole chain verifies offline. Like `Auth-Cert`/`Auth-Evidence` it lives **inside the signed header block** (see the [Wire Format Specification](./SBO%20Wire%20Format%20Specification.md)), so it is message-bound and cannot be stripped or swapped.
-
-Claims (browserid-ng agent spec §5.2):
-
-```json
-{
-  "typ": "browserid-agent-warrant-v1",
-  "iss": "human@example.com",
-  "agent": "attestor@example.com",
-  "aud": "sbo+raw://avail:turing:506/",
-  "scopes": ["action:post", "path:/attestor/*"],
-  "parent-cert": "<the delegator's browserid certificate, JWS>",
-  "iat": 1783600000,
-  "exp": 1791376000
-}
-```
-
-| Claim | Meaning / rule |
-|-------|----------------|
-| `iss` | The delegator. MUST equal `parent-cert.principal.email` **and** the `Auth-Cert`'s `agent.parent`. |
-| `agent` | The agent identity. MUST equal the `Auth-Cert`'s `principal.email`. |
-| `aud` | The **canonical database identity** this warrant authorizes writing to (below). |
-| `scopes` | What the agent may write here ([Warrant Scopes](#warrant-scopes)). Absent ⇒ no on-chain write is authorized (a warrant minted for a web audience does not silently grant ledger writes). |
-| `parent-cert` | The delegator's certificate, embedded for self-contained offline verification. Its issuer is DNSSEC-proven and its principal fully attributed **exactly like the `Auth-Cert`'s** — including the issuer-authority rule (the delegator's email domain equals its issuer, or the issuer is a pinned broker). The delegator's issuer **need not equal the agent's** (cross-issuer delegation: any user, certified by their own IdP, may warrant a third-party service agent certified by a different IdP). When the issuers are the same the one `Auth-Evidence` covers both; when they differ, the delegator issuer's proof is supplied separately — inline as a second evidence, or resolved on chain from `/sys/dnssec/<delegator-issuer>`. |
-| `iat`/`exp` | Warrant window. Inclusion time MUST fall within it; and (signing-time semantics) `iat` MUST fall within `parent-cert`'s validity window. |
-
-### The audience rule (canonical, offline-verifiable)
-
-**`aud` MUST be an `sbo+raw://` reference that identifies *this* database — never an `sbo://` DNS name.** The `_sbo` DNS record is discovery-only and is not a trust root (see the [URI Specification](./SBO%20URI%20Specification.md) and [Identity Specification](./SBO%20Identity%20Specification.md)); a validator replaying offline neither performs nor trusts DNS. An `sbo://` audience is therefore not verifiable on chain and MUST be rejected. (`sbo://mingo.place` remains the human-facing label a consent surface may *display*; the warrant it signs carries the resolved `sbo+raw://` form.)
-
-Given the database's canonical identity `(chain, appId, firstBlock, genesisHash)`, a warrant audience `A` **identifies this database** iff `A` parses as an `sbo+raw://` reference and:
-
-1. its authority equals `chain:appId` (**required**); and
-2. if `A` carries an `@firstBlock` anchor, it equals this database's `firstBlock`; and
-3. if `A` carries `?genesis=sha256:…`, it equals this database's `genesisHash`.
-
-A **bare-authority** audience (`sbo+raw://avail:turing:506/`) thus authorizes the app across a regenesis; a **pinned** audience (`sbo+raw://avail:turing:506@3567386/?genesis=sha256:7c42…`) confines the grant to one genesis instance. Both are valid; the agent chooses per request how broad a grant to ask for. The reference MUST be **bare** in the sense of the URI spec (no `path`/`creator`/`id`) — path-level restriction is expressed by scopes, not by the audience.
-
-### Warrant Scopes
-
-Scopes are opaque to the broker and IdP (browserid never interprets them); this specification defines the grammar SBO validators enforce. Each scope is a string `<dimension>:<value>`:
-
-| Dimension | Constrains | Value |
-|-----------|-----------|-------|
-| `action` | the message `Action` | `post` \| `transfer` \| `delete` \| `import` |
-| `path` | the message `Path` | a glob (`*` within a segment, `**` across segments), e.g. `/attestor/*` |
-| `schema` | the message `Content-Schema` | exact schema id, e.g. `nft.v1` |
-| `as` | the **effective author** of the write (see [On-behalf writes](#on-behalf-writes)) | an email — MUST equal the warrant's `iss` (the delegator). At most one per warrant. |
-
-Evaluation is deterministic (offline-replayable): **OR within a dimension** (any matching `path:` scope satisfies the path dimension) and **AND across dimensions** (every dimension that appears must be satisfied). A dimension with no scope is unconstrained. A write is scope-authorized iff it satisfies every present dimension. The grammar is intentionally open to extension (`owner:`, `policy:`, `size:`, …); an **unrecognized dimension MUST cause the write to be UNAUTHORIZED** (fail-closed — a validator that does not understand a restriction must not ignore it).
-
-### On-behalf writes
-
-By default an agent write authorizes as the **agent's own identity** (`Auth-Cert.principal.email`, e.g. `attestor@example.com`). To write to an object owned by the *delegator* — or to set the delegator as `Creator` — the agent must be authorized *as the delegator*, which the base agent identity is not. The `as:` scope grants exactly that, scoped:
-
-- A warrant carrying **`as:<email>`** (where `<email>` MUST equal the warrant's `iss`) makes the **effective author** of writes under that warrant the **delegator** rather than the agent. The write's owner-authorization, `Creator` integrity, and name-claim checks all evaluate against the delegator.
-- Because a warrant is signed by the delegator, `as:` can only ever name the delegator themselves — an agent cannot be warranted to act as a third party.
-- The **device-cert model** (`Auth-Cert` carrying a four-object presentation, see the Attribution Specification §3) follows the same rule verbatim: the warrant's `grantee` (the access-cert identity that signs the envelope) is the effective author unless the warrant's scopes carry `as:<grantor>`, in which case the `grantor` is. A delegated grant with no `as:` is the agent acting as itself — never silently as the human.
-
-**Safety — delegation never exceeds the delegator.** An on-behalf write authorizes *as the delegator, under the same on-chain policy the delegator faces*. So it can do **at most what the delegator can do**, narrowed by the warrant's other scopes. It is not a policy bypass: a restriction the delegator is subject to still applies. The warrant can only ever *narrow* the delegator's authority, never widen it.
-
-**Accountability — delegated, not silent.** The object's `Owner`/`Creator` is the delegator, but the `Auth-Warrant` is part of the (message-bound) proof, so the write's provenance always names the agent. Indexers MUST be able to surface "written by `<agent>` acting as `<delegator>`." This is accountable delegation, not untraceable impersonation.
-
-**Guardrails.**
-1. An `as:` warrant MUST also carry at least one `path:` scope — an unrestricted act-as-delegator grant MUST be rejected. Impersonation is never repository-wide.
-2. A repository MAY, by policy, decline to honor on-behalf warrants at all (a `direct-writes-only` repo); this hook is reserved (see [Policy Specification](./SBO%20Policy%20Specification.md)). Absent such a policy, on-behalf warrants are honored.
-
-**One warrant, one author.** `as:` is a *per-warrant* mode: a warrant is either agent-as-itself or on-behalf, never both (a single write has exactly one author). An agent that needs both — e.g. post to a shared area as itself *and* draft in the delegator's namespace as the delegator — holds **two warrants** at the same audience, distinguished by their scopes. Consequently a warrant's identity for grant/registry purposes is `(audience, scopes)`, not audience alone; two warrants may share an audience and differ only in mode.
-
 ## DNSSEC Evidence (`Auth-Evidence`)
 
-The certificate is only as trustworthy as the provider key that signed it. `Auth-Evidence` proves that key is authentic by exhibiting the DNSSEC chain from `_browserid.<issuer-domain>` to the pinned root KSK.
+The presentation is only as trustworthy as the IdP keys that signed its access cert and config cert. `Auth-Evidence` proves such a key is authentic by exhibiting the DNSSEC chain from `_browserid.<issuer-domain>` to the pinned root KSK. A presentation whose two IdP-signed objects have different issuers needs evidence for each (one inline plus one on chain, or both on chain under `/sys/dnssec/<issuer>`).
 
 ### Structure
 
@@ -238,22 +225,26 @@ Several windows above must be checked against a single, agreed time. SBO defines
 
 All of the following windows MUST contain `T`:
 
-- the certificate `[iat, exp]`,
+- the access cert, config cert and warrant `[iat, exp]`,
 - every `RRSIG` `[inception, expiration]` in the evidence,
-- the root KSK `[valid_from, valid_until]`,
+- the root KSK `[valid_from, valid_until]` (the `/sys/trust/dns-root` entry in force at `T`),
 - a recognized-broker designation, if applicable.
 
 Using inclusion time (rather than wall-clock "now") is what makes a write **durably** verifiable: a from-scratch replayer re-checks the same windows against the same `T` and reaches the same result, forever. This inclusion-time clock is the canonical time source for SBO and is reused by other time-bounded rules (e.g. future recovery timelocks).
+
+### The authoring instant (assertion only)
+
+The **assertion** is the one object whose window is judged at the write's **authoring instant** `A`, not at `T`. An assertion lives minutes; a write can wait longer than that between signing and inclusion (batching, DA latency), so judging it at `T` would make honest writes fail by timing. `A` is derived deterministically from the message: the `HLC` header's physical component, which the [Content Specification](./SBO%20Content%20Specification.md#author-clock-hlc) bounds to `T_b − W ≤ A ≤ T_b + ε` with `W` capped by the protocol maximum (reference 24 h). A message with no `HLC` has `A = T`. Because `W` is bounded, an attacker cannot back-date `A` far enough to resurrect an expired assertion, and because `A` is in the signed message, every replayer computes the same `A`. Nothing else uses `A`: certs, warrants, DNSSEC windows and the root KSK are judged at `T`, so a long-lived credential cannot be made to look valid by authoring a write inside its window and including it after revocation-by-expiry.
 
 ## Verification Algorithm
 
 ```
 function authorize(message, chain_state):
     # Layer 1 — envelope validity (deterministic; see Wire Format Spec)
-    if not verify_envelope(message):            # signature, Content-Hash, well-formedness
+    if not verify_envelope(message):            # signature over the received bytes, Content-Hash, well-formedness
         return UNAUTHORIZED
 
-    owner      = effective_owner(message)        # Owner, else Creator, else signer
+    owner      = effective_owner(message)        # Owner, else Creator; a message naming neither is invalid (Identity Spec)
     controller = resolve_controller(owner)       # Identity Spec
     if controller is Unresolved:
         return UNAUTHORIZED
@@ -262,98 +253,90 @@ function authorize(message, chain_state):
     if controller is KeyController(K):
         return AUTHORIZED if message.PublicKey == K else UNAUTHORIZED
 
-    # Attributed (email-rooted) authorization
+    # Attributed (email-rooted) authorization: the device presentation
     addr = controller.email
-    T    = inclusion_time(message)
+    T    = inclusion_time(message)                       # DA block time
+    A    = authoring_instant(message, T)                 # HLC physical (bounded by W), else T
 
-    cert = parse_jwt(message.AuthCert)
-    if cert["public-key"] != message.PublicKey:        return UNAUTHORIZED
-    if cert["principal"]["email"] != addr:             return UNAUTHORIZED
-    if not (cert["iat"] <= T <= cert["exp"]):          return UNAUTHORIZED
+    pres = parse_presentation(message.AuthCert)          # access_cert ~ assertion ~ warrant ~ config_cert
+    if pres is None:                                     return UNAUTHORIZED   # legacy single cert: not a credential
+    ac, asn, w, cc = pres
 
-    issuer = cert["iss"]
-    # Authority: a primary provider for its own domain, or a recognized broker
-    if domain_of(addr) != issuer and issuer not in recognized_brokers(chain_state, T):
-        return UNAUTHORIZED
+    # 1. Signing-key binding and identities
+    if ac["public-key"] != message.PublicKey:            return UNAUTHORIZED
+    grantee = ac["identity"];  grantor = w["grantor"]
+    if w["grantee"] != grantee:                          return UNAUTHORIZED
+    if not holder_matcher_covers(w, ac["holder"]):       return UNAUTHORIZED
+    if not identities_cover(cc["identities"], grantor):  return UNAUTHORIZED   # exact, or user@d covers user+tag@d
 
-    evidence     = load_evidence(message)              # inline or referenced object
-    provider_key = dnssec_validate(
-        evidence,
-        owner_name = "_browserid." + issuer,
-        root_ksk   = pinned_root_ksk(chain_state, T),  # /sys/trust/dns-root
-        at_time    = T)                                # every RRSIG window must contain T
-    if provider_key is None:                           return UNAUTHORIZED
-    if not verify_jwt_signature(cert, provider_key):   return UNAUTHORIZED
+    # 2. Issuer authority (each IdP vouches only for its own domain, or is a recognized broker)
+    brokers = recognized_brokers(chain_state, T)
+    if domain_of(grantee) != ac["iss"] and ac["iss"] not in brokers:  return UNAUTHORIZED
+    if domain_of(grantor) != cc["iss"] and cc["iss"] not in brokers:  return UNAUTHORIZED
 
-    # Agent-attributed: a typed agent certificate is inert without a warrant
-    if cert["typ"] == "browserid-agent-cert-v1":
-        if message.AuthWarrant is None:                return UNAUTHORIZED  # fail-closed
-        w = parse_jws(message.AuthWarrant)
-        if w["typ"]   != "browserid-agent-warrant-v1": return UNAUTHORIZED
-        if w["agent"] != addr:                         return UNAUTHORIZED  # this agent
-        if w["iss"]   != cert["agent"]["parent"]:      return UNAUTHORIZED  # its delegator
-        if not (w["iat"] <= T <= w["exp"]):            return UNAUTHORIZED
+    # 3. DNSSEC-proven IdP keys, windows at T (one chain per distinct issuer)
+    keys = {}
+    for iss in distinct(ac["iss"], cc["iss"]):
+        evidence  = load_evidence(message, iss)          # inline, ref:, or /sys/dnssec/<iss>
+        keys[iss] = dnssec_validate(evidence,
+                        owner_name = "_browserid." + iss,
+                        root_ksk   = pinned_root_ksk(chain_state, T),   # /sys/trust/dns-root
+                        at_time    = T)                                 # every RRSIG window must contain T
+        if keys[iss] is None:                            return UNAUTHORIZED
 
-        parent = parse_jwt(w["parent-cert"])
-        if w["iss"] != parent["principal"]["email"]:   return UNAUTHORIZED
-        # The delegator's issuer key is DNSSEC-proven exactly like `cert`'s. It
-        # MAY differ from the agent's issuer (cross-issuer delegation): when the
-        # same, one evidence covers both; when different, evidence_for() supplies
-        # the delegator issuer's own proof (a second inline evidence, or the
-        # on-chain /sys/dnssec/<delegator-issuer>). Signing-time semantics:
-        if not (parent["iat"] <= w["iat"] <= parent["exp"]): return UNAUTHORIZED
-        # inclusion time must also fall within the delegator proof + cert windows
-        pkey, p_from, p_until = dnssec_validate(evidence_for(parent["iss"]),
-                 owner_name="_browserid."+parent["iss"],
-                 root_ksk=pinned_root_ksk(chain_state, T), at_time=T)
-        if pkey is None:                               return UNAUTHORIZED
-        if not (p_from <= T <= p_until):               return UNAUTHORIZED
-        if not (parent["iat"] <= T <= parent["exp"]):  return UNAUTHORIZED
-        # Delegator authority: primary IdP (domain == iss) or a pinned broker.
-        if domain_of(w["iss"]) != parent["iss"] and parent["iss"] not in brokers:
-            return UNAUTHORIZED
-        if not verify_jws_signature(w, parent["public-key"]): return UNAUTHORIZED
-        if not verify_jwt_signature(parent, pkey):     return UNAUTHORIZED
+    # 4. Signatures and windows
+    if not verify_jws(ac, keys[ac["iss"]]):              return UNAUTHORIZED
+    if not verify_jws(cc, keys[cc["iss"]]):              return UNAUTHORIZED
+    if not verify_jws(w,  cc["public-key"]):             return UNAUTHORIZED   # warrant signed by the config cert's device key
+    if not verify_jws(asn, ac["public-key"]):            return UNAUTHORIZED   # assertion signed by the access key
+    if not (ac["iat"] <= T <= ac["exp"]):                return UNAUTHORIZED
+    if not (cc["iat"] <= T <= cc["exp"]):                return UNAUTHORIZED
+    if not (w["iat"]  <= T <= w["exp"]):                 return UNAUTHORIZED
+    if not (asn["iat"] <= A <= asn["exp"]):              return UNAUTHORIZED   # the assertion, at the authoring instant
+    if cc["constraints"] or ac["constraints"]:
+        if not constraints_satisfied(cc, ac, w):         return UNAUTHORIZED   # managed identities (browserid-ng §4.7)
 
-        # Audience must identify THIS database; scopes must permit THIS write
-        if not audience_identifies_db(w["aud"], chain_state): return UNAUTHORIZED
-        if not scopes_authorize(w["scopes"], message):        return UNAUTHORIZED
+    # 5. Audience and scopes: THIS database, THIS write
+    if asn["aud"] != w["audience"]:                      return UNAUTHORIZED
+    if not audience_identifies_db(w["audience"], chain_state): return UNAUTHORIZED
+    if not scopes_authorize(w["scopes"], message):       return UNAUTHORIZED   # empty list ⇒ false; unknown dimension ⇒ false
 
-        # Effective author: the agent by default, or the delegator if the
-        # warrant carries `as:<delegator>` (scoped — see On-behalf writes).
-        effective_email = addr                       # the agent identity
-        as_scope = scope_value(w["scopes"], "as")
-        if as_scope is not None:
-            if as_scope != w["iss"]:                  return UNAUTHORIZED
-            if not has_path_scope(w["scopes"]):       return UNAUTHORIZED  # guardrail 1
-            if repo_rejects_on_behalf(chain_state):   return UNAUTHORIZED  # guardrail 2
-            effective_email = w["iss"]                # act AS the delegator
-        # The message is authorized for `effective_email` (owner match, Creator,
-        # name-claim all evaluate against it). Provenance (agent + parent) stays
-        # recoverable from the message's Auth-Warrant.
-        if not authorized_for(effective_email, message, chain_state):
-            return UNAUTHORIZED
-        # Attribution root recorded for indexers = cert["agent"]["parent"]
+    # 6. Effective author: the grantee by default, the grantor under `as:`
+    effective_email = grantee
+    as_scope = scope_value(w["scopes"], "as")
+    if as_scope is not None:
+        if as_scope != grantor:                          return UNAUTHORIZED
+        if not has_path_scope(w["scopes"]):              return UNAUTHORIZED   # guardrail 1
+        if repo_rejects_on_behalf(chain_state):          return UNAUTHORIZED   # guardrail 2
+        effective_email = grantor
 
+    # 7. The write is authorized for `effective_email`: owner match, Creator,
+    #    name-claim and the policy actor all evaluate against it.
+    if effective_email != addr:                          return UNAUTHORIZED
     return AUTHORIZED
+    # Provenance recorded for indexers: grantee (actor), grantor, both issuers.
 ```
 
-Note the last check folds the agent branch back into the owner-authorization it started from: `authorized_for(effective_email, …)` is the same email-controller match the outer algorithm performs, now run against the *effective* author. For a default (non-`as:`) agent write `effective_email` is the agent, so it authorizes writes to objects owned by the agent (or where the agent's policy grants access); for an on-behalf write it is the delegator, so no per-object policy is needed.
+The last step is the same email-controller match a single-identity write performs, run against the *effective* author: for a self-grant or a default delegated write that is the grantee, so the write may touch objects the grantee owns (or that policy grants it); for an on-behalf write it is the grantor, so no per-object policy is needed. Revocation `status` refs carried by the three chain objects are **not** consulted here: replay must not depend on a network fetch. A submitting node checks them fail-closed at its submit gate, which is advisory.
 
 Every input is on-chain (`chain_state`, the message, the pinned root KSK) or derived deterministically from them, so all correct clients reach the same decision and no sequencer, checkpoint, or trusted recorder is involved.
 
 ### Creator integrity
 
-`effective_owner` is `Owner → else Creator → else signer`, so the algorithm above
+`effective_owner` is `Owner → else Creator`, so the algorithm above
 authorizes the `Creator` reference *only when no `Owner` is present*. But `Creator`
 is the object's immutable **author attribute** and gates provenance/ownership
-defaulting (`effective_owner = Owner → else Creator → else signer`). A writer must
-not be able to file an object under another identity's `Creator`.
+defaulting. A writer must not be able to file an object under another identity's
+`Creator`.
 
 **Rule:** when a message declares a `Creator`, the signer MUST also be authorized
 for it — `authorize` is additionally run with `owner = Creator`. This holds for
 all actions. (When `Creator` is absent the creator is derived from the signer's
-own attribution/name/key, so it is controlled by construction.)
+own attribution or name, so it is controlled by construction.) There is no
+signer-key fallback: a message that names neither `Owner` nor `Creator` resolvable
+to a name or an email is invalid, and an explicit bare-key `Owner`/`Creator`/
+`New-Owner` is invalid, outside the genesis mode objects (see the
+[Identity Specification](./SBO%20Identity%20Specification.md#owner-references)).
 
 ### Name-claim anti-hijack (primary-domain repos)
 
@@ -406,7 +389,9 @@ No per-provider keys are trusted-written on chain; provider keys are *proven* pe
 
 - **Provider/broker compromise.** A compromised provider (or recognized broker) can attribute an email to an attacker's key — the standard email-trust assumption. Multi-provider backing and the pseudonymous tier (Identity Spec, roadmap) reduce reliance on any single provider.
 - **Root KSK governance.** `/sys/trust/dns-root` is the protocol's a-priori trust; its update path MUST be tightly governed and SHOULD track IANA rollovers exactly.
-- **Replay.** The certified key signs the whole message, so a credential cannot be reused to authorize a different message; identical re-posts are idempotent under last-write-wins.
+- **Replay.** The access key signs the whole message and the assertion is audience-bound, so a presentation cannot be reused to authorize a different message or on a different database; identical re-posts are idempotent under last-write-wins.
+- **Scope evaluation is untrusted input.** A warrant is authored by any wallet and evaluated by every node at the submit gate and on replay. The wildcard cap and the polynomial matcher bound the work one scope can cause; an empty scope list and an unknown dimension both fail closed.
+- **Submit-time checks are advisory.** Revocation status, live DNS and wall-clock freshness are checked by a submitting node, not by replay. A writer that bypasses the node and submits to the DA layer directly is bound only by the replay rules above (see [Validity Layers](./SBO%20Specification.md#validity-layers)).
 - **Clock.** Verifiers MUST use the inclusion time, not wall-clock, or durable verification breaks.
 
 ## Privacy Considerations
