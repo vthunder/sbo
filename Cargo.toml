@@ -36,6 +36,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/vthunder/sbo"
 
 [workspace.dependencies]
+# Git dependencies: pinned by rev so the lockfile is the only thing that moves
+# (audit 2026-11 W7-3/W7-4). Bump the rev here, then `cargo update -p <crate>`.
+avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", rev = "de07cce10fe8c5ae5f06c3eb09767f4432220ebc" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "b83cce1" }
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"

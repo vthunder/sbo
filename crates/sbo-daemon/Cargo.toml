@@ -31,7 +31,7 @@ sha2.workspace = true
 flate2.workspace = true
 
 # Avail SDK for RPC queries
-avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", branch = "main" }
+avail-rust.workspace = true
 
 # SCALE codec for proper extrinsic decoding
 parity-scale-codec = "3"

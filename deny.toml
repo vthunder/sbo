@@ -17,6 +17,10 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
+# Unmaintained/unsound advisories fail the gate only for direct workspace
+# dependencies; transitive ones are reported by `cargo audit` as warnings
+# (WS7 policy: warnings do not fail the gate). None are direct today.
+unmaintained = "workspace"
 ignore = [
     # hickory-proto 0.24.4 (via hickory-resolver in sbo-core): O(n²) name
     # compression on ENCODE. Fixed only in 0.26.1 (major bump of
@@ -39,6 +43,11 @@ ignore = [
     # only): ANSI escapes in logged input. Fixed in 0.3.20; the 0.2 line is
     # pinned by ark. Not linked by the daemon or CLI. Review: 2027-02-01.
     "RUSTSEC-2025-0055",
+    # ruzstd 0.6.0 / 0.7.3 decompression bomb: reachable only through
+    # risc0-zkvm (object/addr2line) behind sbo-crypto's non-default `zkvm`
+    # feature; absent from the default daemon and CLI graphs on every target.
+    # Fixed in 0.9.1, waits on object/risc0. Q19: experimental. Review 2027-02-01.
+    "RUSTSEC-2026-0344",
 ]
 
 [bans]
@@ -63,16 +72,6 @@ allow = [
     "LGPL-3.0-only", "LGPL-3.0-or-later",
 ]
 exceptions = []
-# sbo-zkvm-methods (crates/sbo-zkvm/methods/Cargo.toml) declares no `license`
-# field (W7-8); the one-line fix is `license.workspace = true` in that
-# manifest, which is a production-manifest edit left to remediation. Until
-# then the crate is exempted here so the check stays meaningful for the
-# third-party tree.
-[[licenses.clarify]]
-crate = "sbo-zkvm-methods"
-expression = "MIT OR Apache-2.0" # the workspace license, which the manifest should inherit
-license-files = []
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

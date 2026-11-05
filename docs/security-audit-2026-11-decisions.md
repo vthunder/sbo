@@ -422,6 +422,11 @@ the audit rule keeps off the branch.
 a green gate on the first PR is what makes people keep it.
 
 **Decided 2026-11-05 (Dan): (a).** Land the bumps on the audit branch.
+Landed 2026-11-05 (bean `sbo-bzp7`): one new advisory surfaced after the
+update, RUSTSEC-2026-0344 (`ruzstd` decompression bomb), reachable only
+through `risc0-zkvm` behind the non-default `zkvm` feature and ignored under
+the Q19 rule with review 2027-02-01. `cargo audit` and `cargo deny check`
+are green on localtest.
 
 ### Q27. WS7: daemon container runs as root (W7-12, Medium)
 

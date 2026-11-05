@@ -29,4 +29,10 @@ ignore = [
     # only): ANSI escapes in logged input. Fixed in 0.3.20; the 0.2 line is
     # pinned by ark. Not linked by the daemon or CLI. Review: 2027-02-01.
     "RUSTSEC-2025-0055",
+    # ruzstd 0.6.0 / 0.7.3 decompression bomb (RUSTSEC-2026-0344): reachable
+    # only through risc0-zkvm (object/addr2line) behind sbo-crypto's non-default
+    # `zkvm` feature; `cargo tree -i ruzstd` is empty for the default daemon and
+    # CLI builds on every target. Fixed in 0.9.1, which waits on object/risc0.
+    # Q19: experimental. Review: 2027-02-01.
+    "RUSTSEC-2026-0344",
 ]

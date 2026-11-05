@@ -15,7 +15,7 @@ sbo-crypto.workspace = true
 sbo-capture = { path = "../sbo-capture" }
 # DEV: temporary path dep (see sbo-core/Cargo.toml). REVERT to a pushed git rev
 # once browserid-ng main is pushed.
-browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "2582555" }
+browserid-core.workspace = true
 sbo-avail.workspace = true
 sbo-daemon.workspace = true
 sbo-rpc.workspace = true
@@ -35,7 +35,7 @@ reqwest.workspace = true
 base64.workspace = true
 flate2.workspace = true
 parity-scale-codec = "3"
-avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", branch = "main" }
+avail-rust.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 dirs = "5"
