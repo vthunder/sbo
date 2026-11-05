@@ -218,7 +218,6 @@ fn empty_trie_conventions() {
 /// segment list and crashes the client verifying it. Expected: a malformed
 /// proof is `Err(InvalidProof)`.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-8: fails today — non-existence proof verification panics on a short path_segments
 fn w3_8_nonexistence_verifier_rejects_short_path_segments() {
     let proof = sbo_crypto::trie::TrieProof {
         state_root: [1u8; 32],

@@ -28,6 +28,10 @@ pub enum SbopError {
     LengthMismatch { expected: usize, actual: usize },
 }
 
+/// Upper bound on a declared `Receipt-Length` (a zkVM receipt is kilobytes to
+/// a few megabytes; the header is untrusted chain data).
+pub const MAX_RECEIPT_LENGTH: usize = 64 * 1024 * 1024;
+
 /// Parsed SBOP message
 #[derive(Debug, Clone)]
 pub struct SbopMessage {
@@ -48,9 +52,11 @@ pub fn parse_sbop(bytes: &[u8]) -> Result<SbopMessage, SbopError> {
     use std::collections::HashMap;
     use base64::{Engine, engine::general_purpose::STANDARD};
 
-    // Split headers and payload at blank line
+    // Split headers and payload at blank line. The blank line is required:
+    // without it `pos` would end past the buffer (W3-9).
     let mut pos = 0;
     let mut headers: HashMap<String, String> = HashMap::new();
+    let mut terminated = false;
 
     while pos < bytes.len() {
         let line_end = bytes[pos..].iter().position(|&b| b == b'\n')
@@ -61,6 +67,7 @@ pub fn parse_sbop(bytes: &[u8]) -> Result<SbopMessage, SbopError> {
 
         if line.is_empty() {
             pos = line_end + 1;
+            terminated = true;
             break;
         }
 
@@ -75,6 +82,10 @@ pub fn parse_sbop(bytes: &[u8]) -> Result<SbopMessage, SbopError> {
         headers.insert(name, value);
 
         pos = line_end + 1;
+    }
+
+    if !terminated {
+        return Err(SbopError::InvalidHeader("Missing blank line after headers".to_string()));
     }
 
     // Parse required headers
@@ -105,12 +116,22 @@ pub fn parse_sbop(bytes: &[u8]) -> Result<SbopMessage, SbopError> {
         .parse()
         .map_err(|_| SbopError::InvalidHeader("Receipt-Length not a number".to_string()))?;
 
+    // Receipt-Length is an untrusted header (W3-6 / D40): bound it before any
+    // arithmetic, and never let it exceed what the buffer could encode.
+    if receipt_length > MAX_RECEIPT_LENGTH {
+        return Err(SbopError::InvalidHeader("Receipt-Length out of range".to_string()));
+    }
     // Payload is base64-encoded receipt
     // Calculate expected base64 length from Receipt-Length
-    let expected_base64_len = ((receipt_length + 2) / 3) * 4;
-    let _expected_total_len = pos + expected_base64_len;
+    let expected_base64_len = receipt_length.div_ceil(3).saturating_mul(4);
 
-    let payload = &bytes[pos..];
+    let payload = bytes.get(pos..).unwrap_or(&[]);
+    if expected_base64_len > payload.len() {
+        return Err(SbopError::LengthMismatch {
+            expected: receipt_length,
+            actual: payload.len() / 4 * 3,
+        });
+    }
 
     // Find the end of valid base64 content (stop at first non-base64 character)
     // Base64 chars: A-Z, a-z, 0-9, +, /, =, and whitespace

@@ -111,7 +111,6 @@ proptest! {
 /// panics (overflow) in a debug build and wraps in release. SBOP messages are
 /// read off the chain by every light-mode node (D40 class).
 #[test]
-#[ignore] // AUDIT-2026-11 W3-6: fails today — SBOP Receipt-Length arithmetic is unchecked
 fn w3_6_sbop_huge_receipt_length_does_not_panic() {
     let img = format!("SBOP-Version: 0.1\nBlock-From: 1\nBlock-To: 2\nReceipt-Kind: k\nReceipt-Length: {}\nContent-Encoding: base64\n\nAAAA", usize::MAX - 1);
     let r = std::panic::catch_unwind(|| parse_sbop(img.as_bytes()).is_err());
@@ -124,7 +123,6 @@ fn w3_6_sbop_huge_receipt_length_does_not_panic() {
 /// `obj_end < obj_start`. SBOQ messages are what an untrusted indexer serves
 /// to a client asking for a proof, so a hostile indexer crashes the client.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-6: fails today — SBOQ Object-Length arithmetic is unchecked (release-mode slice panic)
 fn w3_6_sboq_huge_object_length_does_not_panic() {
     let mut img = format!(
         "SBOQ-Version: 0.2\nPath: /a/\nId: x\nCreator: c\nBlock: 1\nState-Root: {}\nObject-Hash: null\nProof-Format: trie\nProof-Length: 1\nObject-Length: {}\n\n",
@@ -152,7 +150,6 @@ fn sboq_proof_length_header_is_advisory_today() {
 /// and `&bytes[pos..]` panics. SBOP messages are read off the chain by every
 /// light-mode node, so one DA submission carrying the five headers and no terminator panics the sync task of every light node.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-9: fails today — SBOP image without a header terminator panics parse_sbop
 fn w3_9_sbop_without_blank_line_does_not_panic() {
     let img = b"SBOP-Version: 0.1\nBlock-From: 1\nBlock-To: 9\nReceipt-Kind: k\nReceipt-Length: 6";
     let r = std::panic::catch_unwind(|| parse_sbop(img).is_err());

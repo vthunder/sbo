@@ -1243,7 +1243,10 @@ fn verify_nonexistence_proof(proof: &TrieProof) -> Result<bool, TrieError> {
         }
         Some(idx) => {
             // Verify the target segment is NOT in siblings at divergence point
-            let expected_segment = &proof.path_segments[idx];
+            // The path must cover every step up to the divergence (W3-8: an
+            // indexer's proof for a missing top-level object arrives with an
+            // empty segment list).
+            let expected_segment = proof.path_segments.get(idx).ok_or(TrieError::InvalidProof)?;
             let diverge_step = &proof.proof[idx];
 
             if diverge_step.siblings.contains_key(expected_segment) {
