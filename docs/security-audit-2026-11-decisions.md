@@ -513,10 +513,32 @@ second rule and breaks the first spec. Test: `d2_unsigned_unknown_header_is_reje
   Genesis specs to define `object_hash` and `genesisHash` over the
   canonical serialization of the modelled headers.
 
-**Recommendation: (a).** Forward compatibility for new headers is better
-served by a version bump than by unsigned bytes in a signed message; it is
-also the only option under which the July `sbo-2tue` fix (hash the raw
-bytes) is safe.
+- (c) Sign what was sent, ignore what you do not understand: the signing
+  content is the received header block minus the `Signature` line, so an
+  unknown header is accepted only if the signer put it there. Unknown
+  headers sit after the modelled ones; a parser that does not model one
+  keeps its bytes for hashing and ignores its meaning. A header whose
+  meaning an old client must not skip is listed in a `Critical` header
+  (X.509 style) and rejects on clients that do not know it; otherwise a
+  semantics change is an `SBO-Version` bump.
+
+**Recommendation: (c), revised 2026-11-05.** The defect is unsigned bytes
+in a signed message, not the existence of unknown headers. (a) fixes it by
+turning every new header into a de facto version bump: in a mixed fleet an
+old node rejects every message that carries a new header, so a publisher
+cannot use one until every consumer has upgraded, and several concurrent
+experiments are impossible. (b) leaves experimental headers mutable in
+flight. (c) keeps raw and reserialized hashes equal (so `sha256(raw_sbo_bytes)`
+stands and `sbo-2tue` is safe), makes relay injection fail signature
+verification, and lets old and new clients coexist. Experimental headers
+use a reserved prefix (`X-`), are signed like any other, and are ignored by
+clients that do not know them; several can be live at once. The ignored
+test `d2_unsigned_unknown_header_is_rejected` already pins (c): it rejects
+an *unsigned* unknown header, not an unknown header as such.
+
+Follow-up (asked by Dan 2026-11-05): under (a), a mixed fleet means old
+nodes drop every message with a new header, and concurrent experiments are
+impossible; (c) was added in answer.
 
 ### Q33. Shape of the genesis batch under strict mode (WS6 D5)
 
