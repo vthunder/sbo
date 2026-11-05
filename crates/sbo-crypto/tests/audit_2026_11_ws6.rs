@@ -65,7 +65,6 @@ fn ed25519_wrapper_pins_lengths() {
 /// never performs the pairing check. Compile with `--features kzg`.
 #[cfg(feature = "kzg")]
 #[test]
-#[ignore] // AUDIT-2026-11 D9: fails today — kzg.rs returns Ok(true) after the point checks
 fn d9_kzg_verify_rejects_a_proof_that_does_not_open_the_commitment() {
     use sbo_crypto::kzg::{verify_kzg_proof, KzgCommitment, KzgProof};
     // The BLS12-381 G1 generator, compressed.

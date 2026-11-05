@@ -236,7 +236,6 @@ proptest! {
 /// chain-wide. The same recursion is in `scopes_authorize`'s path glob
 /// (`audit_2026_11_ws3_time_scopes.rs`, W3-2) and in `IdPattern::glob_match`.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-1: fails today — path pattern matching is exponential in the number of `**`
 fn w3_1_path_pattern_matching_is_polynomial() {
     let pattern = PathPattern::new(format!("/{}/zz/", vec!["**"; 10].join("/")));
     let path = Path::parse(&format!("/{}/", vec!["a"; 24].join("/"))).unwrap();
@@ -250,7 +249,6 @@ fn w3_1_path_pattern_matching_is_polynomial() {
 /// W3-1 (High), id half: `glob_match` tries every split for every `*`, so
 /// `*a*a*a*a*a*a*a*b` against a long run of `a` is exponential.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-1: fails today — id glob matching is exponential in the number of `*`
 fn w3_1_id_pattern_matching_is_polynomial() {
     let pattern = IdPattern::new(format!("{}b", "*a".repeat(14)));
     let id = "a".repeat(40);

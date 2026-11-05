@@ -59,7 +59,10 @@ fn deleting_a_policy_falls_through_to_the_parent() {
     let root_policy = parse(serde_json::json!({
         "grants": [{ "to": "*", "can": ["post"], "on": "/**" }]
     }));
+    // `member` is defined: a reference to an undefined role rejects at parse
+    // (audit 2026-11 D10 validation pass).
     let child_policy = parse(serde_json::json!({
+        "roles": { "member": ["alice"] },
         "grants": [{ "to": { "role": "member" }, "can": ["create"], "on": "/communities/agents/spaces/**" }]
     }));
 

@@ -10,7 +10,7 @@ use sbo_core::authorize::{
 use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
-use sbo_core::policy::{evaluate, ActionType, AttestedSource, PolicyResult};
+use sbo_core::policy::{evaluate_with, ActionType, AttestedSource, PolicyResult};
 use sbo_core::resolve::{resolve_controller, Controller, NameRecord, DEFAULT_HOP_LIMIT};
 use sbo_core::schema::{parse_attestation, validate_schema, SchemaError};
 use sbo_core::state::StoredObject;
@@ -2036,8 +2036,19 @@ fn evaluate_policy_for(
     // (no/ambiguous domain) keeps bare-name matching literal.
     let pd = primary_domain(state);
 
+    // The signing key an on-chain object publishes, for
+    // `require_payload_signed_by` (D24): a `/sys/domains/<d>` object's key is
+    // the `public_key` of its self-signed `domain.v1` JWT, taken only after that
+    // JWT verifies.
+    let signer_key = |path: &sbo_core::message::Path, id: &Id| -> Option<sbo_core::crypto::PublicKey> {
+        let obj = state.get_object(path, id).ok()??;
+        let token = std::str::from_utf8(&obj.payload).ok()?;
+        let claims = sbo_core::jwt::verify_domain(token).ok()?;
+        sbo_core::crypto::PublicKey::parse(&claims.public_key).ok()
+    };
+
     // Evaluate the policy
-    match evaluate(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
+    match evaluate_with(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref()) {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",

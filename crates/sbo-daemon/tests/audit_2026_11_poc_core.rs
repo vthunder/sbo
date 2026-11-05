@@ -256,48 +256,68 @@ fn poc_d58_id_collection_collision_blocks_the_mirror() {
 }
 
 // ===========================================================================
-// PoC-5 (D10, High): a cyclic-role policy crashes every evaluator. Run in a
-// child process so the stack overflow does not take the test runner with it.
+// PoC-5 (D10, High): a cyclic-role policy used to crash every evaluator.
+// INVERTED under `sbo-sla3`: the cyclic document is rejected at parse, and a
+// cyclic policy built in code evaluates to a denial in bounded time. Still run
+// in a child process so a regression (stack overflow) cannot take the test
+// runner with it.
 // ===========================================================================
 
 #[test]
-#[ignore] // AUDIT-2026-11 D10 PoC: evaluating a role cycle overflows the stack
 fn poc_d10_role_cycle_crashes_the_evaluator() {
-    // Re-exec this test binary targeting the inner helper; observe the crash.
+    // Re-exec this test binary targeting the inner helper; it must exit cleanly.
     let exe = std::env::current_exe().unwrap();
     let out = std::process::Command::new(exe)
         .args(["--ignored", "--exact", "poc_d10_inner_evaluate_cycle"])
         .env("SBO_POC_D10_CHILD", "1")
         .output()
         .unwrap();
-    // A stack overflow aborts with SIGABRT/SIGSEGV: no clean exit code.
     assert!(
-        !out.status.success(),
-        "PoC FAILED TO REPRODUCE — evaluating a cyclic-role policy terminated cleanly; \
-         stdout={} stderr={}",
+        out.status.success(),
+        "evaluating a cyclic-role policy crashed the child ({}); stdout={} stderr={}",
+        out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
 }
 
-/// Inner helper: only runs its body in the re-exec'd child. Evaluates a grant
-/// to `role:a` where a → b → a. Not a standalone finding; the parent drives it.
+/// Inner helper: only runs its body in the re-exec'd child. The cyclic document
+/// (a → b → a) must fail to parse; the same policy built in code must evaluate
+/// to a denial without overflowing. Not a standalone finding; the parent drives it.
 #[test]
 #[ignore]
 fn poc_d10_inner_evaluate_cycle() {
     if std::env::var("SBO_POC_D10_CHILD").is_err() {
-        return; // only the re-exec'd child runs the crashing body
+        return; // only the re-exec'd child runs the body
     }
-    use sbo_core::policy::{evaluate, ActionType, Policy, PolicyVars};
-    let policy: Policy = serde_json::from_str(
+    use sbo_core::policy::{evaluate, ActionType, Grant, Identity, PathPattern, Policy, PolicyResult, PolicyVars};
+    let parsed = serde_json::from_str::<Policy>(
         r#"{"roles":{"a":[{"role":"b"}],"b":[{"role":"a"}]},
             "grants":[{"to":{"role":"a"},"can":["post"],"on":"/x/**"}]}"#,
-    )
-    .unwrap();
+    );
+    assert!(parsed.is_err(), "a cyclic-role policy parsed");
+    let policy = Policy {
+        roles: [
+            ("a".to_string(), vec![Identity::Role { role: "b".into() }]),
+            ("b".to_string(), vec![Identity::Role { role: "a".into() }]),
+        ]
+        .into_iter()
+        .collect(),
+        deny: vec![],
+        grants: vec![Grant {
+            to: Identity::Role { role: "a".into() },
+            can: vec![ActionType::Post],
+            on: PathPattern::new("/x/**"),
+            id: None,
+        }],
+        restrictions: vec![],
+        pin: None,
+        descendant_constraint: None,
+    };
     let key = SigningKey::generate();
     let msg = signed(&key, "/x/", "p", None, b"{}");
     let actor = Id::new("mallory").unwrap();
-    let _ = evaluate(
+    let r = evaluate(
         &policy,
         &actor,
         ActionType::Create,
@@ -308,4 +328,5 @@ fn poc_d10_inner_evaluate_cycle() {
         &msg,
         None,
     );
+    assert!(matches!(r, PolicyResult::Denied(_)), "nobody is a member of a cyclic role: {r:?}");
 }

@@ -1,6 +1,7 @@
 //! Policy evaluation
 
 use crate::message::{Message, Id};
+use crate::crypto::PublicKey;
 use super::types::{Policy, ActionType, AttestedSource, Identity};
 use super::path::PolicyVars;
 
@@ -10,6 +11,15 @@ use super::path::PolicyVars;
 /// Supplied by the caller (the daemon, with state + inclusion time); pure
 /// tests pass a stub.
 pub type AttestedCheck<'a> = dyn Fn(&AttestedSource) -> bool + 'a;
+
+/// Resolves the signing key of an on-chain object, for
+/// `require_payload_signed_by` (audit 2026-11 D24): given the issuer object's
+/// container path and id (e.g. `/sys/domains/` + `example.com`), returns the
+/// public key that object publishes (a `domain.v1` object's verified JWT
+/// `public_key`), or `None` when there is no such object or it carries no
+/// usable key. Supplied by the caller with state access; a lookup that always
+/// answers `None` makes every `require_payload_signed_by` restriction deny.
+pub type SignerKeyLookup<'a> = dyn Fn(&crate::message::Path, &Id) -> Option<PublicKey> + 'a;
 
 /// Result of policy evaluation
 #[derive(Debug)]
@@ -25,6 +35,10 @@ pub enum PolicyResult {
 /// Undefined variables fail closed (see [`PolicyVars`]). `signer_is_owner` is the
 /// caller's L2 determination that the signer controls `vars.owner` (what a
 /// `to: owner` grant requires).
+///
+/// This form has no on-chain signer-key lookup, so a
+/// `require_payload_signed_by` restriction DENIES under it (fail closed). A
+/// caller with state access uses [`evaluate_with`].
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     policy: &Policy,
@@ -34,6 +48,23 @@ pub fn evaluate(
     vars: &PolicyVars,
     signer_is_owner: bool,
     is_attested: &AttestedCheck,
+    message: &Message,
+    primary_domain: Option<&str>,
+) -> PolicyResult {
+    evaluate_with(policy, actor, action, target_path, vars, signer_is_owner, is_attested, &|_, _| None, message, primary_domain)
+}
+
+/// [`evaluate`] with a [`SignerKeyLookup`] for `require_payload_signed_by`.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_with(
+    policy: &Policy,
+    actor: &Id,
+    action: ActionType,
+    target_path: &str,
+    vars: &PolicyVars,
+    signer_is_owner: bool,
+    is_attested: &AttestedCheck,
+    signer_key: &SignerKeyLookup,
     message: &Message,
     primary_domain: Option<&str>,
 ) -> PolicyResult {
@@ -60,7 +91,7 @@ pub fn evaluate(
         // An absent `id` matches any id, so pre-existing policies are unchanged.
         let id_matches = grant.id.as_ref().is_none_or(|p| p.matches(message.id.as_str(), vars));
         let action_matches = grant.can.iter().any(|granted| action_covered_by(*granted, action));
-        let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles, primary_domain);
+        let identity_match = identity_matches(&grant.to, actor, &actor_key, vars.owner, signer_is_owner, is_attested, &policy.roles, primary_domain, &mut Vec::new());
 
         grant_debug.push(format!(
             "  grant to={:?} can={:?} on={:?} id={:?} -> path:{} id:{} action:{} identity:{}",
@@ -81,7 +112,7 @@ pub fn evaluate(
         let path_matches = restriction.on.matches(&crate::message::Path::parse(target_path).unwrap(), vars);
         let id_matches = restriction.id.as_ref().is_none_or(|p| p.matches(message.id.as_str(), vars));
         if path_matches && id_matches {
-            if let Some(reason) = check_requirements(&restriction.require, message, is_attested) {
+            if let Some(reason) = check_requirements(&restriction.require, message, is_attested, signer_key) {
                 return PolicyResult::Denied(reason);
             }
         }
@@ -126,6 +157,7 @@ fn check_requirements(
     require: &super::types::Requirements,
     message: &Message,
     is_attested: &AttestedCheck,
+    signer_key: &SignerKeyLookup,
 ) -> Option<String> {
     // Attestation conditions: the acting user must (not) be the in-force
     // subject of the named attestation.
@@ -205,11 +237,11 @@ fn check_requirements(
         }
     }
 
-    // Check require_payload_signed_by
-    // This verifies the JWT issuer maps to an object at the required path pattern.
-    // Note: Cryptographic signature verification happens in the daemon's validation layer.
+    // Check require_payload_signed_by: the payload JWT's issuer maps to an
+    // object at the required path pattern AND the JWT verifies under that
+    // object's published key (audit 2026-11 D24).
     if let Some(ref signed_by) = require.require_payload_signed_by {
-        if let Some(reason) = check_payload_signed_by(signed_by, message) {
+        if let Some(reason) = check_payload_signed_by(signed_by, message, signer_key) {
             return Some(reason);
         }
     }
@@ -249,44 +281,48 @@ fn check_dnssec_proof(message: &Message) -> Option<String> {
     }
 }
 
-/// Check if the payload's JWT issuer maps to an object at the required path pattern
+/// `require_payload_signed_by`: the payload is an identity JWT whose issuer
+/// names an on-chain signing object at the required path pattern, and the JWT's
+/// signature verifies under the key that object publishes. Fails closed at
+/// every step: no payload, not a JWT, a self-signed or unknown issuer, an
+/// issuer outside the pattern, no such object, or a signature that does not
+/// verify under its key is a denial — so `iss: domain:<d>` written by any other
+/// key no longer satisfies the restriction (audit 2026-11 D24 / W6-3).
 fn check_payload_signed_by(
     signed_by: &super::types::RequirePayloadSignedBy,
     message: &Message,
+    signer_key: &SignerKeyLookup,
 ) -> Option<String> {
-    // Get payload
-    let payload = message.payload.as_ref()?;
+    let Some(payload) = message.payload.as_ref() else {
+        return Some("require_payload_signed_by: missing payload (expected JWT)".to_string());
+    };
 
-    // Try to parse as JWT (UTF-8 string)
     let token = match std::str::from_utf8(payload) {
         Ok(t) => t,
         Err(_) => return Some("Payload is not valid UTF-8 (expected JWT)".to_string()),
     };
 
-    // Decode JWT claims to get issuer
+    // Decode (unverified) to learn the issuer.
     let claims = match crate::jwt::decode_identity_claims(token) {
         Ok(c) => c,
         Err(e) => return Some(format!("Failed to decode JWT: {}", e)),
     };
 
-    // Map issuer to object path
-    let issuer_path = match issuer_to_path(&claims.iss) {
-        Some(p) => p,
-        None => {
-            return Some(format!(
-                "Issuer '{}' does not reference an external signing object",
-                claims.iss
-            ));
-        }
+    // Map the issuer to its signing object.
+    let Some((container, id)) = issuer_to_object(&claims.iss) else {
+        return Some(format!(
+            "Issuer '{}' does not reference an external signing object",
+            claims.iss
+        ));
     };
+    let issuer_path = format!("{}{}/", container, id);
 
-    // Check if issuer path matches the required pattern
+    // The issuer object must sit under the required pattern.
     let pattern = super::path::PathPattern::new(&signed_by.path);
     let issuer_path_parsed = match crate::message::Path::parse(&issuer_path) {
         Ok(p) => p,
         Err(_) => return Some(format!("Invalid issuer path: {}", issuer_path)),
     };
-
     if !pattern.matches(&issuer_path_parsed, &PolicyVars::default()) {
         return Some(format!(
             "Issuer path '{}' does not match required pattern '{}'",
@@ -294,22 +330,33 @@ fn check_payload_signed_by(
         ));
     }
 
+    // Load the issuer's key and verify the JWT under it.
+    let (Ok(container), Ok(id)) = (crate::message::Path::parse(&container), Id::new(&id)) else {
+        return Some(format!("Invalid issuer path: {}", issuer_path));
+    };
+    let Some(key) = signer_key(&container, &id) else {
+        return Some(format!("Issuer object '{}' not found or has no signing key", issuer_path));
+    };
+    if let Err(e) = crate::jwt::verify_domain_certified_identity(token, &key) {
+        return Some(format!(
+            "Payload JWT does not verify under the key of '{}': {}",
+            issuer_path, e
+        ));
+    }
+
     None
 }
 
-/// Map a JWT issuer to an object path
+/// Map a JWT issuer to its signing object `(container path, id)`.
 ///
-/// - "domain:example.com" -> "/sys/domains/example.com"
-/// - "self" -> None (no external object)
-fn issuer_to_path(issuer: &str) -> Option<String> {
-    if let Some(domain) = issuer.strip_prefix("domain:") {
-        Some(format!("/sys/domains/{}", domain))
-    } else if issuer == "self" {
-        None // Self-signed, no external signing object
-    } else {
-        // Unknown issuer format - could extend in future
-        None
+/// - `domain:example.com` → (`/sys/domains/`, `example.com`)
+/// - `self` or anything else → `None` (no external signing object)
+fn issuer_to_object(issuer: &str) -> Option<(String, String)> {
+    let domain = issuer.strip_prefix("domain:")?;
+    if domain.is_empty() || domain.contains('/') {
+        return None;
     }
+    Some(("/sys/domains/".to_string(), domain.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -347,17 +394,32 @@ fn grant_name_matches(name: &str, actor: &str, primary_domain: Option<&str>) -> 
     crate::identity::identity_eq(&canonical_name_ref(name, primary_domain), actor)
 }
 
+/// Does the actor match `identity`? Role resolution is BOUNDED (audit 2026-11
+/// D10 / Q17 (a)): `path` is the stack of roles being resolved, so a role that
+/// is already on it (a cycle) does not match, and resolution deeper than
+/// [`super::validate::MAX_ROLE_DEPTH`] references — counting `any` nesting —
+/// does not match either. Both terminate with a denial rather than recursing
+/// without limit; a parsed policy never reaches them (the validation pass
+/// rejects cycles and over-deep chains), but a policy built by other means may.
 #[allow(clippy::too_many_arguments)]
-fn identity_matches(
-    identity: &Identity,
+fn identity_matches<'p>(
+    identity: &'p Identity,
     actor: &Id,
     actor_key: &str,
     owner: Option<&str>,
     signer_is_owner: bool,
     is_attested: &AttestedCheck,
-    roles: &std::collections::HashMap<String, Vec<Identity>>,
+    roles: &'p std::collections::HashMap<String, Vec<Identity>>,
     primary_domain: Option<&str>,
+    path: &mut Vec<&'p str>,
 ) -> bool {
+    let nested = |members: &'p [Identity], path: &mut Vec<&'p str>| -> bool {
+        if path.len() >= super::validate::MAX_ROLE_DEPTH {
+            tracing::warn!("Policy role resolution exceeded depth {}; not matched", super::validate::MAX_ROLE_DEPTH);
+            return false;
+        }
+        members.iter().any(|m| identity_matches(m, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain, path))
+    };
     match identity {
         Identity::Name(name) => {
             match name.as_str() {
@@ -382,15 +444,23 @@ fn identity_matches(
             key_clean == actor_clean
         }
         Identity::Role { role } => {
-            if let Some(members) = roles.get(role) {
-                members.iter().any(|m| identity_matches(m, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain))
-            } else {
-                false
+            let Some(members) = roles.get(role) else { return false };
+            if path.iter().any(|r| *r == role.as_str()) {
+                tracing::warn!("Policy role '{}' references itself (cycle); not matched", role);
+                return false;
             }
+            path.push(role.as_str());
+            let matched = nested(members, path);
+            path.pop();
+            matched
         }
         Identity::Attested { attested } => is_attested(attested),
         Identity::Any { any } => {
-            any.iter().any(|id| identity_matches(id, actor, actor_key, owner, signer_is_owner, is_attested, roles, primary_domain))
+            // An `any` level counts toward the depth bound like a role level.
+            path.push("");
+            let matched = nested(any, path);
+            path.pop();
+            matched
         }
     }
 }
@@ -785,7 +855,7 @@ mod tests {
         let mut msg = dnssec_msg("mingo.place", vec![]);
         msg.payload = None;
         let no = |_: &AttestedSource| false;
-        assert!(check_requirements(&require, &msg, &no).is_some());
+        assert!(check_requirements(&require, &msg, &no, &|_, _| None).is_some());
     }
 
     #[test]

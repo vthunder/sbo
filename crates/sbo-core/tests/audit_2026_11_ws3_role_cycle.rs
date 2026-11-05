@@ -1,7 +1,8 @@
 //! Security audit 2026-11, WS3: role resolution termination (WS1 lead D10,
 //! July `sbo-bynl`; threat model I11). In its own test binary because a
 //! failing run is a stack overflow that ABORTS the process rather than a
-//! panic — run with `cargo test -p sbo-core --test audit_2026_11_ws3_role_cycle -- --ignored`.
+//! panic. Fixed under `sbo-sla3` (D10 / Q17 (a)): cycles and over-deep chains
+//! reject at parse, and the evaluator bounds resolution regardless.
 
 mod audit_2026_11_ws3_support;
 use audit_2026_11_ws3_support::*;
@@ -22,7 +23,6 @@ fn eval(pol: &Policy) -> bool {
 /// recursion. Expected: the policy is rejected at parse/validation time, or
 /// evaluation terminates with a denial.
 #[test]
-#[ignore] // AUDIT-2026-11 D10: fails today — cyclic roles stack-overflow the evaluator (process abort)
 fn d10_cyclic_roles_terminate() {
     let v = serde_json::json!({
         "roles": {"admin": [{"role": "mod"}], "mod": [{"role": "admin"}]},
@@ -36,7 +36,6 @@ fn d10_cyclic_roles_terminate() {
 
 /// D10 (High): a self-referencing role is the one-node cycle.
 #[test]
-#[ignore] // AUDIT-2026-11 D10: fails today — self-referencing role stack-overflows the evaluator (process abort)
 fn d10_self_referencing_role_terminates() {
     let v = serde_json::json!({
         "roles": {"r": [{"role": "r"}]},
@@ -52,7 +51,6 @@ fn d10_self_referencing_role_terminates() {
 /// expected: a validation-time bound (I11 "role resolution at evaluation time
 /// is bounded").
 #[test]
-#[ignore] // AUDIT-2026-11 D10: fails today — role chain depth is unbounded (process abort at ~100k)
 fn d10_role_chain_depth_is_bounded() {
     let n = 200_000;
     let mut roles = serde_json::Map::new();
