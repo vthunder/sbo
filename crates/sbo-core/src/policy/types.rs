@@ -6,6 +6,12 @@ use super::path::{IdPattern, PathPattern};
 
 /// Policy document (policy.v2 schema)
 ///
+/// Parsing is **strict** (audit 2026-11 W3-3 / Q39 (a)): every struct in the
+/// document carries `deny_unknown_fields`, so a misspelled condition key
+/// (`max_sise`) or a stray grant key is a parse error rather than an empty
+/// requirement that fails open (threat model I11: unknown keys reject at write
+/// time). Consensus-changing; rides the regenesis bundle.
+///
 /// Deserializing a `Policy` runs [`super::validate::validate`]: a document with
 /// a role cycle, a reference to an undefined role, a role chain deeper than
 /// [`super::validate::MAX_ROLE_DEPTH`], or a pattern outside the grammar's size
@@ -13,7 +19,7 @@ use super::path::{IdPattern, PathPattern};
 /// 2026-11 D10 / Q17 (a)). The derive below is the plain field mapping;
 /// the `Deserialize` impl further down wraps it with the validation pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(remote = "Self")]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct Policy {
     #[serde(default)]
     pub roles: HashMap<String, Vec<Identity>>,
@@ -62,6 +68,7 @@ impl<'de> Deserialize<'de> for Policy {
 /// content-hash, `"sha256:<hex>"`) is authoritative and reorg-safe; `block` is a
 /// locator hint only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyPin {
     /// Fully-qualified container path of the pinned ancestor policy
     /// (e.g. `"/sys/policies/"`).
@@ -77,6 +84,7 @@ pub struct PolicyPin {
 /// mandates for its DIRECT child policies (each level re-delegates its own
 /// template downward, keeping every check local).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DescendantConstraint {
     /// The grants a direct child policy MAY make. Every child grant must be
     /// covered by one of these (subset-of-template). An empty list forbids the
@@ -96,6 +104,7 @@ pub struct DescendantConstraint {
 
 /// Grant: who can do what on which paths
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Grant {
     pub to: Identity,
     pub can: Vec<ActionType>,
@@ -110,6 +119,7 @@ pub struct Grant {
 
 /// Restriction: conditions on allowed actions
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Restriction {
     pub on: PathPattern,
 
@@ -124,7 +134,7 @@ pub struct Restriction {
 
 /// Identity reference in grants
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum Identity {
     /// Special values: "owner", "*", or a name
     Name(String),
@@ -145,6 +155,7 @@ pub enum Identity {
 /// issuer matches `by` (when given), and whose `subject` resolves to the
 /// requester's controller (Policy Spec §Attestation-Defined Roles).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttestedSource {
     #[serde(rename = "type")]
     pub type_: String,
@@ -178,6 +189,7 @@ pub enum ActionType {
 
 /// Requirements for restrictions
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Requirements {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_size: Option<usize>,
@@ -224,6 +236,7 @@ pub struct Requirements {
 /// (e.g., "/sys/domains/example.com"), and the signature is verified against that object's
 /// public key. The issuer path must match the specified pattern.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RequirePayloadSignedBy {
     /// Path pattern where the signing object must exist
     /// e.g., "/sys/domains/*" means the issuer must be a domain object
@@ -249,6 +262,7 @@ pub enum SchemaRequirement {
 /// Fails closed: a payload that is not JSON, a pointer that resolves to nothing,
 /// or a value of the wrong type is a denial, never a pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldCondition {
     /// RFC 6901 JSON pointer into the payload, e.g. `/contribution/percentage`.
     pub pointer: String,
