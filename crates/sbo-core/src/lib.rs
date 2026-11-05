@@ -38,12 +38,10 @@ pub use browserid_core;
 
 mod genesis;
 #[cfg(feature = "storage")]
-mod indexer;
 
 pub use error::SboError;
-pub use genesis::{Genesis, genesis_hash, genesis_hash_from_wire};
+pub use genesis::{Genesis, GenesisError, GenesisInfo, GenesisMode, genesis_hash, genesis_hash_from_wire};
 #[cfg(feature = "storage")]
-pub use indexer::Indexer;
 pub use proof::{SbopMessage, parse_sbop, serialize_sbop, is_sbop_message, SbopError};
 
 // Re-export types from sbo-types

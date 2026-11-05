@@ -18,6 +18,7 @@ use sbo_core::crypto::{ContentHash, Signature, SigningKey};
 use sbo_core::message::{Action, Id, Message, ObjectType, Path};
 use sbo_core::state::StateDb;
 use sbo_daemon::validate::{validate_message, L2Context, ValidationResult};
+use sbo_core::state::StoredObject;
 use tempfile::tempdir;
 
 const T_B: i64 = 1_700_000_000;
@@ -41,7 +42,7 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
         content_type: Some("application/json".to_string()),
         content_hash: Some(ContentHash::sha256(payload)),
         payload: Some(payload.to_vec()),
-        owner: None,
+        owner: Some(Id::new(&q6_name_for(key)).unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: schema.map(|s| s.to_string()),
@@ -55,6 +56,38 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
     };
     msg.sign(key);
     msg
+}
+
+/// A deterministic local name for a test key: every write names an owner that
+/// is a name or an email (audit 2026-11 Q6, no signer-key fallback).
+fn q6_name_for(key: &SigningKey) -> String {
+    let pk = key.public_key().to_string();
+    format!("n{}", &pk.trim_start_matches("ed25519:")[..12])
+}
+
+/// Register the key-rooted `identity.v1` record `q6_name_for(key)` resolves to.
+fn q6_register(db: &StateDb, key: &SigningKey) {
+    let name = q6_name_for(key);
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, &name, None).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(&name).unwrap(),
+        creator: Id::new(&name).unwrap(),
+        owner: Id::new(&name).unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(jwt.as_bytes()),
+        payload: jwt.into_bytes(),
+        policy_ref: None,
+        related: None,
+        content_schema: Some("identity.v1".to_string()),
+        owner_ref: Some(name.clone()),
+        block_number: 1,
+        object_hash: [6u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+    db.put_name_claim(&key.public_key().to_string(), &name).unwrap();
 }
 
 // ===========================================================================
@@ -73,6 +106,7 @@ fn poc_d1_payload_swap_is_rejected_by_the_daemon_gate() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let victim = SigningKey::generate();
+    q6_register(&db, &victim);
 
     // Victim signs {"amount":1}. A relay keeps the headers (and signature) and
     // substitutes the payload — same length, so Content-Length still matches.
@@ -112,6 +146,7 @@ fn poc_d1_policy_version_with_a_mismatched_hash_is_rejected() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let sys = SigningKey::generate();
+    q6_register(&db, &sys);
 
     let benign = br#"{"grants":[{"to":"owner","can":["update"],"on":"/c/**"}]}"#;
     let benign_hash = ContentHash::sha256(benign).to_string();
@@ -142,29 +177,31 @@ fn poc_d1_policy_version_with_a_mismatched_hash_is_rejected() {
 // and every policy write from any key (genesis mode = accept-all).
 // ===========================================================================
 
-/// A node pointed at a repo whose root policy has not arrived (a forged seed,
-/// a wrong anchor, or simply before genesis replays) applies a stranger's
-/// writes and a stranger's governing policy with no authorization at all.
+/// Inverted by sbo-3q6x (Q7 (a)): a node pointed at a repo whose root policy
+/// has not arrived (a forged seed, a wrong anchor, or simply before genesis
+/// replays) applies NOTHING — not a stranger's root policy, not a stranger's
+/// write. The bootstrap window is the genesis prefix at the anchor, applied
+/// structurally by the sync path, never through `validate_message`.
 #[test]
-#[ignore] // AUDIT-2026-11 D5 PoC: genesis mode accepts everything today
 fn poc_d5_stranger_takes_over_a_rootless_repo() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let mallory = SigningKey::generate();
+    q6_register(&db, &mallory);
 
-    // 1. A stranger plants a root policy granting themselves everything.
+    // 1. A stranger's root policy granting themselves everything is refused.
     let planted = br#"{"grants":[{"to":"*","can":["*"],"on":"/**"}]}"#;
     let policy = signed(&mallory, "/sys/policies/", "root", Some("policy.v2"), planted);
     assert!(
-        is_valid(&validate_message(&policy, &db, dir.path(), &ctx(&db))),
-        "PoC FAILED — a stranger's root policy was rejected on an empty repo",
+        !is_valid(&validate_message(&policy, &db, dir.path(), &ctx(&db))),
+        "a stranger's root policy was accepted on an empty repo",
     );
 
-    // 2. And an ordinary stranger write into someone else's namespace lands.
+    // 2. And an ordinary stranger write is refused too.
     let post = signed(&mallory, "/communities/cooks/posts/", "hello", None, b"{}");
     assert!(
-        is_valid(&validate_message(&post, &db, dir.path(), &ctx(&db))),
-        "PoC FAILED — a stranger post was rejected on an empty repo",
+        !is_valid(&validate_message(&post, &db, dir.path(), &ctx(&db))),
+        "a stranger post was accepted on an empty repo",
     );
 }
 
@@ -178,13 +215,17 @@ fn poc_d5_stranger_takes_over_a_rootless_repo() {
 fn poc_d7_failing_self_cert_domain_is_rejected() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
-    // Permit domain creation so we isolate the self-cert gap, not policy.
+    // Permit domain creation so we isolate the self-cert gap, not policy. The
+    // root is installed directly in state: there is no genesis mode through
+    // which a write could plant it (sbo-3q6x).
     let sys = SigningKey::generate();
-    let _ = &db;
+    q6_register(&db, &sys);
     let planted =
         br#"{"grants":[{"to":"*","can":["create","update"],"on":"/sys/**"}]}"#;
+    db.put_policy(&Path::parse("/sys/policies/").unwrap(), &serde_json::from_slice(planted).unwrap()).unwrap();
     let pol = signed(&sys, "/sys/policies/", "root", Some("policy.v2"), planted);
-    assert!(is_valid(&validate_message(&pol, &db, dir.path(), &ctx(&db))));
+    let stored = sbo_daemon::validate::message_to_stored_object(&pol, 1, Some(&db), [1u8; 32], &ctx(&db)).unwrap();
+    db.put_object(&stored).unwrap();
 
     // Evidence object present but garbage: the self-cert cannot verify. (Planted
     // directly in state: the write gate itself would refuse the garbage proof.)
@@ -193,6 +234,7 @@ fn poc_d7_failing_self_cert_domain_is_rejected() {
     db.put_object(&stored).unwrap();
 
     let attacker = SigningKey::generate();
+    q6_register(&db, &attacker);
     let jwt = sbo_core::jwt::create_domain(&attacker, "evil.example").unwrap();
     let mut dom = signed(&attacker, "/sys/domains/", "evil.example", Some("domain.v1"), jwt.as_bytes());
     dom.content_type = Some("application/jwt".into());

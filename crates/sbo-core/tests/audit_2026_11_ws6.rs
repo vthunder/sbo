@@ -11,10 +11,18 @@ use sbo_core::crypto::{ContentHash, PublicKey, Signature, SigningKey};
 use sbo_core::message::{verify_message, Action, Id, Message, ObjectType, Path};
 use sbo_core::wire;
 
+/// The pre-regenesis live genesis (app 506 v5). Kept only for the tests that
+/// pin its historical hash; it is not a genesis under the strict bootstrap
+/// window (Q33 (b)), see `d5_the_v5_live_batch_is_not_a_genesis_under_the_strict_window`.
 const LIVE_GENESIS: &[u8] = include_bytes!("fixtures/mingo-genesis-v5.wire");
 /// `~/src/mingo/deploy/GENESIS.md`, "v5 canonical identity".
 const LIVE_GENESIS_HASH: &str =
     "sha256:ca27c61143c18786fc9ffee4fee25b458e7881390601e2ab55e0d9df9dc585bc";
+/// The post-regenesis fixture: the same object set in the strict order with
+/// test keys (generator: `audit_2026_11_genesis_v6_generate.rs`).
+const V6_GENESIS: &[u8] = include_bytes!("fixtures/mingo-genesis-v6.wire");
+const V6_GENESIS_HASH: &str =
+    "sha256:3cf23afea0b82bf10cf21925eac86306f9b84e27ec13fbfa1f0eda88f11408a9";
 
 fn signed(key: &SigningKey, payload: &[u8]) -> Message {
     let mut msg = Message {
@@ -369,26 +377,58 @@ fn live_genesis_raw_and_reserialized_hashes_agree() {
     }
 }
 
-/// Q7 (a): the genesis batch at the anchor is validated structurally. The live
-/// batch is a plain Mode B genesis (domain, sys, root policy present, no
-/// `/sys/dnssec/` object) and must pass `Genesis::validate`.
+/// Q7 (a) / Q33 (b) (fixed, sbo-3q6x): the genesis prefix at the anchor is
+/// validated structurally. The post-regenesis v6 fixture (Mode A with test
+/// keys: `sys`, `root`, then the community objects naming `Owner: sys`) passes
+/// `Genesis::validate` with a two-message prefix.
 #[test]
-#[ignore] // AUDIT-2026-11 D5: fails today — Genesis::validate is todo!()
-fn d5_genesis_validate_accepts_the_live_mode_b_batch() {
+fn d5_genesis_validate_accepts_the_v6_batch() {
+    let msgs = wire::parse_batch(V6_GENESIS).unwrap();
+    assert_eq!(msgs.len(), 13);
+    let info = sbo_core::Genesis::validate(&msgs).expect("the v6 genesis batch is a valid Mode A genesis");
+    assert_eq!(info.mode, sbo_core::GenesisMode::SelfSigned);
+    assert_eq!(info.prefix_len, 2);
+    assert_eq!(info.sys_identity, "sys");
+    assert_eq!(sbo_core::genesis_hash_from_wire(V6_GENESIS).unwrap().to_string(), V6_GENESIS_HASH);
+    // Every message after the prefix names its owner (Q6), except the
+    // self-certifying `sys-checkpointer` name claim.
+    for m in &msgs[2..] {
+        assert!(m.owner.is_some() || m.path.to_string() == "/sys/names/", "{}{} has no Owner", m.path, m.id);
+    }
+}
+
+/// The pre-regenesis live batch (v5) is NOT a genesis under Q33 (b): its
+/// first message is the domain object, not a `dnssec.v1` opener (Q8), and its
+/// root policy comes last. It stays in the tree only to pin its historical
+/// hash (`live_genesis_raw_and_reserialized_hashes_agree`).
+#[test]
+fn d5_the_v5_live_batch_is_not_a_genesis_under_the_strict_window() {
     let msgs = wire::parse_batch(LIVE_GENESIS).unwrap();
-    sbo_core::Genesis::validate(&msgs).expect("the live genesis batch is a valid Mode B genesis");
+    let e = sbo_core::Genesis::validate(&msgs).unwrap_err();
+    assert!(matches!(e, sbo_core::GenesisError::NotAGenesis(_)), "{e}");
 }
 
 /// A batch with no root policy at all is not a genesis.
 #[test]
-#[ignore] // AUDIT-2026-11 D5: fails today — Genesis::validate is todo!()
 fn d5_genesis_validate_rejects_a_batch_without_a_root_policy() {
-    let msgs: Vec<Message> = wire::parse_batch(LIVE_GENESIS)
+    let msgs: Vec<Message> = wire::parse_batch(V6_GENESIS)
         .unwrap()
         .into_iter()
         .filter(|m| !(m.path.to_string() == "/sys/policies/" && m.id.as_str() == "root"))
         .collect();
     assert!(sbo_core::Genesis::validate(&msgs).is_err());
+}
+
+/// Before the root policy nothing but the next mode object is accepted: a
+/// stranger's write (or any other object) spliced in before the root policy
+/// invalidates the genesis (Genesis Spec §Bootstrap Window rule 4).
+#[test]
+fn d5_a_stranger_before_the_root_policy_breaks_the_genesis() {
+    let mut msgs = wire::parse_batch(V6_GENESIS).unwrap();
+    let stranger = SigningKey::generate();
+    msgs.insert(1, signed(&stranger, b"{}"));
+    let e = sbo_core::Genesis::validate(&msgs).unwrap_err();
+    assert!(matches!(e, sbo_core::GenesisError::UnexpectedObject { index: 1, .. }), "{e}");
 }
 
 // ---------------------------------------------------------------------------

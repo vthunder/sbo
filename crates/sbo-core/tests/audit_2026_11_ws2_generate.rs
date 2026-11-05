@@ -267,10 +267,12 @@ fn generate_conformance_vectors() {
     write("wire.json", &doc);
 
     // ---------------- batch ----------------
-    // Key-rooted writes (no Owner header): the signer is the controller, so the
-    // daemon runner can apply them without browserid attribution.
+    // Key-rooted writes: `Owner: alice` (the seed key) and `Owner: bob` (the
+    // second seed key) are key-rooted names the daemon runner registers, so the
+    // messages apply without browserid attribution. There is no Owner-less
+    // form (Q6: every write names an owner that is a name or an email).
     let mut base = base.clone();
-    base.owner = None;
+    base.owner = Some(Id::new("alice").unwrap());
     base.sign(&key);
     let m1 = base.clone();
     let mut m2 = base.clone();
@@ -293,6 +295,7 @@ fn generate_conformance_vectors() {
     m1_dup.payload = Some(br#"{"body":"second"}"#.to_vec());
     m1_dup.content_hash = Some(ContentHash::sha256(m1_dup.payload.as_ref().unwrap()));
     m1_dup.signing_key = key_b.public_key();
+    m1_dup.owner = Some(Id::new("bob").unwrap());
     m1_dup.sign(&key_b);
     let w1_other_signer = text(&wire::serialize(&m1_dup));
 
