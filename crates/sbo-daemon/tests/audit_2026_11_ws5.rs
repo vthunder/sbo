@@ -393,6 +393,7 @@ fn w5_9_inconsistent_presentation_names_no_issuers_for_capture() {
             prev: None,
             auth_cert: cert,
             auth_evidence: None,
+            extra_headers: Vec::new(),
             auth_warrant: None,
         };
         msg.sign(signer);
