@@ -1684,22 +1684,23 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                             {
                                 let gate = trust_gate_for_sync.read().ok();
                                 if let Some(g) = gate {
-                                    if g.is_gated() {
-                                        if let Some(anchor) = g.anchor() {
-                                            let timeout = config.trust.timeout_blocks;
-                                            if timeout > 0 && block_num > anchor.block + timeout {
-                                                tracing::error!(
-                                                    "fast-sync trust NOT established within {} blocks \
-                                                     of anchor {} ({}/{} attestors); stopping sync — \
-                                                     reads remain refused",
-                                                    timeout,
-                                                    anchor.block,
-                                                    g.backer_count(),
-                                                    g.threshold(),
-                                                );
-                                                return Ok::<(), anyhow::Error>(());
-                                            }
-                                        }
+                                    // Bounded wait exhausted: report "trust not
+                                    // established" and stop. No degrade fallback
+                                    // by design (see `TrustGate::wait_exhausted`).
+                                    let timeout = config.trust.timeout_blocks;
+                                    if g.wait_exhausted(block_num, timeout) {
+                                        let anchor_block = g.anchor().map(|a| a.block).unwrap_or_default();
+                                        tracing::error!(
+                                            "fast-sync trust NOT established within {} blocks \
+                                             of anchor {} ({}/{} attestors); stopping sync — \
+                                             reads remain refused (no degrade fallback: pick a \
+                                             new anchor or replay from genesis)",
+                                            timeout,
+                                            anchor_block,
+                                            g.backer_count(),
+                                            g.threshold(),
+                                        );
+                                        return Ok::<(), anyhow::Error>(());
                                     }
                                 }
                             }

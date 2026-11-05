@@ -228,7 +228,10 @@ pub struct TrustConfig {
     pub threshold: usize,
     /// While a fast-sync anchor is unverified, stop tailing and error out after
     /// this many blocks past the anchor without reaching threshold (0 = never
-    /// give up; keep waiting, gated). Reads stay refused throughout.
+    /// give up; keep waiting, gated). Reads stay refused throughout: this is
+    /// the daemon's liveness fallback (State Commitment spec "bounded wait") --
+    /// it reports trust not established and never degrades to a weaker policy
+    /// or an older checkpoint.
     #[serde(default)]
     pub timeout_blocks: u64,
 }

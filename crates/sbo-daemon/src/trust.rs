@@ -220,6 +220,27 @@ impl TrustGate {
         self.policy.threshold
     }
 
+    /// Whether the bounded wait for anchor verification is exhausted at
+    /// `block`: the gate is still gated, `timeout_blocks > 0`, and the chain
+    /// has moved more than `timeout_blocks` past the anchor without the
+    /// threshold being met.
+    ///
+    /// This daemon's liveness-fallback choice (State Commitment spec, "bounded
+    /// wait"; audit 2026-11 D15) is to REPORT trust not established: the sync
+    /// loop stops tailing and the gate stays closed. It never degrades to a
+    /// weaker policy or an older checkpoint -- a fast-synced node that cannot
+    /// verify its anchor serves nothing rather than something it cannot vouch
+    /// for; the operator picks a new anchor or a full replay.
+    pub fn wait_exhausted(&self, block: u64, timeout_blocks: u64) -> bool {
+        if !self.is_gated() || timeout_blocks == 0 {
+            return false;
+        }
+        match &self.anchor {
+            Some(anchor) => block > anchor.block.saturating_add(timeout_blocks),
+            None => false,
+        }
+    }
+
     /// Feed a claim observed during replay. Counts it toward the anchor iff it is
     /// at the anchor height, agrees on the anchor root, and is signed by a pinned
     /// attestor key. Promotes (and clears the persisted anchor) at threshold.
