@@ -724,6 +724,16 @@ pub fn validate_message(
         }
     }
 
+    // 2.8. Monotonic `/sys/dnssec` refresh (AUDIT-2026-11 D33, Q16 (a)).
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DNSSEC_SCHEMA) {
+        if let Err(reason) = check_dnssec_refresh_monotonic(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason,
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
@@ -789,6 +799,34 @@ fn check_domain_self_cert(msg: &Message, state: &dyn StateView, l2: &L2Context) 
         &l2.anchors,
     )
     .map_err(|e| format!("Domain {domain}: self-certification failed: {e}"))
+}
+
+/// Content-Schema of a self-authorizing DNSSEC evidence object.
+const DNSSEC_SCHEMA: &str = "dnssec.v1";
+
+/// Monotonic `/sys/dnssec/<domain>` refresh (Q16 (a), audit 2026-11 D33): a
+/// `dnssec.v1` write that replaces an existing evidence object must not lower
+/// the incumbent's RRSIG expiration nor carry an older DNSKEY set. Both proofs
+/// are validated against the pinned anchors as of this block; an incumbent that
+/// no longer validates (e.g. a root rollover) does not block the refresh.
+fn check_dnssec_refresh_monotonic(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let Some(new_proof) = msg.payload.as_deref() else {
+        return Ok(()); // the schema/policy gates reject a payload-less dnssec.v1
+    };
+    let incumbent = match state.get_object(&msg.path, &msg.id) {
+        Ok(Some(o)) => o.payload,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("dnssec refresh: cannot read incumbent: {e}")),
+    };
+    let domain = msg.id.as_str();
+    let t = l2.inclusion_time;
+    let new_f = sbo_core::attribution::dnssec_proof_freshness(new_proof, domain, &l2.anchors, t)
+        .map_err(|e| format!("dnssec refresh for {domain}: new proof invalid: {e}"))?;
+    let Ok(old_f) = sbo_core::attribution::dnssec_proof_freshness(&incumbent, domain, &l2.anchors, t) else {
+        return Ok(());
+    };
+    sbo_core::attribution::check_dnssec_refresh_monotonic(&new_f, &old_f)
+        .map_err(|e| format!("dnssec refresh for {domain} rejected: {e}"))
 }
 
 /// Whether the root policy (`/sys/policies/root`) is present in `state`.
