@@ -331,11 +331,20 @@ fn issuer_to_path(issuer: &str) -> Option<String> {
 ///   browserid-attributed `dan@gmail.com`.
 /// - With no primary domain (chain-only / multi-domain repos) a bare name stays
 ///   bare — we don't invent a domain — so literal name matching is preserved.
+///
+/// Comparison follows the one identity rule (Q5): the domain compares as a
+/// lowercase A-label, the local part byte-exact; a bare name compares
+/// byte-exact (`identity::identity_eq`).
 fn canonical_name_ref(name: &str, primary_domain: Option<&str>) -> String {
     match primary_domain {
         Some(domain) if !name.contains('@') => format!("{}@{}", name, domain),
-        _ => name.to_string(),
+        _ => crate::identity::canonical(name).unwrap_or_else(|| name.to_string()),
     }
+}
+
+/// Whether a grant name matches the actor under the Q5 rule.
+fn grant_name_matches(name: &str, actor: &str, primary_domain: Option<&str>) -> bool {
+    crate::identity::identity_eq(&canonical_name_ref(name, primary_domain), actor)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -363,7 +372,7 @@ fn identity_matches(
                 // primary-domain email form (the same form `resolve_creator`
                 // canonicalizes the actor to) before comparing, so a bare name,
                 // its controlling email, and the actor all identify one party.
-                _ => canonical_name_ref(name, primary_domain) == actor.as_str(),
+                _ => grant_name_matches(name, actor.as_str(), primary_domain),
             }
         }
         Identity::Key { key } => {

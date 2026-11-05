@@ -154,17 +154,11 @@ proptest! {
         prop_assert!(Id::new(&s).is_err(), "{:?}", s);
     }
 
-    /// The `sbo-types::Id` grammar is a strict subset of `sbo-core::Id`
-    /// (D30: two grammars; the core one additionally admits `@ + :`). Pinned
-    /// so the relationship is at least one-directional until WS2 unifies them.
+    /// One grammar (Q36): `sbo-core::message::Id` IS `sbo-types::Id`, so the
+    /// two agree on every string, in and out of the charset.
     #[test]
-    fn sbo_types_id_is_subset_of_core_id(s in id_str()) {
-        if sbo_types::id::Id::new(&s).is_ok() {
-            prop_assert!(Id::new(&s).is_ok());
-        }
-        if s.contains(['@', '+', ':']) {
-            prop_assert!(sbo_types::id::Id::new(&s).is_err(), "sbo-types admits {:?} — grammars converged, update WS2", s);
-        }
+    fn sbo_types_id_is_subset_of_core_id(s in prop::collection::vec(prop::sample::select("ABCxyz09-_.~@+: /%".chars().collect::<Vec<_>>()), 1..12).prop_map(|v| v.into_iter().collect::<String>())) {
+        prop_assert_eq!(sbo_types::id::Id::new(&s).is_ok(), Id::new(&s).is_ok(), "{:?}", s);
     }
 }
 
@@ -283,11 +277,11 @@ fn d3_unknown_header_survives_or_rejects() {
 /// D21 (High): `.` and `..` are inside the identifier character set and
 /// nothing rejects them, so `Path: /../../` is a valid on-chain path. The
 /// daemon's filesystem mirror resolves it outside the repo directory. The core
-/// spec's grammar must exclude dot-only segments (I5).
+/// spec's grammar excludes exactly `.` and `..` (Q24; `...` and `...x` are
+/// ordinary ids, conformance ID-OK-10).
 #[test]
-#[ignore] // AUDIT-2026-11 D21: fails today — "." and ".." are accepted as ids / path segments
 fn d21_dot_segments_are_rejected() {
-    proptest!(cfg(), |(dots in 1usize..4, prefix in prop::collection::vec(plain_id_str(), 0..2))| {
+    proptest!(cfg(), |(dots in 1usize..3, prefix in prop::collection::vec(plain_id_str(), 0..2))| {
         let seg = ".".repeat(dots);
         prop_assert!(Id::new(&seg).is_err(), "Id::new({:?}) accepted", seg);
         let mut segs = prefix.clone();

@@ -50,9 +50,10 @@ fn test_path_serde_validation() {
 
 #[test]
 fn test_action_serde_roundtrip() {
-    let action = Action::Create;
+    // Audit 2026-11 Q36: the wire grammar has no `create` (post creates).
+    let action = Action::Post;
     let json = serde_json::to_string(&action).unwrap();
-    assert_eq!(json, r#""create""#);
+    assert_eq!(json, r#""post""#);
 
     let deserialized: Action = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized, action);
@@ -61,13 +62,13 @@ fn test_action_serde_roundtrip() {
 #[test]
 fn test_all_actions_serde() {
     let actions = vec![
-        (Action::Create, r#""create""#),
         (Action::Post, r#""post""#),
-        (Action::Update, r#""update""#),
         (Action::Delete, r#""delete""#),
-        (Action::Transfer, r#""transfer""#),
-        (Action::Import, r#""import""#),
+        (Action::parse("transfer").unwrap(), r#""transfer""#),
+        (Action::parse("import").unwrap(), r#""import""#),
     ];
+    assert!(serde_json::from_str::<Action>(r#""create""#).is_err());
+    assert!(serde_json::from_str::<Action>(r#""POST""#).is_err());
 
     for (action, expected_json) in actions {
         let json = serde_json::to_string(&action).unwrap();

@@ -50,6 +50,19 @@ pub enum ParseError {
     MissingBlankLine,
 }
 
+/// The identifier grammar lives in `sbo-types`; its errors fold into the wire
+/// parse error so `Id::new(..)?` / `Path::parse(..)?` keep working here.
+impl From<sbo_types::error::ParseError> for ParseError {
+    fn from(e: sbo_types::error::ParseError) -> Self {
+        use sbo_types::error::ParseError as E;
+        match e {
+            E::InvalidIdentifier(r) => ParseError::InvalidIdentifier(r.to_string()),
+            E::InvalidPath(r) => ParseError::InvalidPath(r.to_string()),
+            E::InvalidAction => ParseError::InvalidHeader("Action".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ValidationError {
     #[error("Invalid action: {0}")]

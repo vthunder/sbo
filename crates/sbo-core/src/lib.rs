@@ -49,6 +49,9 @@ pub use sbo_types::id::Id;
 pub use sbo_types::path::Path;
 pub use sbo_types::action::Action;
 pub use sbo_types::error::ParseError as TypesParseError;
+// The one identity-comparison rule (Q5): exactly one `@`, lowercase A-label
+// domain, byte-exact local part. Every comparison site uses this module.
+pub use sbo_types::identity;
 
 // Re-export crypto from sbo-crypto
 pub use sbo_crypto::{sha256, ContentHash, HashAlgo, CryptoError};

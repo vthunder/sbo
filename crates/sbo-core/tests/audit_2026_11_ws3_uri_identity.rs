@@ -100,7 +100,7 @@ proptest! {
     #[test]
     fn email_split_rules_agree_on_one_at(local in "[a-z+.]{1,8}", domain in "[a-z.]{1,8}") {
         let e = format!("{local}@{domain}");
-        prop_assert_eq!(parse_email(&e), Some((local.as_str(), domain.as_str())));
+        prop_assert_eq!(parse_email(&e), Some((local.as_str(), domain.clone())));
         prop_assert_eq!(e.split('@').nth(1), Some(domain.as_str()));
         prop_assert!(parse_email(&local).is_none());
         let at_d = format!("@{}", domain);
@@ -120,12 +120,11 @@ proptest! {
 /// (`split('@').nth(1)`) and in `mingo.place@evil` for `resolve_controller`
 /// (`split_once`). Decided (Q5): exactly one `@`; the parser must reject.
 #[test]
-#[ignore] // AUDIT-2026-11 D54: fails today — ids with more than one '@' are accepted
 fn d54_identity_has_exactly_one_at() {
     proptest!(cfg(), |(a in "[a-z]{1,4}", b in "[a-z.]{1,6}", c in "[a-z.]{1,6}")| {
         let two = format!("{a}@{b}@{c}");
         // Today the two rules disagree on this very string:
-        prop_assert_ne!(parse_email(&two).map(|(_, d)| d.to_string()), two.split('@').nth(1).map(String::from));
+        prop_assert_eq!(parse_email(&two), None);
         prop_assert!(Id::new(&two).is_err(), "Id::new({:?}) accepted", two);
     });
 }
@@ -134,7 +133,6 @@ fn d54_identity_has_exactly_one_at() {
 /// identity has a lowercase domain, and a header carrying an uppercase domain
 /// is invalid, so `/u/alice@Example.com/` cannot alias `/u/alice@example.com/`.
 #[test]
-#[ignore] // AUDIT-2026-11 D13: fails today — uppercase domains in identity references are accepted
 fn d13_uppercase_domain_is_not_a_valid_identity_reference() {
     proptest!(cfg(), |(local in "[a-z]{1,6}", domain in "[a-z]{1,5}\\.[a-z]{2,3}", flip in 0usize..8)| {
         let mut d: Vec<u8> = domain.clone().into_bytes();
@@ -152,7 +150,6 @@ fn d13_uppercase_domain_is_not_a_valid_identity_reference() {
 /// percent-decoding, so a percent-encoded id does not round-trip to its
 /// decoded form.
 #[test]
-#[ignore] // AUDIT-2026-11 D14: fails today — ':' in an object id is parsed as a creator prefix
 fn d14_colon_ids_round_trip_through_the_uri() {
     proptest!(cfg(), |(ns in "[a-z]{1,5}", name in "[a-z]{1,5}")| {
         let id = format!("{ns}:{name}");

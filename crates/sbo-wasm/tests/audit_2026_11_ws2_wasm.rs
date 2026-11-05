@@ -52,10 +52,6 @@ const WIRE_EXPECTED_FAIL: &[(&str, &str)] = &[
     ("W-HEX-02", "D2"),
     ("W-INJ-01", "D2"),
     ("W-INJ-02", "D2"),
-    ("W-ID-01", "D21"),
-    ("W-ID-02", "D21"),
-    ("W-ID-03", "D54"),
-    ("W-ID-04", "D13"),
 ];
 
 #[test]
@@ -112,14 +108,6 @@ fn kit_reproduces_the_canonical_vector_and_hashes_raw_bytes() {
 }
 
 const ID_EXPECTED_FAIL: &[(&str, &str)] = &[
-    ("ID-REJ-07", "D21"),
-    ("ID-REJ-08", "D21"),
-    ("PATH-REJ-04", "D21"),
-    ("PATH-REJ-05", "D21"),
-    ("ID-REJ-09", "D54"),
-    ("ID-REJ-10", "D13"),
-    ("ID-REJ-11", "D13"),
-    ("ID-REJ-12", "D13"),
 ];
 
 #[test]

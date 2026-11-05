@@ -68,6 +68,10 @@ The canonical reference for an email-rooted identity is its **email**, which is 
 | Name in a chain-addressed repo (no domain) | `avail:mainnet:13/alice` | Compact cross-repo reference to the name record |
 | Within the current repository | `alice` | Resolves to `/sys/names/alice` |
 
+### Comparing identity references
+
+An email-rooted reference is `<local>@<domain>` with **exactly one `@`**, a non-empty local part and a non-empty domain; anything else (`a@b@c`, `@x`, `a@`) is not an identity reference and resolves to nothing. Two references name the **same identity** iff the local part is byte-equal and the domain is equal as a lowercased A-label (`alice@example.com` = `alice@EXAMPLE.com`; `alice@example.com` ≠ `Alice@example.com` ≠ `alice+bot@example.com`). The **canonical on-chain form** carries the domain in lowercase: a header, path segment or id with an uppercase domain is invalid (Core Specification §Identifier Syntax), so `/u/alice@Example.com/` cannot alias `/u/alice@example.com/`. Every comparison — owner resolution, policy grant matching, attribution authority (which domain an issuer may attribute to), and DNS discovery — follows this one rule. Bare names and keys compare byte-exact.
+
 The `@` form is **reserved for browserid-attributable domains**. It MUST NOT be used to address a name by its repository — use the chain/URI form for that — otherwise `x@y` would be ambiguous between "attributed by `y`'s provider" and "the name `x` in repository `y`".
 
 A repository that runs its own provider issues identities as `<name>@<repo-domain>` (see [Community-Issued Identities](#community-issued-identities-t1)); for those, the local name `alice` and the global `alice@<repo-domain>` are the **same identity**. A local name that merely points to an *external* email (via its `Owner`) is a handle, not a `<name>@<repo-domain>` identity: its canonical reference is the controlling email, and its cross-repo address is the chain/URI form.

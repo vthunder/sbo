@@ -44,14 +44,11 @@ impl Related {
     }
 }
 
-/// Validated identifier (1-256 chars, RFC 3986 unreserved plus `@`
-/// for email-rooted identity references, e.g. `alice@gmail.com`)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Id(String);
-
-/// Path (e.g., "/alice/nfts/")
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Path(Vec<Id>);
+/// Validated identifier and path: THE identifier grammar lives in `sbo-types`
+/// (Core spec §Identifier Syntax; audit 2026-11 Q36) and is re-exported here
+/// so the wire parser, sbo-wasm (which `#[path]`-includes this module) and the
+/// zkVM guest share one definition by construction.
+pub use sbo_types::{Id, Path};
 
 /// Full SBO message
 #[derive(Debug, Clone)]
@@ -84,117 +81,6 @@ pub struct Message {
     /// when `auth_cert` is a typed agent certificate. See the SBO
     /// Authorization Specification (Agent Warrant).
     pub auth_warrant: Option<String>,
-}
-
-impl Id {
-    /// Create a new validated identifier
-    pub fn new(s: impl AsRef<str>) -> Result<Self, crate::error::ParseError> {
-        let s = s.as_ref();
-
-        // Length check
-        if s.is_empty() || s.len() > 256 {
-            return Err(crate::error::ParseError::InvalidIdentifier(
-                format!("Length must be 1-256, got {}", s.len())
-            ));
-        }
-
-        // Character check: RFC 3986 unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
-        // plus "@" for email-rooted identity references (e.g. alice@gmail.com),
-        // "+" for their RFC-subaddressed forms (agent identities like
-        // alice+bot@gmail.com — first-class owners under the browserid holder
-        // model), and ":" for namespaced identifiers — attestation type IDs
-        // (`role:moderator`) and algorithm-prefixed key references
-        // (`ed25519:…`). All are safe since the state-key delimiter is the
-        // Unit Separator (0x1F).
-        for c in s.chars() {
-            if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | '@' | ':' | '+') {
-                return Err(crate::error::ParseError::InvalidIdentifier(
-                    format!("Invalid character: {}", c)
-                ));
-            }
-        }
-
-        Ok(Self(s.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Path {
-    /// Parse a path string like "/alice/nfts/"
-    pub fn parse(s: &str) -> Result<Self, crate::error::ParseError> {
-        if !s.starts_with('/') {
-            return Err(crate::error::ParseError::InvalidPath(
-                "Path must start with /".to_string()
-            ));
-        }
-
-        if !s.ends_with('/') {
-            return Err(crate::error::ParseError::InvalidPath(
-                "Path must end with /".to_string()
-            ));
-        }
-
-        // Root path
-        if s == "/" {
-            return Ok(Self(vec![]));
-        }
-
-        let segments: Result<Vec<Id>, _> = s
-            .trim_matches('/')
-            .split('/')
-            .map(Id::new)
-            .collect();
-
-        Ok(Self(segments?))
-    }
-
-    /// Get the root path
-    pub fn root() -> Self {
-        Self(vec![])
-    }
-
-    /// Format as string
-    pub fn to_string(&self) -> String {
-        if self.0.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}/", self.0.iter().map(|id| id.as_str()).collect::<Vec<_>>().join("/"))
-        }
-    }
-
-    /// Get parent path (or None if root)
-    pub fn parent(&self) -> Option<Self> {
-        if self.0.is_empty() {
-            None
-        } else {
-            Some(Self(self.0[..self.0.len() - 1].to_vec()))
-        }
-    }
-
-    /// Iterate over ancestor paths (including self, excluding root)
-    pub fn ancestors(&self) -> impl Iterator<Item = Path> + '_ {
-        (0..=self.0.len()).rev().map(|i| Path(self.0[..i].to_vec()))
-    }
-
-    /// Get path segments
-    pub fn segments(&self) -> &[Id] {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for Id {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::fmt::Display for Path {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
-    }
 }
 
 impl Message {
@@ -286,29 +172,3 @@ impl Message {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn id_accepts_subaddressed_email_owners() {
-        // Agent identities are +tag sub-addresses and first-class owners.
-        assert!(super::Id::new("alice+bot@gmail.com").is_ok());
-        assert!(super::Id::new("danmills+mingo@sandmill.org").is_ok());
-        // Still-invalid characters stay invalid.
-        assert!(super::Id::new("a b").is_err());
-        assert!(super::Id::new("a/b").is_err());
-    }
-
-    use super::*;
-
-    #[test]
-    fn id_allows_email_and_namespaced_ids() {
-        assert!(Id::new("alice@gmail.com").is_ok());
-        assert!(Id::new("alice").is_ok());
-        // ':' is allowed for attestation type IDs and key references.
-        assert!(Id::new("role:moderator").is_ok());
-        assert!(Id::new("ed25519:abc").is_ok());
-        // '/' and whitespace remain disallowed.
-        assert!(Id::new("a/b").is_err());
-        assert!(Id::new("a b").is_err());
-    }
-}

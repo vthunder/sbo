@@ -64,12 +64,6 @@ const WIRE_EXPECTED_FAIL: &[(&str, &str)] = &[
     ("W-HEX-02", "D2"),
     ("W-INJ-01", "D2"),
     ("W-INJ-02", "D2"),
-    // AUDIT-2026-11 D21: `.` / `..` are accepted as ids and path segments.
-    ("W-ID-01", "D21"),
-    ("W-ID-02", "D21"),
-    // AUDIT-2026-11 D13 / D54 / Q5: no identity grammar beyond the id charset.
-    ("W-ID-03", "D54"),
-    ("W-ID-04", "D13"),
 ];
 
 #[test]
@@ -157,16 +151,6 @@ fn batch_vectors_core_splitter() {
 // --------------------------------------------------------- identifiers ----
 
 const ID_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D21: `.` and `..` accepted.
-    ("ID-REJ-07", "D21"),
-    ("ID-REJ-08", "D21"),
-    ("PATH-REJ-04", "D21"),
-    ("PATH-REJ-05", "D21"),
-    // AUDIT-2026-11 D54 / D13 (Q5): the id grammar has no identity rule.
-    ("ID-REJ-09", "D54"),
-    ("ID-REJ-10", "D13"),
-    ("ID-REJ-11", "D13"),
-    ("ID-REJ-12", "D13"),
 ];
 
 #[test]
@@ -191,13 +175,6 @@ fn identifier_vectors_core_message_grammar() {
 // ------------------------------------------------------------ identity ----
 
 const IDENTITY_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D13 (Q5): domains are compared byte-exact everywhere.
-    ("IDC-02", "D13"),
-    ("IDC-06", "D13"),
-    ("IDD-02", "D13"),
-    ("IDR-02", "D13"),
-    // AUDIT-2026-11 D54: `parse_email` splits at the first `@` and keeps the rest.
-    ("IDD-04", "D54"),
 ];
 
 #[test]
@@ -219,7 +196,7 @@ fn identity_vectors_core_resolution_and_email_split() {
     for v in doc["domain_of"].as_array().unwrap() {
         let ident = v["identity"].as_str().unwrap();
         let expected = v["domain"].as_str().map(|s| s.to_string());
-        let got = sbo_core::dns::parse_email(ident).map(|(_, d)| d.to_string());
+        let got = sbo_core::dns::parse_email(ident).map(|(_, d)| d);
         let ok = got == expected;
         results.push((v["id"].as_str().unwrap().into(), true, ok, format!("parse_email({ident:?}) = {got:?}, spec {expected:?}")));
     }
