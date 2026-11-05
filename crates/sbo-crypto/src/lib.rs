@@ -57,7 +57,7 @@ pub use srs::{SRS_POINT_COUNT, G1_COMPRESSED_SIZE};
 pub mod trie;
 pub use trie::{
     TrieNode, TrieProofStep, TrieProof, TrieError,
-    SparseTrie, compute_trie_root, verify_trie_proof, leaf_hash,
+    SparseTrie, compute_trie_root, verify_trie_proof, leaf_hash, empty_root,
 };
 
 pub use error::CryptoError;

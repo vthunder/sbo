@@ -196,12 +196,15 @@ fn w3_4_prefix_paths_coexist_in_the_commitment() {
     assert_eq!(t.root_hash(), u.root_hash());
 }
 
-/// Pinned: the empty-trie root is the zero hash and an empty non-existence
-/// proof against it verifies (the daemon's empty-state convention).
+/// Pinned (Q41 (a)): the empty-trie root is `node_hash({"children":{}})` =
+/// `sha256(0x01 || json)`, never a zero sentinel, and an empty non-existence
+/// proof against it verifies.
 #[test]
 fn empty_trie_conventions() {
     let t = SparseTrie::new();
-    assert_eq!(t.root_hash(), [0u8; 32]);
+    assert_eq!(t.root_hash(), sbo_crypto::trie::empty_root());
+    assert_eq!(t.root_hash(), sbo_crypto::sha256(b"\x01{\"children\":{}}"));
+    assert_ne!(t.root_hash(), [0u8; 32]);
     let np = t.generate_nonexistence_proof(&["a".to_string()]).unwrap();
     assert!(verify_trie_proof(&np).unwrap());
     let _ = BTreeMap::<String, [u8; 32]>::new();

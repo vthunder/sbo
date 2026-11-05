@@ -16,6 +16,7 @@ the zkVM guest hash nothing themselves.
 
 | | v1 | v2 |
 |---|---|---|
+| Empty state root | `0000…00` sentinel | `node_hash({"children":{}})` (Q41) |
 | Leaf | bare `object_hash` | `sha256(0x00 ‖ object_hash)` (D4) |
 | Internal node | `sha256(json)` | `sha256(0x01 ‖ json)` (D4) |
 | Node JSON | `{"children":{…}}` | `{"children":{…}}` or `{"children":{…},"object":"sha256:<object_hash>"}` (W3-4) |
@@ -39,12 +40,14 @@ Consequences:
   change; TRIE-05 covers object-and-container). Runner `EXPECTED_FAIL`
   tables no longer carry `TRIE-03/distinct`.
 
-Known residual divergence: the v2 spec text states the empty-state root is
-`node_hash({"children":{}})`; the implementation, the daemon genesis path,
-the zkVM guest and TRIE-04 all keep the `[0u8; 32]` sentinel for "no state".
-Nothing on a live chain ever has an empty state after genesis, so no root
-differs in practice; aligning it is a separate root-changing decision and
-is not part of this bundle.
+Empty state (Q41 (a), decided 2026-11-05): the empty-state root is
+`node_hash({"children":{}})` = `sha256(0x01 ‖ {"children":{}})` =
+`sha256:6f2225cc7ae0ab19bcc845b3d7cb4bdb2eef095a1a86ea18071fe8538bc33d8c`.
+The v1 implementation used an all-zero 32-byte sentinel for "no state"; it
+is gone from the trie (`sbo_crypto::trie::empty_root()`), the daemon
+genesis/sync/snapshot paths, the zkVM guest and prover
+(`BlockProofOutput::EMPTY_STATE_ROOT`) and the TRIE-04 vector. A v2 genesis
+proof or bootstrap claim whose `prev_state_root` is all zeros is rejected.
 
 ## What rides the same regenesis
 

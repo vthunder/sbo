@@ -65,7 +65,7 @@ pub use sbo_crypto::bls;
 pub use sbo_crypto::trie::{
     SparseTrie, TrieProof, TrieProofStep, TrieError,
     ObjectWitness, StateTransitionWitness, SiblingHint,
-    compute_trie_root, verify_state_transition, verify_trie_proof,
+    compute_trie_root, verify_state_transition, verify_trie_proof, empty_root,
 };
 
 use std::path::PathBuf;

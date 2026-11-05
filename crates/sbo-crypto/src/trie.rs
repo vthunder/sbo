@@ -44,6 +44,12 @@ pub fn leaf_hash(object_hash: &[u8; 32]) -> [u8; 32] {
     sha256(&preimage)
 }
 
+/// The root of an empty state: `node_hash({"children":{}})` (State Commitment
+/// spec §State Root). There is no zero sentinel.
+pub fn empty_root() -> [u8; 32] {
+    TrieNode::new().hash()
+}
+
 /// Error type for trie operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrieError {
@@ -261,7 +267,7 @@ pub struct StateTransitionWitness {
 impl Default for StateTransitionWitness {
     fn default() -> Self {
         Self {
-            prev_state_root: [0u8; 32],
+            prev_state_root: empty_root(),
             witnesses: Vec::new(),
             sibling_hints: Vec::new(),
         }
@@ -317,7 +323,7 @@ impl PartialNode {
 impl PartialTrie {
     /// Create an empty partial trie
     pub fn new(known_root_hash: [u8; 32]) -> Self {
-        if known_root_hash == [0u8; 32] {
+        if known_root_hash == empty_root() {
             Self {
                 root: None,
                 known_root_hash,
@@ -530,7 +536,7 @@ impl PartialTrie {
     /// Compute the root hash of the partial trie
     pub fn root_hash(&self) -> [u8; 32] {
         match &self.root {
-            None => [0u8; 32],
+            None => empty_root(),
             Some(node) => Self::compute_node_hash(node),
         }
     }
@@ -791,10 +797,10 @@ impl SparseTrie {
     }
 
     /// Compute the root hash of the trie
-    /// Returns [0u8; 32] for empty trie
+    /// Returns `empty_root()` for an empty trie
     pub fn root_hash(&self) -> [u8; 32] {
         match &self.root {
-            None => [0u8; 32],
+            None => empty_root(),
             Some(node) => node.commitment(),
         }
     }
@@ -927,10 +933,10 @@ pub fn compute_trie_root(objects: &[(Vec<String>, [u8; 32])]) -> [u8; 32] {
 
 /// Verify a trie proof
 pub fn verify_trie_proof(proof: &TrieProof) -> Result<bool, TrieError> {
-    // Special case: empty proof against empty state
-    // If state_root is all zeros (empty state), any path trivially doesn't exist
+    // Special case: empty proof against the empty state, where any path
+    // trivially doesn't exist
     if proof.proof.is_empty() {
-        if proof.state_root == [0u8; 32] && proof.object_hash.is_none() {
+        if proof.state_root == empty_root() && proof.object_hash.is_none() {
             // Valid non-existence proof for empty state
             return Ok(true);
         }
@@ -1034,7 +1040,7 @@ fn verify_nonexistence_proof(proof: &TrieProof) -> Result<bool, TrieError> {
         if diverge_step.siblings.is_empty() && diverge_step.object.is_none() {
             // Nothing here at all: only the empty trie looks like this
             if idx == 0 {
-                return Ok(proof.state_root == [0u8; 32]);
+                return Ok(proof.state_root == empty_root());
             }
             return Err(TrieError::InvalidProof);
         }
@@ -1154,12 +1160,13 @@ mod tests {
         let mut trie = SparseTrie::new();
 
         // Empty trie
-        assert_eq!(trie.root_hash(), [0u8; 32]);
+        assert_eq!(trie.root_hash(), empty_root());
+        assert_eq!(empty_root(), sha256(b"\x01{\"children\":{}}"));
 
         // Insert one object
         trie.insert(seg(&["sys", "names", "user1", "alice"]), [1; 32]);
         let root1 = trie.root_hash();
-        assert_ne!(root1, [0u8; 32]);
+        assert_ne!(root1, empty_root());
 
         // Insert another object
         trie.insert(seg(&["sys", "names", "user2", "bob"]), [2; 32]);
@@ -1188,7 +1195,7 @@ mod tests {
         ];
 
         let root = compute_trie_root(&objects);
-        assert_ne!(root, [0u8; 32]);
+        assert_ne!(root, empty_root());
 
         // Same objects in different order should produce same root
         let objects2 = alloc::vec![
@@ -1212,7 +1219,7 @@ mod tests {
         assert!(!trie.contains(&seg(&["a", "b"])));
         assert!(trie.contains(&seg(&["a", "c"])));
         trie.delete(&seg(&["a", "c"]));
-        assert_eq!(trie.root_hash(), [0u8; 32]);
+        assert_eq!(trie.root_hash(), empty_root());
     }
 
     /// Object-versus-container: `a` at /x/ and `b` at /x/a/ coexist, the root
@@ -1327,7 +1334,7 @@ mod tests {
         // with shared path prefixes (like /sys/names and /sys/policies)
 
         // Start with empty state
-        let empty_root = [0u8; 32];
+        let empty_root = empty_root();
 
         // Create paths that share the "sys" prefix
         let path1 = seg(&["sys", "names", "sys"]);

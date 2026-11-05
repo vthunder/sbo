@@ -382,7 +382,7 @@ fn generate_conformance_vectors() {
             { "id": "TRIE-01", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))} ], "root": hex::encode(t1.root_hash()) },
             { "id": "TRIE-02", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))}, {"segments": ["a","c"], "object_hash": hex::encode(h(b"obj-ac"))}, {"segments": ["z"], "object_hash": hex::encode(h(b"obj-z"))} ], "root": hex::encode(t2.root_hash()) },
             { "id": "TRIE-03", "description": "object at [a] whose object_hash equals the hash of the node {b: H}", "objects": [ {"segments": ["a"], "object_hash": hex::encode(sub.hash())} ], "root": hex::encode(t3.root_hash()), "distinct_from": "TRIE-01" },
-            { "id": "TRIE-04", "description": "empty state", "objects": [], "root": hex::encode([0u8; 32]) },
+            { "id": "TRIE-04", "description": "empty state: node_hash of the empty node, no zero sentinel (Q41)", "objects": [], "root": hex::encode(sbo_crypto::trie::empty_root()) },
             { "id": "TRIE-05", "description": "object at [a] and object at [a,b] coexist (object-versus-container); order-independent", "objects": [ {"segments": ["a","b"], "object_hash": hex::encode(h(b"obj-ab"))}, {"segments": ["a"], "object_hash": hex::encode(h(b"obj-a"))} ], "root": hex::encode(t5.root_hash()), "distinct_from": "TRIE-01" }
         ]
     });

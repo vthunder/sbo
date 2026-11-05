@@ -91,7 +91,7 @@ pub fn prove_genesis(
     genesis_actions: Vec<u8>,
 ) -> Result<ProofReceipt, ProverError> {
     let input = BlockProofInput {
-        prev_state_root: [0u8; 32],
+        prev_state_root: BlockProofOutput::EMPTY_STATE_ROOT,
         block_number: 0,
         block_hash,
         parent_hash: [0u8; 32],
@@ -119,7 +119,7 @@ pub fn prove_genesis_with_da(
     raw_cells_hash: [u8; 32],
 ) -> Result<ProofReceipt, ProverError> {
     let input = BlockProofInput {
-        prev_state_root: [0u8; 32],
+        prev_state_root: BlockProofOutput::EMPTY_STATE_ROOT,
         block_number: 0,
         block_hash,
         parent_hash: [0u8; 32],

@@ -25,8 +25,8 @@ fn genesis_proof_commits_guest_image_id() {
     let journal = verify_receipt(&genesis.receipt_bytes).expect("verify genesis");
 
     assert_eq!(journal.block_number, 0);
-    assert_eq!(journal.prev_state_root, [0u8; 32]);
-    assert_eq!(journal.new_state_root, [0u8; 32]); // empty witness → unchanged
+    assert_eq!(journal.prev_state_root, sbo_crypto::trie::empty_root());
+    assert_eq!(journal.new_state_root, sbo_crypto::trie::empty_root()); // empty witness → unchanged
     // The crux: the verifier already enforces this equality, but assert it plainly.
     assert_eq!(journal.verified_with_image_id, SBO_ZKVM_GUEST_ID);
 }

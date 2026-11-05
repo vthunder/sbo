@@ -162,12 +162,9 @@ pub fn read_snapshot_objects(path: &Path) -> Result<Vec<StoredObject>> {
 
 /// Compute the state root a set of snapshot objects reconstructs to — the client's
 /// verification primitive. Uses the canonical trie over `(segments, object_hash)`,
-/// so it matches `StateDb::compute_trie_state_root` exactly. Returns `[0u8;32]` for
-/// an empty set (matching the daemon's empty-tree convention).
+/// so it matches `StateDb::compute_trie_state_root` exactly (`empty_root()` for
+/// an empty set).
 pub fn compute_snapshot_root(objects: &[StoredObject]) -> [u8; 32] {
-    if objects.is_empty() {
-        return [0u8; 32];
-    }
     let entries: Vec<(Vec<String>, [u8; 32])> = objects
         .iter()
         .map(|o| (StateDb::object_to_segments(&o.path, &o.id), o.object_hash))

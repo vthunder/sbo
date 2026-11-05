@@ -646,12 +646,9 @@ impl StateDb {
     }
 
     /// Compute trie state root from all objects
-    /// Returns [0u8; 32] if no objects exist
+    /// (`empty_root()` when none exist)
     pub fn compute_trie_state_root(&self) -> Result<[u8; 32], DbError> {
         let objects = self.get_all_objects_for_trie()?;
-        if objects.is_empty() {
-            return Ok([0u8; 32]);
-        }
         Ok(sbo_crypto::compute_trie_root(&objects))
     }
 
