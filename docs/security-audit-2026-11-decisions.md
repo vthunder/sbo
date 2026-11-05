@@ -643,6 +643,46 @@ grammar and not the prose).
 **Recommendation: (a).** Nothing emits or decodes percent-encoded ids, and
 (b) would reopen the normalization questions Q5 just closed.
 
+Zoom-out (asked by Dan 2026-11-05: are paths user-facing, and should other
+scripts be allowed?). Paths are user-facing in three places: community
+and collection names (mingo's community id becomes the path segment),
+identity references (`alice@example.com`, local part and domain), and the
+`sbo://` URI. Post and comment ids in mingo are derived hashes and never
+typed. Everything a reader *reads* (titles, community display names,
+bodies) is payload and already UTF-8, so documents in other languages are
+supported today; only the *address* is ASCII.
+
+Three ways to internationalize addresses, in rising cost:
+
+1. Display-name layer (no spec change). The app maps a Unicode name to an
+   ASCII id (slug, hash or user choice) and shows the Unicode name from
+   the payload. This is what mingo does for posts already. Collisions and
+   confusables are an app problem, not a chain problem.
+2. IDNA-style A-labels (spec note, no wire change). A Unicode segment is
+   carried on chain as an `xn--` punycode A-label after UTS #46 mapping and
+   NFC; clients render the U-label. Domains in identity references
+   already work this way under Q5, so this extends an existing rule to
+   local parts and path segments. Comparison stays byte-exact on ASCII,
+   the trie, globs, proofs and old clients are untouched, and the URI
+   needs no percent-encoding. Confusable policy (mixed-script, skeleton
+   match) is a registry rule the owning collection's policy can apply.
+3. Native UTF-8 identifiers (breaking). Requires: an `SBO-Version` bump
+   (old clients reject non-ASCII header values); normative NFC and a
+   prohibited-character table; a confusable policy or an explicit
+   decision to accept aliasing of `(path, id)` by homoglyph; UTF-8
+   validation in the wire parser; glob matching defined on code points
+   rather than bytes; percent-encoding in `sbo://`; identity comparison
+   reopened for local parts (RFC 6531 EAI, which browserid and most IdPs
+   do not support); conformance vectors; zkvm cost for normalization.
+   Roughly a spec cycle plus a wire version.
+
+**Recommendation for the zoom-out: keep (a) now, and if internationalized
+addresses are wanted, adopt (2) as a spec note in the Core and Identity
+specs.** It gives readers their script, costs no wire change, and inherits
+twenty years of IDNA practice on confusables. (3) buys only prettier raw
+bytes on the wire, which no one reads, at the price of the normalization
+and aliasing surface Q5 just closed.
+
 ### Q38. Glob matching: linear algorithm or wildcard cap (WS3 W3-1 / W3-2, High)
 
 `PathPattern::match_parts`, `IdPattern::glob_match` and the warrant
