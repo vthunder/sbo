@@ -1,11 +1,11 @@
 ---
 # sbo-mwz9
 title: 'Spec edit (Attribution): align §3/§4a with the device model; on-chain anchors are the trust root; monotonic evidence refresh (Q1, Q3, Q16)'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-04T21:36:02Z
-updated_at: 2026-11-04T21:36:02Z
+updated_at: 2026-11-05T10:32:39Z
 parent: sbo-ax7t
 ---
 
