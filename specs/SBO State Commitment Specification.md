@@ -520,7 +520,7 @@ Write `AUTH` for the deployment's **checkpoint-authority identity** — the id t
 |------|-------------|---------|
 | **T2-sys** | `{attestors: [AUTH], threshold: 1}` | the current default: trust the checkpoint authority alone |
 | **T2-attest** | `{attestors: [AUTH, alice, bob…], threshold: N}` | client-chosen web of trust; no fixed validator set |
-| **T1-zk** | a proof discharges the claim outright | trustless; the proof *is* the evidence, no signer trusted (see [prover integration]) |
+| **T1-zk** | a proof discharges the claim outright | trustless; the proof *is* the evidence, no signer trusted. **Design slot only (2026-11):** the experimental `sbo-zkvm` guest carries no validity claim yet, so no client may place itself in this tier today (see `docs/plans/ZK-Validity-Proofs-Design.md`). |
 
 The checkpoint authority is therefore **not privileged in the protocol** — it is merely the attestor every default policy happens to include. A deployment or client MAY drop `AUTH` from its set entirely and trust only independent attestors, or require `AUTH` **and** peers (`threshold ≥ 2` with `AUTH` in the set). Implementations SHOULD model the authority checkpoint and peer attestations through **one verifier** over signed `(h, R)` claims rather than two code paths.
 

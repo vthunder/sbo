@@ -212,6 +212,7 @@ See [reference_impl/](./reference_impl/) for the working implementation includin
 - **sbo-daemon** - Background service that syncs from DA layers
 - **sbo-core** - Core library with validation and state management
 - **sbo-crypto** - Cryptographic primitives and proofs
+- **sbo-zkvm** - *Experimental, feature-gated (`--features zkvm`), carries no validity claim.* The RISC Zero guest does not yet prove SBO validity (its actions hash is discarded and the trie witness is unbound from the block data); do not rely on its receipts for anything. See `docs/plans/ZK-Validity-Proofs-Design.md`.
 
 The [reference implementation README](./reference_impl/README.md) includes quick start instructions, proof verification examples, and API documentation.
 
