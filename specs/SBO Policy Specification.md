@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: Documented the shipped delegation model (S12): the `govern` action, `pin`, `descendant_constraint` (`allowed_grants`, `mandated_restrictions`, `forbid_pinning`), and the `dnssec_proof` and `require_payload_signed_by` conditions. Validation on write is normative: role cycles reject, unknown keys anywhere in the document reject (Q39), pattern syntax is checked, and the wildcard cap applies (Q38); role resolution is bounded at evaluation (Q17). Owner is a principal like any other (Q13).
+
 ## Overview
 
 This document defines the specification for SBO policy objects (`policy.v2`), which govern permissions for creating, posting, deleting, and transferring SBO objects.
@@ -33,7 +37,7 @@ Content-Type: application/json
 Content-Schema: policy.v2
 Content-Length: 412
 Content-Hash: sha256:a1b2c3...
-Public-Key: secp256k1:02abc...
+Public-Key: ed25519:a1b2c3...
 Signature: 1a2b3c...
 ```
 
@@ -44,11 +48,19 @@ Signature: 1a2b3c...
   "roles": { ... },
   "deny": [ ... ],
   "grants": [ ... ],
-  "restrictions": [ ... ]
+  "restrictions": [ ... ],
+  "pin": { ... },
+  "descendant_constraint": { ... }
 }
 ```
 
-All sections are optional. Missing sections are treated as empty.
+All sections are optional. Missing sections are treated as empty. **No other keys are permitted**: a policy document, a grant, a restriction, a `require` object, a `pin` or a `descendant_constraint` that carries a key not defined in this specification is **invalid** (see [Validation Rules](#validation-rules)). A misspelled condition (`max_sise`) is therefore a rejected policy, never an empty requirement that fails open.
+
+### Where a policy lives and what it governs
+
+A `policy.v2` object posted at container path `P` (any id) is the **governing policy of `P`**: it governs every write whose container path is `P` or a descendant of `P`, until a nearer governing policy intervenes. Resolution for a write to container `C` walks `C`, then each ancestor of `C`, and uses the first governing policy found; the root policy at `/sys/policies/` is the default when no ancestor has one. The policy that governs a write to the **policy object itself** is its **parent**'s governing policy (the nearest governing policy strictly above `P`), never the object being written; see [`govern`](#govern-installing-a-policy).
+
+Evaluation is pure: a function of the message, the chain state at the message's inclusion point, and the inclusion time. It consults no network and no clock other than the block's.
 
 ---
 
@@ -58,6 +70,8 @@ All sections are optional. Missing sections are treated as empty.
 2. **Grant check** — if user matches a grant for this action and path, proceed
 3. **Restriction check** — if restrictions exist for this path, verify conditions
 4. **Default** — if no matching grant, deny
+
+**The owner is a principal like any other.** Nothing bypasses this order: an object's owner updating, transferring or deleting it is evaluated by the same four steps, matching grants as `to: "owner"`. A policy that carries no `owner` grant for an action denies the owner that action, and `deny` and `restrictions` apply to the owner exactly as to anyone else. The implicit owner permission of earlier drafts is now an explicit grant that the default root policy and the genesis presets carry (`{"to": "owner", "can": ["update", "transfer", "delete"], "on": "/**"}` or narrower); a community policy inherits it from its ancestor rather than from a special case in the evaluator. The two exceptions are not owner privileges: a name-claim update is controller-only (Identity spec anti-hijack rule), and a write to a policy object is a [`govern`](#govern-installing-a-policy) action evaluated against the parent policy.
 
 ---
 
@@ -158,6 +172,60 @@ A role member may be an **attestation source** instead of a literal identity. Th
 
 A requester matches an `attested` source when an `attestation.v1` exists whose `type` equals `type`, whose issuer matches `by` (when given), whose `subject` resolves to the **same controller** as the requester, and which is **in force** at the message's inclusion time (`issued_at` ≤ inclusion time, and `expires` absent or > inclusion time). Expiry of the attestation removes the role automatically. An `attested` source references data objects, not roles, so it cannot participate in a role cycle.
 
+### `pin`
+
+A policy MAY freeze the delegation terms it was installed under to one historical version of its ancestor (the P2 *sovereignty* property):
+
+```json
+{
+  "pin": {
+    "ancestor": "/sys/policies/",
+    "hash": "sha256:<content-hash of the ancestor policy object>",
+    "block": 1234
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `ancestor` | Yes | Container path of the pinned ancestor policy (the direct parent's governing policy) |
+| `hash` | Yes | `Content-Hash` of the ancestor policy object version pinned; authoritative and reorg-safe |
+| `block` | No | Locator hint only; carries no meaning in evaluation |
+
+Semantics:
+
+- **Governance resolves against the pinned version.** Who may `govern` (amend, replace, delete) a pinned policy is evaluated against the ancestor version named by `hash`, not the ancestor's current version. A later amendment of the ancestor therefore cannot reach into a pinned subtree. An **unpinned** policy *tracks* its ancestor: the current latest version governs it (the revocable / eminent-domain regime).
+- **Forward-only.** On create, `hash` MUST equal the content hash of the ancestor's current version. On update, the policy either keeps its existing pin verbatim or advances it to the ancestor's current version; any other value is invalid. A pin can never point backwards.
+- **Only ordinary evaluation is affected through governance.** Grants, restrictions and `deny` of a write under the pinned policy are evaluated against the pinned policy itself as usual; the pin changes only which ancestor version decides *who may change the pinned policy*.
+- Implementations MUST retain every policy version that some live pin references (keyed by content hash) so that governance of a pinned policy is reproducible on replay.
+
+### `descendant_constraint`
+
+A policy MAY impose a ceiling and a template on its **direct child policies** (P3/P4). Each level re-delegates its own template downward, so every check is local to one parent–child pair:
+
+```json
+{
+  "descendant_constraint": {
+    "allowed_grants": [
+      {"to": "owner", "can": ["post", "delete"], "on": "/$owner/**"},
+      {"to": "*", "can": ["create"], "on": "/public/**"}
+    ],
+    "mandated_restrictions": [
+      {"on": "/**", "require": {"max_size": 1048576}}
+    ],
+    "forbid_pinning": false
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `allowed_grants` | `[]` | The grants a direct child MAY make. Every child grant MUST be covered by one template grant: `to`, `on` and (when the template sets it) `id` byte-equal, and every child action covered by a template action (`post` covers `create`/`update`, `*` covers all). An absent template `id` covers any child id; an `id` on the template MUST be reproduced exactly. An **empty list forbids the child from granting anything**. |
+| `mandated_restrictions` | `[]` | Restrictions every direct child MUST carry verbatim (byte-equal after canonical serialization). |
+| `forbid_pinning` | `false` | When true, a direct child MUST NOT carry a `pin`: children always track the latest ancestor (the strict top-down regime). Evaluated against the parent's **current** version, so a parent can retighten at any time. |
+
+Coverage is deliberately conservative: a child cannot broaden the recipient or the path of a template grant, only narrow its action set. Pattern subsumption is not decided; the comparison is byte-exact. A child policy that violates its parent's constraint is invalid at write time, and the constraint is re-checked on every update of the child.
+
 ---
 
 ## Identity Syntax
@@ -170,7 +238,7 @@ The `to` field in grants accepts these forms:
 | `"*"` | Anyone (public access) |
 | `"alice@example.com"` | A specific email-rooted identity |
 | `"alice"` | A specific name (from the `/sys/names/` namespace) |
-| `{"key": "secp256k1:02..."}` | A specific public key (key-rooted identity) |
+| `{"key": "ed25519:a1b2..."}` | A specific public key (key-rooted identity) |
 | `{"role": "admin"}` | Anyone with this role |
 | `{"any": ["alice@example.com", "bob"]}` | Any of these identities |
 
@@ -188,9 +256,30 @@ A requesting message matches an identity reference when its signer **resolves** 
 | `"delete"` | Delete an object |
 | `"transfer"` | Move, rename, and/or change ownership |
 | `"import"` | Create object from cross-chain import |
-| `"*"` | All actions |
+| `"govern"` | Install, replace or delete a `policy.v2` object at a path (see below). **Not** covered by `"*"`, `"post"` or `"create"`. |
+| `"*"` | All ordinary actions (everything above except `govern`) |
 
 **Note:** The distinction between `create` and `update` allows policies to grant first-come-first-served creation (e.g., identity claims) without granting update rights. Use `post` when both should be allowed.
+
+### `govern` — installing a policy
+
+Writing a `policy.v2` object is **meta-authority** over a subtree, so it is its own action:
+
+- A `post`, `delete` or `transfer` whose object carries `Content-Schema: policy.v2` is evaluated as `govern` on the **target container path**, against the **parent policy** (the nearest governing policy strictly above the target), never against the policy being written or replaced and never via an owner shortcut. Owning the slot a policy sits in confers nothing.
+- `govern` is granted only by an explicit `"govern"` in `can`. `"*"`, `"post"` and `"create"` do not include it, so an ordinary create grant on a subtree cannot be used to plant a shadowing policy and capture the subtree.
+- Because an ancestor with `govern` evaluates against *its* parent, an ancestor can always reclaim or delete a delegated policy, unless that policy is [pinned](#pin) to a version that does not grant it.
+- After the `govern` check, the new document is validated ([Validation Rules](#validation-rules)) and checked against the parent's [`descendant_constraint`](#descendant_constraint) and pin rules. All three must pass.
+
+Example: a root policy that lets an admin role install community policies anywhere, and lets each community's own moderators govern only beneath their community:
+
+```json
+{
+  "grants": [
+    {"to": {"role": "admin"}, "can": ["govern"], "on": "/**"},
+    {"to": {"role": "moderator"}, "can": ["govern"], "on": "/communities/$user/**"}
+  ]
+}
+```
 
 ---
 
@@ -205,6 +294,10 @@ A requesting message matches an identity reference when its signer **resolves** 
 | `"/$user/**"` | Dynamic: the acting signer's namespace |
 | `"/u/$email/**"` | Dynamic: restricted to email-rooted signers |
 | `"/u/$name/**"` | Dynamic: restricted to locally-named signers |
+
+### Wildcard cap
+
+A path pattern (`on`, `deny`) or id pattern (`id`) MUST contain at most **8 wildcards**, counting each `*` and each `**` as one. A pattern with more is a syntax error and the policy is rejected at write time (Validation Rule 2). The bound exists so that matching cost is a stated size limit, like the 256-character id limit: a conforming matcher MUST run in time polynomial in the pattern and path lengths (a memoised, O(wildcards × segments) matcher is the reference; a backtracking matcher is exponential in the number of wildcards and is not conforming even under the cap). The same cap applies to warrant `path:` scopes (see the [Authorization Specification](./SBO%20Authorization%20Specification.md#wildcard-cap)).
 
 ### Policy variables
 
@@ -292,6 +385,25 @@ Used in the `require` field of restrictions:
 | `{"attested": {"type": "membership", "by": "cooks@example.org"}}` | The acting user (`$user`) must be the **in-force subject** of such an attestation |
 | `{"not_attested": {"type": "ban", "by": "cooks@example.org"}}` | The acting user must **not** be the in-force subject of such an attestation |
 | `{"fields": [{"pointer": "/a/b", "min": 1}]}` | Values inside the JSON payload, addressed by pointer. See [Payload-field conditions](#payload-field-conditions). |
+| `{"dnssec_proof": true}` | The payload must be a valid DNSSEC proof for the domain the object is named after. See [Self-authorizing DNSSEC objects](#self-authorizing-dnssec-objects-dnssec_proof). |
+| `{"require_payload_signed_by": {"path": "/sys/domains/"}}` | The payload is a JWT whose issuer is an object under `path` and whose signature verifies under that object's key. See [Payload signed by an on-chain key](#payload-signed-by-an-on-chain-key-require_payload_signed_by). |
+
+Condition keys are a closed set. A `require` object carrying any key not in this table is invalid (Validation Rule 6); it never degrades to an empty requirement.
+
+### Self-authorizing DNSSEC objects (`dnssec_proof`)
+
+`{"dnssec_proof": true}` makes the write **self-authorizing**: the payload itself proves write authority, so the restriction is safe to pair with an unprivileged grant (`"to": "*"`). The condition holds when:
+
+1. the write's container is `/sys/dnssec/` and its id is a domain name `<domain>` (the object is named after the domain it proves);
+2. the payload is a `dnssec.v1` object carrying an RFC 9102 DNSSEC chain that validates offline against the pinned DNS root KSK history at `/sys/trust/dns-root` (the anchor in force at the message's inclusion time; see the [Authorization Specification](./SBO%20Authorization%20Specification.md));
+3. the validated chain carries a `_browserid.<domain>` record for **exactly** this `<domain>`, which binds the proof to the path: a valid proof for a different domain fails; and
+4. the chain's RRSIG windows bracket the inclusion time, and, when the slot is already occupied, the new evidence satisfies the monotonic-freshness rule of the [Attribution Specification](./SBO%20Attribution%20Specification.md) (it may not lower the occupant's RRSIG expiration or carry an older DNSKEY set).
+
+Anything else (no payload, a proof that does not validate, a proof for another name, a stale window, a rollback) is a denial.
+
+### Payload signed by an on-chain key (`require_payload_signed_by`)
+
+`{"require_payload_signed_by": {"path": "<pattern>"}}` requires that the payload be a JWT whose **issuer object** lives at a path matching `path`, and that the JWT's signature **verifies under that object's public key** as stored on chain at the message's inclusion point. The issuer is taken from the JWT's `iss` claim mapped to an object reference (`domain:<d>` ⇒ `/sys/domains/` id `<d>`; a name ⇒ `/sys/names/` id `<name>`). Matching the issuer **string** against the pattern is not sufficient: an implementation MUST load the issuer object and verify the signature, otherwise any signer satisfies the restriction by writing the expected `iss`. A missing issuer object, a path outside the pattern, a payload that is not a JWT, or a signature that does not verify is a denial. Typical use: a repository that only accepts `identity.v1` records certified by one of its root-of-trust domains.
 
 ### Payload-field conditions
 
@@ -345,10 +457,13 @@ the exact form would need a disjunction the language does not have.
 
 ## Role Resolution
 
-- Role members can be identity names, public keys, or other roles
+- Role members can be identity names, public keys, attestation sources, `any` lists, or other roles
 - Role membership is resolved at evaluation time
-- Circular role references are invalid (policy must be rejected)
+- Circular role references are invalid (policy must be rejected at write time, Validation Rule 3)
 - Unknown identity names result in no match (not an error)
+- A reference to a role that the policy does not define matches nothing
+
+**Bounded resolution.** Rejecting cycles on write is necessary but not sufficient (a policy admitted by an older implementation, or a very long acyclic chain, must not crash an evaluator). Evaluation therefore MUST also be bounded on its own: an evaluator keeps a visited set of roles along the current resolution path and stops at a **maximum nesting depth of 16** roles (`{"role": …}` inside `{"role": …}`, counting `any` lists as transparent). A role reference that would revisit a role already on the path, or exceed the depth, resolves to **no match** (fail closed), never to a panic or an unbounded loop. The write-time rule rejects any policy whose role graph has a cycle or a nesting depth greater than 16, so a valid policy never reaches the evaluation guard.
 
 Example with inheritance:
 ```json
@@ -403,16 +518,20 @@ This policy:
 
 ## Validation Rules
 
-SDKs must enforce:
+A `policy.v2` document is validated **when it is written** (after the [`govern`](#govern-installing-a-policy) check and before it is applied), by every node, as part of consensus. The write is invalid, and the policy never becomes a governing policy, if any rule fails:
 
-1. Policy must be valid JSON
-2. All path patterns must be syntactically valid
-3. Role references must not be circular
-4. Identity references in roles must be valid syntax
-5. Actions must be from the defined set (or `"*"`)
-6. Requirement conditions must use known condition types
+1. Policy must be valid JSON, and a JSON object
+2. All path patterns and id patterns must be syntactically valid, including the [wildcard cap](#wildcard-cap) (at most 8 wildcards per pattern)
+3. Role references must not be circular, and role nesting must not exceed depth 16 (see [Role Resolution](#role-resolution))
+4. Identity references in roles, `to` fields and `any` lists must be valid syntax, of a known kind (`"owner"`, `"*"`, name, email, `{"key"}`, `{"role"}`, `{"any"}`, `{"attested"}`)
+5. Actions must be from the defined set (or `"*"`); `govern` must be spelled explicitly
+6. Requirement conditions must use known condition types, and every `fields` condition must carry a `pointer` and at least one comparison
+7. **No unknown keys.** The policy object, each grant, each restriction, each `require` object, each `fields` condition, each `attested` source, the `pin` and the `descendant_constraint` MUST contain only the keys defined here. An unknown key anywhere is a rejection (strict parsing). Forward-compatible additions to the policy language are versioned by the `Content-Schema` (`policy.v3`), not by ignoring keys.
+8. `pin`, when present, must satisfy the forward-only rule and the parent's `forbid_pinning`; the document must satisfy the parent's `descendant_constraint`
 
-Invalid policies must be rejected. Objects posted under an invalid policy are themselves invalid.
+Invalid policies must be rejected. A policy write that fails validation leaves the previously governing policy in force (per-message semantics: the rejected message is invisible). Because validation is part of consensus, these rules are **consensus-changing**: a chain created before strict parsing (rule 7) was in force cannot adopt it on a client upgrade alone; the reference deployment adopts it at its `state-commitment/v2` regenesis, after surveying every existing policy for stray keys.
+
+A second implementation may be held to all of the above by the conformance vectors (`conformance/` suites `policy`): a cyclic policy, a `max_sise` restriction, a nine-wildcard pattern and an unknown grant key are each a rejected write.
 
 ---
 
