@@ -87,14 +87,9 @@ fn put_key_rooted_name(db: &StateDb, name: &str, key: &SigningKey) {
 
 // ------------------------------------------------------------------ LWW ----
 
-const LWW_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D17: with a missing or unparseable HLC the read overlay lets
-    // the pending shadow beat the on-chain value (`overlay_wins` → true) while
-    // reconciliation and the confirmed path treat the chain as authoritative.
-    ("LWW-06/overlay_wins", "D17"),
-    ("LWW-07/overlay_wins", "D17"),
-    ("LWW-08/overlay_wins", "D17"),
-];
+// AUDIT-2026-11 D17 (fixed, sbo-5fja): the read overlay and reconciliation
+// share one rule -- on a missing or unparseable HLC the chain is authoritative.
+const LWW_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 #[test]
 fn lww_vectors_confirmed_path_overlay_and_reconciliation_agree() {
@@ -264,12 +259,9 @@ fn checkpoint_claim_vectors() {
 
 // -------------------------------------------------------- inclusion time ----
 
-const TIME_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D28: with no inclusion time the attested checks run at
-    // t = 0, so a ban issued at any real time is "not yet in force" and the
-    // banned writer is admitted; a node that has the timestamp rejects.
-    ("TIME-01/no-timestamp", "D28"),
-];
+// AUDIT-2026-11 D28 (fixed, sbo-zyny): with no inclusion time the attested
+// checks fail closed instead of running at t = 0.
+const TIME_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 /// I13 / I16: a missing inclusion time is a hard reject, never a skipped
 /// check; nodes with and without the block timestamp must agree.
@@ -328,12 +320,9 @@ fn inclusion_time_vectors_nodes_with_and_without_timestamp_agree() {
 
 // ------------------------------------------------------ policy in force ----
 
-const POLICY_EXPECTED_FAIL: &[(&str, &str)] = &[
-    // AUDIT-2026-11 D17 (sbo-y757): the overlay serves a pending policy object
-    // to readers but validation resolves policies from the confirmed column
-    // family only, so the tip shows a policy that the tip does not enforce.
-    ("POL-01/validation-sees-pending-policy", "D17"),
-];
+// AUDIT-2026-11 D17 / sbo-y757 (fixed, sbo-5fja): `Overlay::resolve_policy`
+// resolves through the overlay, so the tip enforces the policy it shows.
+const POLICY_EXPECTED_FAIL: &[(&str, &str)] = &[];
 
 /// Content spec §Confirmed vs Tip: both views are computed by the same rules
 /// and differ only in which writes are eligible — a policy visible in the tip
@@ -345,6 +334,12 @@ fn policy_in_force_agrees_between_tip_reads_and_tip_validation() {
     put_root_policy(&db, serde_json::json!({
         "grants": [{"to": "*", "can": ["create"], "on": "/spaces/**"}]
     }));
+    // The confirmed root object carries an HLC: under LWW-07 (Q25 (a)) a
+    // pending shadow never beats an HLC-less on-chain value, so the pending
+    // policy must win the write-model order to be the tip's policy at all.
+    let mut confirmed_root = stored("/sys/policies/", "root", "sys", Some("1703000000000.0"), [0u8; 32], b"{}", Some("policy.v2"));
+    confirmed_root.creator = Id::new("x").unwrap();
+    db.put_object(&confirmed_root).unwrap();
     // A newer root policy that denies /spaces/** sits in the mempool (signed,
     // accepted at the submit gate, not yet replayed from the chain).
     let new_policy = serde_json::to_vec(&serde_json::json!({

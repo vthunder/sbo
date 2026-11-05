@@ -24,6 +24,16 @@ const CF_PROOFS: &str = "proofs";
 const CF_POLICY_VERSIONS: &str = "policy_versions";
 /// P2 — pin refcounts, keyed by content-hash → little-endian u64.
 const CF_POLICY_PINREFS: &str = "policy_pinrefs";
+/// Secondary index of objects by `Content-Schema`: key
+/// `<schema>\x1f<object key>` → empty. Lets `list_objects_by_schema` (the
+/// attestation enumeration behind every `attested` / `not_attested` policy
+/// condition) read only the objects of one schema instead of scanning the
+/// whole objects CF on every check (audit 2026-11 W4-1 / D11). Maintained by
+/// `put_object` / `delete_object`; built once from the objects CF on first open
+/// of a database that predates it (see `META_SCHEMA_INDEX`).
+const CF_BY_SCHEMA: &str = "by_schema";
+/// Meta key recording that `CF_BY_SCHEMA` has been (back)filled.
+const META_SCHEMA_INDEX: &[u8] = b"schema_index_v1";
 
 /// A policy indexed in the `policies` CF: the parsed policy plus the on-chain
 /// content-hash and block of the version it came from. The content-hash is what
@@ -71,12 +81,38 @@ impl StateDb {
             rocksdb::ColumnFamilyDescriptor::new(CF_PROOFS, rocksdb::Options::default()),
             rocksdb::ColumnFamilyDescriptor::new(CF_POLICY_VERSIONS, rocksdb::Options::default()),
             rocksdb::ColumnFamilyDescriptor::new(CF_POLICY_PINREFS, rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(CF_BY_SCHEMA, rocksdb::Options::default()),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
             .map_err(|e| DbError::RocksDb(e.to_string()))?;
 
-        Ok(Self { db })
+        let db = Self { db };
+        db.ensure_schema_index()?;
+        Ok(db)
+    }
+
+    /// Backfill `CF_BY_SCHEMA` from the objects CF on a database created before
+    /// the index existed, so an upgraded node keeps enforcing attestation-based
+    /// policy (a missing index would read as "no attestations", lifting bans).
+    fn ensure_schema_index(&self) -> Result<(), DbError> {
+        let meta = self.db.cf_handle(CF_META).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        if self.db.get_cf(&meta, META_SCHEMA_INDEX).map_err(|e| DbError::RocksDb(e.to_string()))?.is_some() {
+            return Ok(());
+        }
+        let objects = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let by_schema = self.db.cf_handle(CF_BY_SCHEMA).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let mut batch = rocksdb::WriteBatch::default();
+        for item in self.db.iterator_cf(&objects, rocksdb::IteratorMode::Start) {
+            let (key, value) = item.map_err(|e| DbError::RocksDb(e.to_string()))?;
+            let obj: StoredObject = serde_json::from_slice(&value)
+                .map_err(|e| DbError::Serialization(e.to_string()))?;
+            if let Some(schema) = obj.content_schema.as_deref() {
+                batch.put_cf(&by_schema, encode_schema_key(schema, &key), b"");
+            }
+        }
+        batch.put_cf(&meta, META_SCHEMA_INDEX, b"1");
+        self.db.write(batch).map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
     /// Get the object occupying the `(path, id)` slot, if any.
@@ -102,28 +138,44 @@ impl StateDb {
         }
     }
 
-    /// Store an object
+    /// Store an object (and keep the by-schema index in step, atomically).
     pub fn put_object(&self, obj: &StoredObject) -> Result<(), DbError> {
         let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let by_schema = self.db.cf_handle(CF_BY_SCHEMA).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
         let key = encode_object_key(&obj.path, &obj.id);
         let value = serde_json::to_vec(obj)
             .map_err(|e| DbError::Serialization(e.to_string()))?;
 
-        self.db.put_cf(&cf, &key, &value)
-            .map_err(|e| DbError::RocksDb(e.to_string()))
+        let mut batch = rocksdb::WriteBatch::default();
+        // An update may change the schema: drop the incumbent's index entry.
+        if let Some(old_schema) = self.get_object(&obj.path, &obj.id)?.and_then(|o| o.content_schema) {
+            if obj.content_schema.as_deref() != Some(old_schema.as_str()) {
+                batch.delete_cf(&by_schema, encode_schema_key(&old_schema, &key));
+            }
+        }
+        if let Some(schema) = obj.content_schema.as_deref() {
+            batch.put_cf(&by_schema, encode_schema_key(schema, &key), b"");
+        }
+        batch.put_cf(&cf, &key, &value);
+        self.db.write(batch).map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
-    /// Delete the object occupying the `(path, id)` slot.
+    /// Delete the object occupying the `(path, id)` slot (and its index entry).
     pub fn delete_object(
         &self,
         path: &crate::message::Path,
         id: &crate::message::Id,
     ) -> Result<(), DbError> {
         let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let by_schema = self.db.cf_handle(CF_BY_SCHEMA).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
         let key = encode_object_key(path, id);
 
-        self.db.delete_cf(&cf, &key)
-            .map_err(|e| DbError::RocksDb(e.to_string()))
+        let mut batch = rocksdb::WriteBatch::default();
+        if let Some(schema) = self.get_object(path, id)?.and_then(|o| o.content_schema) {
+            batch.delete_cf(&by_schema, encode_schema_key(&schema, &key));
+        }
+        batch.delete_cf(&cf, &key);
+        self.db.write(batch).map_err(|e| DbError::RocksDb(e.to_string()))
     }
 
     /// Collect all stored objects whose encoded key begins with `path_prefix`
@@ -146,19 +198,34 @@ impl StateDb {
         Ok(out)
     }
 
-    /// Collect all stored objects with the given `content_schema` (a full scan).
-    /// Used to enumerate attestations across all issuers when a policy's
-    /// `attested` source omits `by`.
+    /// Collect all stored objects with the given `content_schema`, through the
+    /// by-schema index (no full scan). Used to enumerate attestations for the
+    /// `attested` / `not_attested` policy conditions.
     pub fn list_objects_by_schema(&self, schema: &str) -> Result<Vec<StoredObject>, DbError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let objects = self.db.cf_handle(CF_OBJECTS).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let by_schema = self.db.cf_handle(CF_BY_SCHEMA).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        let prefix = encode_schema_key(schema, b"");
         let mut out = Vec::new();
-        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (_key, value) = item.map_err(|e| DbError::RocksDb(e.to_string()))?;
-            let obj: StoredObject = serde_json::from_slice(&value)
-                .map_err(|e| DbError::Serialization(e.to_string()))?;
-            if obj.content_schema.as_deref() == Some(schema) {
-                out.push(obj);
+        for item in self.db.prefix_iterator_cf(&by_schema, &prefix) {
+            let (key, _) = item.map_err(|e| DbError::RocksDb(e.to_string()))?;
+            // prefix_iterator may overscan past the prefix; stop when it does.
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let object_key = &key[prefix.len()..];
+            match self.db.get_cf(&objects, object_key).map_err(|e| DbError::RocksDb(e.to_string()))? {
+                Some(value) => {
+                    let obj: StoredObject = serde_json::from_slice(&value)
+                        .map_err(|e| DbError::Serialization(e.to_string()))?;
+                    if obj.content_schema.as_deref() == Some(schema) {
+                        out.push(obj);
+                    }
+                }
+                None => {
+                    return Err(DbError::RocksDb(format!(
+                        "by_schema index entry for '{schema}' names a missing object"
+                    )))
+                }
             }
         }
         Ok(out)
@@ -210,6 +277,17 @@ impl StateDb {
         let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
         self.db.delete_cf(&cf, path.to_string().as_bytes())
             .map_err(|e| DbError::RocksDb(e.to_string()))
+    }
+
+    /// The [`PolicyEntry`] indexed at exactly `path` (no ancestor walk, no root
+    /// fallback). Lets a caller that overlays pending policies (the daemon's
+    /// mempool overlay) run the ancestor walk itself.
+    pub fn get_policy_entry_at(&self, path: &crate::message::Path) -> Result<Option<PolicyEntry>, DbError> {
+        let cf = self.db.cf_handle(CF_POLICIES).ok_or_else(|| DbError::RocksDb("Missing CF".to_string()))?;
+        match self.db.get_cf(&cf, path.to_string().as_bytes()).map_err(|e| DbError::RocksDb(e.to_string()))? {
+            Some(bytes) => Ok(Some(decode_policy_entry(&bytes)?)),
+            None => Ok(None),
+        }
     }
 
     /// Resolve policy by walking up the path hierarchy (see [`resolve_policy_entry`]).
@@ -637,6 +715,16 @@ fn decode_policy_entry(bytes: &[u8]) -> Result<PolicyEntry, DbError> {
         .map_err(|e| DbError::Serialization(e.to_string()))?;
     let content_hash = crate::crypto::ContentHash::sha256(bytes).to_string();
     Ok(PolicyEntry { policy, content_hash, block: 0 })
+}
+
+/// Key in `CF_BY_SCHEMA`: `<schema>\x1f<object key>`. The schema charset has no
+/// 0x1F, so the prefix for one schema cannot match another's entries.
+fn encode_schema_key(schema: &str, object_key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(schema.len() + 1 + object_key.len());
+    k.extend_from_slice(schema.as_bytes());
+    k.push(0x1f);
+    k.extend_from_slice(object_key);
+    k
 }
 
 fn encode_object_key(

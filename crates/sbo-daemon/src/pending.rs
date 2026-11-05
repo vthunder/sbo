@@ -239,29 +239,11 @@ mod tests {
 }
 
 /// Whether a pending object should overlay (win against) a confirmed value at
-/// the same `(path, id)` for read-merge. If the pending side carries a
-/// parseable `HLC` newer than the confirmed one it wins; if HLCs are missing or
-/// unparseable, the pending (more recently submitted) value wins so the
-/// optimistic tip reflects the latest user action.
+/// the same `(path, id)` for read-merge. One rule for the read merge and for
+/// reconciliation (Q25 (a) / D17): the pending side wins only when both carry a
+/// parseable `HLC` and it wins the LWW order; if either HLC is missing or
+/// unparseable the confirmed (on-chain) value is authoritative. The tip never
+/// shows a value that reconciliation is about to drop.
 pub fn overlay_wins(pending: &StoredObject, confirmed: &StoredObject) -> bool {
-    let (Some(p_hlc), Some(c_hlc)) = (&pending.hlc, &confirmed.hlc) else {
-        return true;
-    };
-    let (Ok(p_hlc), Ok(c_hlc)) = (
-        sbo_core::hlc::Hlc::parse(p_hlc),
-        sbo_core::hlc::Hlc::parse(c_hlc),
-    ) else {
-        return true;
-    };
-    let p_key = sbo_core::hlc::LwwKey {
-        hlc: p_hlc,
-        signer: pending.owner.as_str(),
-        object_hash: &pending.object_hash,
-    };
-    let c_key = sbo_core::hlc::LwwKey {
-        hlc: c_hlc,
-        signer: confirmed.owner.as_str(),
-        object_hash: &confirmed.object_hash,
-    };
-    sbo_core::hlc::lww_wins(p_key, c_key)
+    pending_still_wins(pending, confirmed)
 }

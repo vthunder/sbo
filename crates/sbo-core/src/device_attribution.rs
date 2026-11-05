@@ -276,9 +276,23 @@ pub fn verify_device_attribution_with_provider_keys(
     // Crypto + structural join, resolving each cert's issuer key from the
     // DNSSEC-proven set (access under its iss, config under ITS iss). Only proven
     // issuers resolve, so a rogue-IdP cert cannot be verified.
-    // Replay-deterministic clock (module docs): expiries as of the write's
-    // authoring instant, else its inclusion — never the wall clock.
+    // Replay-deterministic clock (module docs): never the wall clock. The
+    // ASSERTION is the one object judged at the write's authoring instant (it
+    // lives five minutes and cannot survive batching latency); `verify_at`
+    // takes a single instant, so it runs at `authored_at` and the longer-lived
+    // certs and warrant are additionally held to the block's INCLUSION time
+    // below (Q9 (a) / D22: a back-dated authoring instant, however far `W`
+    // reaches, cannot resurrect an expired cert or warrant).
     let at = authored_at.unwrap_or(inclusion_time);
+    if pres.access_cert.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("access cert expired at inclusion time".into()));
+    }
+    if pres.config_cert.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("config cert expired at inclusion time".into()));
+    }
+    if pres.warrant.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("warrant expired at inclusion time".into()));
+    }
     let verified = pres
         .verify_at(expected_audience, at, |q_iss| {
             proven

@@ -39,7 +39,7 @@ fn put_key_name(db: &StateDb, name: &str, key: &SigningKey) {
 fn put_root_policy(db: &StateDb) {
     let policy: sbo_core::policy::Policy = serde_json::from_value(serde_json::json!({
         "grants": [
-            {"to": "*", "can": ["create"], "on": "/sys/names/*"},
+            {"to": "*", "can": ["create"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/u/$owner/**"}
         ]
     }))

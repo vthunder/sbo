@@ -124,6 +124,31 @@ impl<'a> Overlay<'a> {
         self.pending
             .get(&(path.to_string(), id.as_str().to_string()))
     }
+
+    /// The policy a pending `policy.v2` object installs at `path`, if one is
+    /// pending there AND wins the read merge against whatever is confirmed in
+    /// that slot (a losing pending write governs nothing). An unparseable
+    /// pending policy is ignored (it could never have passed the submit gate).
+    fn pending_policy_at(&self, path: &Path) -> Result<Option<PolicyEntry>, DbError> {
+        let path_str = path.to_string();
+        for p in self.pending.values() {
+            if p.content_schema.as_deref() != Some("policy.v2") || p.path.to_string() != path_str {
+                continue;
+            }
+            let confirmed = self.db.get_object(&p.path, &p.id)?;
+            let Some(winner) = merge(Some(p), confirmed) else { continue };
+            if winner.object_hash != p.object_hash {
+                continue;
+            }
+            let Ok(policy) = serde_json::from_slice::<Policy>(&p.payload) else { continue };
+            return Ok(Some(PolicyEntry {
+                policy,
+                content_hash: p.content_hash.to_string(),
+                block: p.block_number,
+            }));
+        }
+        Ok(None)
+    }
 }
 
 /// Pick the value that wins between a pending candidate and a confirmed value at
@@ -168,15 +193,29 @@ impl<'a> StateView for Overlay<'a> {
     }
 
     fn resolve_policy(&self, path: &Path) -> Result<Option<Policy>, DbError> {
-        // Policies live in a dedicated column family, not the object mempool, so
-        // there is nothing pending to overlay — delegate to confirmed state.
-        self.db.resolve_policy(path)
+        Ok(self.resolve_policy_entry(path)?.map(|e| e.policy))
     }
 
+    /// Resolve the governing policy THROUGH the overlay (D17 / W2-3,
+    /// `sbo-y757`): a `policy.v2` object that is pending at an ancestor and
+    /// wins the read merge there governs tip validation, exactly as the tip
+    /// read shows it. Content spec §Confirmed vs Tip: both views are computed
+    /// by the same rules and differ only in which writes are eligible.
+    ///
+    /// Same walk as `StateDb::resolve_policy_entry` (nearest ancestor, then the
+    /// root at `/sys/policies/`); at each level a pending policy object that
+    /// overlays the slot is preferred over the confirmed index entry.
     fn resolve_policy_entry(&self, path: &Path) -> Result<Option<PolicyEntry>, DbError> {
-        // Policies (and their versions) live in dedicated CFs, not the object
-        // mempool — nothing pending to overlay.
-        self.db.resolve_policy_entry(path)
+        let root = Path::parse("/sys/policies/").map_err(|e| DbError::Serialization(e.to_string()))?;
+        for ancestor in path.ancestors().chain(std::iter::once(root)) {
+            if let Some(entry) = self.pending_policy_at(&ancestor)? {
+                return Ok(Some(entry));
+            }
+            if let Some(entry) = self.db.get_policy_entry_at(&ancestor)? {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
     }
 
     fn get_policy_version(&self, content_hash: &str) -> Result<Option<Policy>, DbError> {
@@ -306,6 +345,42 @@ mod tests {
             .unwrap();
         assert_eq!(got.object_hash, [1; 32], "incumbent creator must keep the slot");
         assert_eq!(got.creator.as_str(), "alice@mingo.place");
+    }
+
+    #[test]
+    fn pending_policy_governs_tip_validation() {
+        // D17 / W2-3: a policy object pending at an ancestor is the policy the
+        // overlay resolves, so the tip enforces what the tip shows.
+        let (_dir, db) = open_db();
+        let root: Policy = serde_json::from_value(serde_json::json!({
+            "grants": [{"to": "*", "can": ["create"], "on": "/**"}]
+        }))
+        .unwrap();
+        db.put_policy(&Path::parse("/sys/policies/").unwrap(), &root).unwrap();
+
+        let sub = serde_json::to_vec(&serde_json::json!({ "deny": ["/c/**"], "grants": [] })).unwrap();
+        let mut pending = obj("/c/", "policy", "sys", Some("10.0"), 3);
+        pending.content_schema = Some("policy.v2".into());
+        pending.payload = sub;
+        let overlay = Overlay::new(&db, vec![pending]);
+
+        let in_force = overlay.resolve_policy(&Path::parse("/c/x/").unwrap()).unwrap().unwrap();
+        assert_eq!(in_force.deny.len(), 1, "the pending sub-policy governs /c/");
+        let elsewhere = overlay.resolve_policy(&Path::parse("/d/").unwrap()).unwrap().unwrap();
+        assert!(elsewhere.deny.is_empty(), "other paths still resolve to the confirmed root");
+    }
+
+    #[test]
+    fn confirmed_wins_over_hlc_less_pending() {
+        // Q25 (a): with no HLC on either side the confirmed value is
+        // authoritative for reads, as it is for reconciliation.
+        let (_dir, db) = open_db();
+        let confirmed = obj("/c/x/", "p1", "alice@mingo.place", None, 1);
+        db.put_object(&confirmed).unwrap();
+        let pending = obj("/c/x/", "p1", "alice@mingo.place", None, 2);
+        let overlay = Overlay::new(&db, vec![pending]);
+        let got = overlay.get_object(&confirmed.path, &confirmed.id).unwrap().unwrap();
+        assert_eq!(got.object_hash, [1; 32]);
     }
 
     #[test]
