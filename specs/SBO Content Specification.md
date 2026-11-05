@@ -11,11 +11,15 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: The assertion is the one credential judged at the authoring instant (HLC physical), bounded by `W`; certs, warrants and DNSSEC windows stay at inclusion time (Q9). Protocol maximum `W_max` (reference 24 h) with checked arithmetic. `_config` writes require an explicit policy grant (`id: "_config"` or `govern`), never an ordinary create grant (S10).
+
 ## Abstract
 
 This specification defines SBO's **content layer** — thin schemas for posts, comments, and reactions — and the **local-first write model** beneath them: an author clock (HLC) for ordering, causal links (`Prev`) for concurrency detection, last-writer-wins conflict resolution, **confirmed-vs-tip** read semantics, and per-collection **durability tiers**.
 
-The goal is that a write should feel like **saving a file** — instant and offline-capable — while still reconciling to a verifiable shared state. The model achieves this by cleanly separating two things that the base protocol conflated: **attribution** (*who* authored a write — validated at inclusion time, unchanged from the [Authorization Specification](./SBO%20Authorization%20Specification.md)) and **ordering** (*when* a write sorts — the author's HLC, which carries no authority). Because ordering grants no authority, the optimistic local experience needs no trust concession; the chain still decides what is real.
+The goal is that a write should feel like **saving a file** — instant and offline-capable — while still reconciling to a verifiable shared state. The model achieves this by cleanly separating two things that the base protocol conflated: **attribution** (*who* authored a write — validated at inclusion time per the [Authorization Specification](./SBO%20Authorization%20Specification.md), with the one bounded exception of the assertion, judged at the authoring instant) and **ordering** (*when* a write sorts — the author's HLC, which carries no authority). Because ordering grants no authority, the optimistic local experience needs no trust concession; the chain still decides what is real.
 
 Content objects live in community spaces (`/spaces/...`, see the [Community Specification](./SBO%20Community%20Specification.md)) but the write model applies to any collection that adopts it.
 
@@ -62,9 +66,9 @@ T_b − W  ≤  physical  ≤  T_b + ε
 ```
 
 - `ε` — a small fixed skew tolerance (a few minutes), preventing **future-dating** (a write claiming a future time to win LWW indefinitely).
-- `W` — the collection's **maximum authoring lag**: how far in the past a write may claim to have been authored. It bounds **back-dated insertion** of content into history, and equals the collection's offline/batch window. Live collections set `W` small; collections expecting offline or batched authoring set it larger.
+- `W` — the collection's **maximum authoring lag**: how far in the past a write may claim to have been authored. It bounds **back-dated insertion** of content into history, and equals the collection's offline/batch window. Live collections set `W` small; collections expecting offline or batched authoring set it larger. **`W` is capped by the protocol maximum `W_max`** (reference value **24 hours**, 86 400 s): a collection descriptor that declares a larger `max_authoring_lag_s` is clamped to `W_max`, and absent a descriptor `W` is the small default. The cap exists because `W` also bounds how far back the [authoring instant](#attribution-and-offline-writes) may sit, and an unbounded `W` would let an expired assertion be revived by back-dating.
 
-A write whose `HLC` falls outside the bound is invalid (disregarded on replay). The bound is an **ordering-integrity** rule only — it does not touch attribution. Because a back-dated write only *loses* LWW (a lower HLC never wins), `W` chiefly matters for append-only content, where a back-dated entry could otherwise be inserted into the past; pure LWW-register collections MAY set `W` generously.
+A write whose `HLC` falls outside the bound is invalid (disregarded on replay). The bound is an **ordering-integrity** rule, plus the one use the [Authorization Specification](./SBO%20Authorization%20Specification.md#the-authoring-instant-assertion-only) makes of it: it is what makes the authoring instant trustworthy. Because a back-dated write only *loses* LWW (a lower HLC never wins), `W` chiefly matters for append-only content, where a back-dated entry could otherwise be inserted into the past; pure LWW-register collections MAY set `W` generously, up to `W_max`. Implementations MUST compute the bound with checked arithmetic (`T_b − W` for a huge `W` must not wrap).
 
 ### Ordering carries no authority
 
@@ -103,15 +107,17 @@ The **tip** is what delivers the instant, save-a-file feel: a client applies a w
 
 ## Attribution and Offline Writes
 
-Attribution is unchanged from the [Authorization Specification](./SBO%20Authorization%20Specification.md): a write must carry an `Auth-Cert` valid at its **DA block inclusion time**. The write model adds no exception — a posted write is attributed exactly as any other.
+Attribution follows the [Authorization Specification](./SBO%20Authorization%20Specification.md) with exactly one write-model interaction. A write carries an `Auth-Cert` device presentation whose access cert, config cert, warrant and DNSSEC evidence must all be valid at the write's **DA block inclusion time** `T_b`. The **assertion** — the one short-lived object in the presentation, minted for this audience and living minutes — is instead judged at the write's **authoring instant** `A`: the `HLC` `physical` component, which the validity bound above confines to `T_b − W ≤ A ≤ T_b + ε`, with `W ≤ W_max`. A write with no `HLC` has `A = T_b`.
+
+This is the only rule in the protocol that reads the HLC for anything but ordering, and it is why `W` is capped: a batched or offline write may legitimately be included long after its assertion expired, and judging that assertion at `T_b` would make honest writes fail by timing, while an unbounded `W` would let a writer back-date `A` into any expired assertion's window. With `W` capped, an attacker gains at most `W_max` of assertion lifetime, and nothing else (the long-lived credentials are still judged at `T_b`).
 
 This makes the offline story simple and honest:
 
 - **Authoring** offline is instant: the client signs writes with its session key and queues them; they appear in the tip immediately.
-- **Posting** them requires a certificate valid at inclusion time. As long as the session's certificate is still valid when the batch is posted, the queued writes attribute normally — and their `HLC` places them in authoring order (subject to the collection's `W`).
-- If the certificate has expired by posting time, the writes are **re-issued** under a fresh certificate. For append-only content this is lossless (a re-issued post is simply posted now). For a mutable object, a re-issued write is stamped at re-issue time and so may lose LWW to edits made during the offline period — which is the correct outcome: an edit authored before a long absence should not silently override everything that happened since.
+- **Posting** them requires the access cert, config cert and warrant to be valid at inclusion time, and `HLC` to be within `W` of `T_b`. As long as those hold when the batch is posted, the queued writes attribute normally — and their `HLC` places them in authoring order.
+- If the access cert (or the `W` budget) has run out by posting time, the writes are **re-issued** under a fresh presentation. For append-only content this is lossless (a re-issued post is simply posted now). For a mutable object, a re-issued write is stamped at re-issue time and so may lose LWW to edits made during the offline period — which is the correct outcome: an edit authored before a long absence should not silently override everything that happened since.
 
-The **offline budget is therefore the provider's certificate lifetime** (browserid certificates range from ~1 hour ephemeral to ~24 hours for a primary IdP to ~30 days; the lifetime is the provider's choice, not SBO's). The protocol never honors a certificate outside its validity window — there is no author-time attribution and no back-dating of authority.
+The **offline budget is therefore the smaller of the access-cert lifetime and the collection's `W`** (browserid access certs live up to ~24 hours; `W_max` is 24 hours). The protocol never honors a cert, warrant or DNSSEC window outside its validity at inclusion, and never honors an assertion outside its validity at the bounded authoring instant — there is no other author-time attribution and no back-dating of authority.
 
 > Certificate and DNSSEC evidence are **reused** across many writes within their validity windows (post the evidence once as a self-authenticating object and reference it), so high-write content does not attach a DNSSEC chain per message. See the [Authorization Specification](./SBO%20Authorization%20Specification.md).
 
@@ -150,7 +156,9 @@ ID: _config
 | `max_authoring_lag_s` | number | No | The collection's `W` (default small) |
 | `schema` | string | No | Expected content schema for the collection |
 
-Absent a descriptor, a collection defaults to **on-chain** with a small `W`. The tier is a submission/read concern, not a validity rule — a batched write is a perfectly valid envelope; the descriptor tells clients how to submit and when to consider a write confirmed.
+Absent a descriptor, a collection defaults to **on-chain** with a small `W`. The tier is a submission/read concern, not a validity rule — a batched write is a perfectly valid envelope; the descriptor tells clients how to submit and when to consider a write confirmed. `max_authoring_lag_s` is the exception: it feeds the validity bound, and it is clamped to `W_max`.
+
+**Writing `_config` needs an explicit grant.** Because `_config` sets `W` for everyone writing to the collection, it is a governance object, not ordinary content. A `post` of `ID: _config` with `Content-Schema: collection.v1` is valid only if the collection's **governing policy grants it explicitly** — a grant with `"id": "_config"` (see [Object-Id Patterns](./SBO%20Policy%20Specification.md#object-id-patterns)), or a `govern` grant on the collection. An ordinary `create`/`post` grant on the collection (`"to": "*", "can": ["post"], "on": "/spaces/*/"`) does **not** cover `_config`; policy authors who want members to post content but not reconfigure the collection need no extra rule. Implementations MUST treat a `_config` write under a policy with no such explicit grant as invalid.
 
 ### Beyond the DA-native tiers (deferred)
 
@@ -232,14 +240,15 @@ A post and a reaction in a batched space, seen through tip then confirmed.
 
 1. Alice composes a post offline at wall-clock 9:05. Her client signs it (`HLC: 1703...100.0`), queues it, and shows it in her **tip** immediately.
 2. Bob, online, upvotes a different post; his `reaction.v1` enters his tip at once.
-3. At 9:06 Alice reconnects. Her client posts the queued write in the space's next **batch**; the batch lands at block time `T_b ≈ 9:06`. The `HLC` bound holds (`9:06 − W ≤ 9:05 ≤ 9:06 + ε` for any `W ≥ ~1m`); the certificate is still valid at `T_b`, so the post attributes to `alice@gmail.com`.
+3. At 9:06 Alice reconnects. Her client posts the queued write in the space's next **batch**; the batch lands at block time `T_b ≈ 9:06`. The `HLC` bound holds (`9:06 − W ≤ 9:05 ≤ 9:06 + ε` for any `W ≥ ~1m`); the access cert, warrant and evidence are still valid at `T_b`, and the assertion (minted at 9:05, five-minute life) is judged at the authoring instant 9:05, so the post attributes to `alice@gmail.com`.
 4. Once the batch's block is included, the post moves from tip to **confirmed** for every reader; it is now as durable and censorship-resistant as any on-chain object.
 5. An indexer tallies Bob's upvote into the post's score — a view it computes, not a number on chain.
 
 ## Security Considerations
 
 - **Clock abuse is bounded and self-defeating.** Future-dating is rejected by `ε`; back-dating only lowers a write's LWW position, so it cannot override another author. The residual — inserting back-dated append-only content into the past — is bounded by the collection's `W`.
-- **Attribution is never weakened for convenience.** A posted write always carries a certificate valid at inclusion; there is no author-time validity to exploit. Offline beyond the certificate lifetime forces re-issuance, not a relaxed check.
+- **Attribution is never weakened for convenience.** A posted write always carries certs, a warrant and evidence valid at inclusion; the single author-time check (the assertion at the HLC-derived authoring instant) is bounded by `W ≤ W_max`, so it cannot be exploited beyond that window. Offline beyond the access-cert lifetime or `W` forces re-issuance, not a relaxed check.
+- **`_config` is privileged.** Whoever can write a collection's `_config` chooses its `W`; that is why it needs an explicit policy grant and why `W` is capped regardless of who sets it.
 - **Tip is untrusted.** A tip view includes not-yet-durable writes and may roll back; security-relevant decisions (e.g. acting on a moderation state) should read **confirmed** state.
 - **Batched aggregators cannot forge or hide**, only delay; a censored write can be submitted through another path. Off-DA (log-anchored) content forgoes this — its availability rests on the off-DA host (see [Beyond the DA-native tiers](#beyond-the-da-native-tiers-deferred)).
 
