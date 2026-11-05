@@ -305,13 +305,14 @@ fn u_namespace_create_denied_without_declared_owner() {
     put_key_name(&db, "alice", &alice);
     put_root_policy(&db);
 
-    // No Owner header → $owner undefined → `/u/$owner/**` cannot match
-    // (it is NOT back-derived as the container segment "u"). Denied at policy.
+    // No Owner header → the write names no owner at all and is refused at the
+    // attribution gate (audit 2026-11 Q6: no signer-key fallback), before
+    // `$owner` could even be asked about. Fail closed either way.
     let no_owner = signed_post(&alice, "/u/alice/notes/", "n2", None);
     assert!(
         matches!(
             validate_message(&no_owner, &db, dir.path(), &ctx(&db)),
-            ValidationResult::Invalid { stage: ValidationStage::Policy, .. }
+            ValidationResult::Invalid { stage: ValidationStage::Attribution, .. }
         ),
         "create without a declared Owner must fail closed under /u/$owner/**"
     );

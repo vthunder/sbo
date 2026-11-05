@@ -50,6 +50,9 @@ fn is_key_reference(reference: &str) -> bool {
 /// - A reference containing `'@'` is a bare email and resolves to
 ///   [`Controller::Email`] (per spec, `@` always denotes a
 ///   browserid-attributable identity).
+/// - A bare key (`ed25519:<hex>`, `bls12-381:<hex>`) is not an identity
+///   reference and resolves to [`Controller::Unresolved`] (Q6: no bare-key
+///   owners; the genesis `sys` record is validated structurally instead).
 /// - A reference containing `':'` or `'/'` (and not matching the above) is a
 ///   cross-repo reference, which is out of scope for this single-repo version
 ///   and resolves to [`Controller::Unresolved`].
@@ -135,14 +138,15 @@ where
             return Controller::Email(current);
         }
 
-        // Bare public key (algorithm-prefixed): a key controller, authorized by
-        // direct signature. This is the reference `effective_owner` produces
-        // when it falls back to the signing key (Authorization Spec
-        // §Verification Algorithm: `Owner → else Creator → else signer`). It is
-        // checked before the cross-repo `:`/`/` rule because a key string such
-        // as `ed25519:<hex>` also contains a colon.
+        // Bare public key (algorithm-prefixed): NOT an identity reference
+        // (Identity Spec §Owner References, audit 2026-11 Q6 / sbo-yd72). A
+        // key-only owner has no record to rotate, recover, transfer or govern,
+        // so an explicit `Owner`/`Creator`/`New-Owner` carrying one resolves
+        // to nothing. Key-rooted *names* still resolve to their key below.
+        // Checked before the cross-repo rule only to give the dedicated
+        // outcome a clear home; both are `Unresolved`.
         if is_key_reference(&current) {
-            return Controller::Key(current);
+            return Controller::Unresolved;
         }
 
         // Cross-repo references are out of scope for this single-repo version.
@@ -405,18 +409,17 @@ mod tests {
     }
 
     #[test]
-    fn bare_key_resolves_to_key_controller() {
+    fn bare_key_is_not_a_reference() {
+        // Q6 / sbo-yd72: a raw key is not an identity reference. It resolves to
+        // nothing, so a message naming one as its owner is unauthorized.
         let lookup = lookup_from(HashMap::new());
-        // The signer-fallback effective owner: a raw algorithm-prefixed key
-        // resolves to a key controller (despite containing a colon), authorized
-        // by direct signature.
         assert_eq!(
             resolve_controller("ed25519:deadbeef", &lookup, DEFAULT_HOP_LIMIT, None),
-            Controller::Key("ed25519:deadbeef".to_string())
+            Controller::Unresolved
         );
         assert_eq!(
             resolve_controller("bls12-381:abc", &lookup, DEFAULT_HOP_LIMIT, None),
-            Controller::Key("bls12-381:abc".to_string())
+            Controller::Unresolved
         );
     }
 

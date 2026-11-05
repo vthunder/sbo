@@ -8,6 +8,13 @@ use crate::wire;
 /// Returns a single batch suitable for atomic DA submission
 ///
 /// This creates a Mode A (self-signed sys) genesis per the Genesis Specification.
+///
+/// The root policy carries an explicit `to: owner` grant for
+/// update/transfer/delete on `/**` (audit 2026-11 Q13 (a), sbo-2jtp): there
+/// is no owner fast-path in the evaluator any more, so what owners may do is
+/// what the governing policy grants them. A community policy that replaces
+/// the root for its subtree must carry its own owner grant (policy resolution
+/// is nearest-ancestor, not merged).
 pub fn genesis(signing_key: &SigningKey) -> Vec<u8> {
     let public_key = signing_key.public_key();
 
@@ -46,7 +53,8 @@ pub fn genesis(signing_key: &SigningKey) -> Vec<u8> {
         "grants": [
             {"to": "*", "can": ["create"], "on": "/sys/names/"},
             {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
-            {"to": "owner", "can": ["*"], "on": "/$owner/**"}
+            {"to": "owner", "can": ["*"], "on": "/$owner/**"},
+            {"to": "owner", "can": ["update", "transfer", "delete"], "on": "/**"}
         ]
     });
     let policy_bytes = serde_json::to_vec(&policy_payload).unwrap();
@@ -168,6 +176,7 @@ pub fn genesis_with_domain(
             {"to": "*", "can": ["create"], "on": "/sys/names/"},
             {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/$owner/**"},
+            {"to": "owner", "can": ["update", "transfer", "delete"], "on": "/**"},
             dnssec_grant
         ],
         "restrictions": [dnssec_restriction]
@@ -294,6 +303,7 @@ pub fn genesis_with_domain_and_restriction(
             {"to": "*", "can": ["create"], "on": "/sys/names/"},
             {"to": "owner", "can": ["update", "delete"], "on": "/sys/names/"},
             {"to": "owner", "can": ["*"], "on": "/$owner/**"},
+            {"to": "owner", "can": ["update", "transfer", "delete"], "on": "/**"},
             dnssec_grant
         ],
         "restrictions": [
@@ -569,7 +579,7 @@ pub fn set_trust_brokers(signing_key: &SigningKey, brokers: &[&str]) -> Vec<u8> 
         content_type: Some("application/json".to_string()),
         content_hash: Some(content_hash),
         payload: Some(payload_bytes),
-        owner: None,
+        owner: Some(Id::new("sys").unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: Some("trust.brokers.v1".to_string()),
@@ -612,7 +622,7 @@ pub fn set_dnssec(signing_key: &SigningKey, domain: &str, proof: &[u8]) -> Vec<u
         content_type: Some("application/octet-stream".to_string()),
         content_hash: Some(content_hash),
         payload: Some(proof.to_vec()),
-        owner: None,
+        owner: Some(Id::new("sys").unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: Some("dnssec.v1".to_string()),
@@ -717,7 +727,7 @@ pub fn post_to_own_namespace(signing_key: &SigningKey, name: &str, subpath: &str
         content_type: Some("application/json".to_string()),
         content_hash: Some(content_hash),
         payload: Some(payload.to_vec()),
-        owner: None,
+        owner: Some(Id::new(name).expect("name is a valid Owner Id")),
         creator: None,
         content_encoding: None,
         content_schema: None,
@@ -801,7 +811,7 @@ pub fn policy_with_restrictions(signing_key: &SigningKey, target_path: &str, max
         content_type: Some("application/json".to_string()),
         content_hash: Some(policy_hash),
         payload: Some(policy_bytes),
-        owner: None,
+        owner: Some(Id::new("sys").unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: Some("policy.v2".to_string()),

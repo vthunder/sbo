@@ -1749,31 +1749,11 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                                 }
                             }
 
-                            // Genesis verification: when this block is a repo's genesis
-                            // anchor and an expected hash was recorded, verify the
-                            // reconstructed genesis. Non-fatal — a mismatch is logged
-                            // loudly (operator-visible) rather than crashing sync.
-                            let to_verify: Vec<(String, Result<(), String>)> = state
-                                .repos
-                                .list()
-                                .filter(|r| {
-                                    r.expected_genesis.is_some()
-                                        && r.uri.first_block == Some(block_num)
-                                })
-                                .map(|r| (r.id.clone(), r.verify_genesis(&result.block_data)))
-                                .collect();
-                            for (id, outcome) in to_verify {
-                                match outcome {
-                                    Ok(()) => tracing::info!(
-                                        "Genesis verified for repo {} at block {}",
-                                        id, block_num
-                                    ),
-                                    Err(e) => tracing::error!(
-                                        "GENESIS VERIFICATION FAILED for repo {} at block {}: {}",
-                                        id, block_num, e
-                                    ),
-                                }
-                            }
+                            // Genesis verification (expected genesisHash, structural
+                            // validity, one genesis per anchor) is enforced inside
+                            // `process_block` (audit 2026-11 D5/D7/S19, Q7 (a)): a
+                            // mismatch or an invalid anchor is an `Err` that halts
+                            // sync below, never a logged-and-continued warning.
 
                             // Add block to prover if enabled and genesis has been processed
                             if let Some(ref mut p) = prover {
@@ -2617,6 +2597,17 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                     }
                 }
             };
+
+            // The genesis must be a structurally valid genesis submission
+            // (Genesis Spec §Genesis Validation) or no node will ever apply it.
+            match sbo_core::wire::parse_batch(&genesis_data) {
+                Ok(msgs) => {
+                    if let Err(e) = sbo_core::Genesis::validate(&msgs) {
+                        return Response::error(format!("Genesis batch is not a valid genesis: {e}"));
+                    }
+                }
+                Err(e) => return Response::error(format!("Genesis batch does not parse: {e}")),
+            }
 
             // Submit genesis via TurboDA
             match state_read.turbo.submit_raw(&genesis_data).await {

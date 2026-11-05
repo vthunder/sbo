@@ -2,13 +2,9 @@
 //! validation glue, mempool overlay, fast-sync trust, IPC, host).
 //!
 //! Every test here backs a verdict in
-//! `docs/security-audit-2026-11-ws4-layers.md`. Tests that encode an
-//! invariant which FAILS today are `#[ignore]`d with an
-//! `// AUDIT-2026-11 <id>: fails today` comment; un-ignoring one is the
-//! acceptance test for its fix. Everything else passes today and pins what
-//! the audit re-verified. No production code was changed.
-//!
-//! Run the failing set: `cargo test -p sbo-daemon --test audit_2026_11_ws4 -- --ignored`.
+//! `docs/security-audit-2026-11-ws4-layers.md`. Tests that encoded an
+//! invariant which failed at audit time were `#[ignore]`d; each was
+//! un-ignored by the remediation bean that fixed it (see the doc comments).
 
 use sbo_core::crypto::{ContentHash, Signature, SigningKey};
 use sbo_core::error::DbError;
@@ -64,7 +60,10 @@ fn put_obj(db: &StateDb, path: &str, id: &str, owner_ref: &str, schema: Option<&
     .unwrap();
 }
 
-fn post(key: &SigningKey, path: &str, id: &str, payload: &[u8]) -> Message {
+/// A post whose `Owner` is the name `owner` (every write names an owner that
+/// is a name or an email; audit 2026-11 Q6). Register the name with
+/// [`put_name`] so the signer resolves as its controller.
+fn post(key: &SigningKey, owner: &str, path: &str, id: &str, payload: &[u8]) -> Message {
     let mut msg = Message {
         action: Action::Post,
         path: Path::parse(path).unwrap(),
@@ -75,7 +74,7 @@ fn post(key: &SigningKey, path: &str, id: &str, payload: &[u8]) -> Message {
         content_type: Some("application/json".to_string()),
         content_hash: Some(ContentHash::sha256(payload)),
         payload: Some(payload.to_vec()),
-        owner: None,
+        owner: Some(Id::new(owner).unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: None,
@@ -95,28 +94,52 @@ fn key_ref(key: &SigningKey) -> String {
     key.public_key().to_string()
 }
 
+/// Register a key-rooted `identity.v1` name record for `key`, so `name`
+/// resolves to it as a controller and `key` resolves to `name` as a creator.
+fn put_name(db: &StateDb, name: &str, key: &SigningKey) {
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, name, None).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(name).unwrap(),
+        creator: Id::new(name).unwrap(),
+        owner: Id::new(name).unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(jwt.as_bytes()),
+        payload: jwt.into_bytes(),
+        policy_ref: None,
+        related: None,
+        content_schema: Some("identity.v1".to_string()),
+        owner_ref: Some(name.to_string()),
+        block_number: 1,
+        object_hash: [3u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+    db.put_name_claim(&key.public_key().to_string(), name).unwrap();
+}
+
 // ───────────────────────────── D57 / Q13: owner fast-path ─────────────────────────────
 
-/// AUDIT-2026-11 D57: fails today. `deny` is absolute ("no grants can override
-/// a deny", Policy spec) yet the owner fast-path in `validate_post` never
-/// evaluates the policy, so an owner updates an object under a denied path.
+/// AUDIT-2026-11 D57 (fixed, sbo-2jtp / Q13 (a)): `deny` is absolute ("no
+/// grants can override a deny", Policy spec) and there is no owner fast-path
+/// in `validate_post`: the owner is a principal and a denied path denies it.
 #[test]
-#[ignore]
 fn d57_owner_update_under_denied_path_is_invalid() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, serde_json::json!({ "deny": ["/locked/**"], "grants": [] }));
     let alice = SigningKey::generate();
-    put_obj(&db, "/locked/", "x", &key_ref(&alice), None, b"{}");
+    put_name(&db, "alice", &alice);
+    put_obj(&db, "/locked/", "x", "alice", None, b"{}");
 
-    let r = validate(&db, &post(&alice, "/locked/", "x", b"{\"v\":2}"), &ctx(&db));
+    let r = validate(&db, &post(&alice, "alice", "/locked/", "x", b"{\"v\":2}"), &ctx(&db));
     assert!(!is_valid(&r), "owner update under a denied path must be invalid, got {r:?}");
 }
 
-/// AUDIT-2026-11 D57: fails today. `restrictions` (here `max_size`) are
-/// skipped for the owner as well.
+/// AUDIT-2026-11 D57 (fixed, sbo-2jtp): `restrictions` (here `max_size`)
+/// bind the owner like anyone else.
 #[test]
-#[ignore]
 fn d57_owner_update_ignores_restrictions() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -128,22 +151,23 @@ fn d57_owner_update_ignores_restrictions() {
         }),
     );
     let alice = SigningKey::generate();
-    put_obj(&db, "/r/", "x", &key_ref(&alice), None, b"{}");
+    put_name(&db, "alice", &alice);
+    put_obj(&db, "/r/", "x", "alice", None, b"{}");
 
     // Sanity (passes today): a non-owner is held to the restriction.
     let bob = SigningKey::generate();
-    let r = validate(&db, &post(&bob, "/r/", "x", b"{\"big\":true}"), &ctx(&db));
+    put_name(&db, "bob", &bob);
+    let r = validate(&db, &post(&bob, "bob", "/r/", "x", b"{\"big\":true}"), &ctx(&db));
     assert!(!is_valid(&r), "non-owner must hit max_size, got {r:?}");
 
-    let r = validate(&db, &post(&alice, "/r/", "x", b"{\"big\":true}"), &ctx(&db));
+    let r = validate(&db, &post(&alice, "alice", "/r/", "x", b"{\"big\":true}"), &ctx(&db));
     assert!(!is_valid(&r), "owner update must hit max_size too, got {r:?}");
 }
 
-/// AUDIT-2026-11 D57 / D25: fails today. The source path's policy is only
-/// evaluated for non-owners, so an owner moves an object out of a path whose
-/// policy denies everything (a "bridge lock" written as `deny`).
+/// AUDIT-2026-11 D57 / D25 (fixed, sbo-2jtp): the source path's policy is
+/// evaluated for the owner too, so a "bridge lock" written as `deny` holds
+/// against the owner moving the object out.
 #[test]
-#[ignore]
 fn d57_owner_transfer_out_of_denied_path_is_invalid() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -155,9 +179,10 @@ fn d57_owner_transfer_out_of_denied_path_is_invalid() {
         }),
     );
     let alice = SigningKey::generate();
-    put_obj(&db, "/locked/", "x", &key_ref(&alice), None, b"{}");
+    put_name(&db, "alice", &alice);
+    put_obj(&db, "/locked/", "x", "alice", None, b"{}");
 
-    let mut msg = post(&alice, "/locked/", "x", b"{}");
+    let mut msg = post(&alice, "alice", "/locked/", "x", b"{}");
     msg.action = Action::Transfer {
         new_owner: None,
         new_path: Some(Path::parse("/free/").unwrap()),
@@ -179,8 +204,9 @@ fn d56_name_claim_evaluates_root_policy() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, serde_json::json!({ "deny": ["/sys/names/**"], "grants": [] }));
     let bob = SigningKey::generate();
+    put_name(&db, "bob", &bob);
     let jwt = sbo_core::jwt::create_self_signed_identity(&bob, "bob", None).unwrap();
-    let mut msg = post(&bob, "/sys/names/", "bob", jwt.as_bytes());
+    let mut msg = post(&bob, "bob", "/sys/names/", "bob", jwt.as_bytes());
     msg.content_type = Some("application/jwt".into());
     msg.content_schema = Some("identity.v1".into());
     msg.sign(&bob);
@@ -203,10 +229,12 @@ fn d12_policy_ref_is_not_changed_by_a_non_creator() {
         serde_json::json!({ "grants": [{"to": "*", "can": ["create", "update"], "on": "/shared/**"}] }),
     );
     let alice = SigningKey::generate();
-    put_obj(&db, "/shared/", "doc", &key_ref(&alice), None, b"{}");
+    put_name(&db, "alice", &alice);
+    put_obj(&db, "/shared/", "doc", "alice", None, b"{}");
 
     let bob = SigningKey::generate();
-    let mut msg = post(&bob, "/shared/", "doc", b"{\"v\":2}");
+    put_name(&db, "bob", &bob);
+    let mut msg = post(&bob, "bob", "/shared/", "doc", b"{\"v\":2}");
     msg.policy_ref = Some("/evil/policy".into());
     msg.sign(&bob);
     let l2 = ctx(&db);
@@ -274,9 +302,10 @@ fn d11_ban_is_enforced_with_healthy_state() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, ban_policy());
     let banned = SigningKey::generate();
-    put_ban(&db, &key_ref(&banned), 1);
+    put_name(&db, "banned", &banned);
+    put_ban(&db, "banned", 1);
 
-    let r = validate(&db, &post(&banned, "/posts/", "p1", b"{}"), &ctx(&db));
+    let r = validate(&db, &post(&banned, "banned", "/posts/", "p1", b"{}"), &ctx(&db));
     assert!(!is_valid(&r), "banned writer must be rejected, got {r:?}");
 }
 
@@ -288,11 +317,12 @@ fn d11_not_attested_fails_closed_on_state_read_error() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, ban_policy());
     let banned = SigningKey::generate();
-    put_ban(&db, &key_ref(&banned), 1);
+    put_name(&db, "banned", &banned);
+    put_ban(&db, "banned", 1);
 
     let view = FailingSchemaList(&db);
     let l2 = L2Context::for_block(Some(T_B), &db);
-    let r = validate(&view, &post(&banned, "/posts/", "p1", b"{}"), &l2);
+    let r = validate(&view, &post(&banned, "banned", "/posts/", "p1", b"{}"), &l2);
     assert!(!is_valid(&r), "a state-read error must fail closed, got {r:?}");
 }
 
@@ -305,10 +335,11 @@ fn d28_unknown_inclusion_time_does_not_lift_a_ban() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, ban_policy());
     let banned = SigningKey::generate();
-    put_ban(&db, &key_ref(&banned), 1);
+    put_name(&db, "banned", &banned);
+    put_ban(&db, "banned", 1);
 
     let l2 = L2Context::for_block(None, &db);
-    let r = validate(&db, &post(&banned, "/posts/", "p1", b"{}"), &l2);
+    let r = validate(&db, &post(&banned, "banned", "/posts/", "p1", b"{}"), &l2);
     assert!(!is_valid(&r), "unknown inclusion time must not lift a ban, got {r:?}");
 }
 
@@ -320,7 +351,8 @@ fn d28_unknown_inclusion_time_does_not_skip_the_hlc_bound() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, serde_json::json!({ "grants": [{"to": "*", "can": ["create"], "on": "/posts/**"}] }));
     let k = SigningKey::generate();
-    let mut msg = post(&k, "/posts/", "p1", b"{}");
+    put_name(&db, "k", &k);
+    let mut msg = post(&k, "k", "/posts/", "p1", b"{}");
     msg.hlc = Some("1000.0".into());
     msg.sign(&k);
 
@@ -343,7 +375,8 @@ fn d22_default_w_rejects_an_hour_old_authoring_instant() {
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, w_policy());
     let k = SigningKey::generate();
-    let mut msg = post(&k, "/posts/", "p1", b"{}");
+    put_name(&db, "k", &k);
+    let mut msg = post(&k, "k", "/posts/", "p1", b"{}");
     msg.hlc = Some(format!("{}.0", (T_B - 3600) * 1000));
     msg.sign(&k);
     let r = validate(&db, &msg, &ctx(&db));
@@ -361,7 +394,8 @@ fn d22_collection_w_is_capped_by_a_protocol_maximum() {
     let cfg = serde_json::json!({ "max_authoring_lag_s": 3_153_600_000_i64 }); // 100 years
     put_obj(&db, "/posts/", "_config", "sys", Some("collection.v1"), &serde_json::to_vec(&cfg).unwrap());
     let k = SigningKey::generate();
-    let mut msg = post(&k, "/posts/", "p1", b"{}");
+    put_name(&db, "k", &k);
+    let mut msg = post(&k, "k", "/posts/", "p1", b"{}");
     msg.hlc = Some(format!("{}.0", (T_B - 50 * 365 * 86_400) * 1000));
     msg.sign(&k);
     let r = validate(&db, &msg, &ctx(&db));
@@ -376,8 +410,9 @@ fn d22_config_write_needs_an_explicit_grant() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let k = SigningKey::generate();
+    put_name(&db, "k", &k);
     let cfg = serde_json::to_vec(&serde_json::json!({ "max_authoring_lag_s": 60 })).unwrap();
-    let mut msg = post(&k, "/posts/", "_config", &cfg);
+    let mut msg = post(&k, "k", "/posts/", "_config", &cfg);
     msg.content_schema = Some("collection.v1".into());
     msg.sign(&k);
 
@@ -403,64 +438,75 @@ fn d22_config_write_needs_an_explicit_grant() {
 
 // ───────────────────────────── D23 / Q7: genesis mode ─────────────────────────────
 
-/// AUDIT-2026-11 D23: fails today. A repo with no root policy accepts any write
-/// from any key with no policy check at all (genesis mode), at the submit gate
-/// and on replay. Q7 (strict genesis) makes only the genesis batch valid here.
+/// AUDIT-2026-11 D23 (fixed, sbo-3q6x / Q7 (a)): a repo with no root policy
+/// has no genesis mode; no ordinary write is valid at the submit gate or on
+/// replay. Only the genesis prefix at the anchor (applied by the sync path,
+/// never through `validate_message`) can leave the bootstrap window.
 #[test]
-#[ignore]
 fn d23_no_root_policy_rejects_ordinary_writes() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let k = SigningKey::generate();
-    let r = validate(&db, &post(&k, "/anything/", "x", b"{}"), &ctx(&db));
+    put_name(&db, "k", &k);
+    let r = validate(&db, &post(&k, "k", "/anything/", "x", b"{}"), &ctx(&db));
     assert!(!is_valid(&r), "no root policy must mean no ordinary write is valid, got {r:?}");
 }
 
 // ───────────────────────────── Q6: bare-key owners (daemon side) ─────────────────────────────
 
-/// AUDIT-2026-11 Q6: fails today. An explicit bare-key `Owner:` literal is
-/// accepted as an identity (decision: reject; an identity is a name or an email).
+/// AUDIT-2026-11 Q6 (fixed, sbo-yd72): an explicit bare-key `Owner:` literal
+/// is rejected; an identity is a name or an email.
 #[test]
-#[ignore]
 fn q6_explicit_bare_key_owner_is_rejected() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, serde_json::json!({ "grants": [{"to": "*", "can": ["create"], "on": "/u/**"}] }));
     let k = SigningKey::generate();
-    let mut msg = post(&k, "/u/", "x", b"{}");
+    put_name(&db, "k", &k);
+    let mut msg = post(&k, "k", "/u/", "x", b"{}");
     msg.owner = Some(Id::new(key_ref(&k)).unwrap());
     msg.sign(&k);
     let r = validate(&db, &msg, &ctx(&db));
     assert!(!is_valid(&r), "bare-key Owner must be rejected, got {r:?}");
 }
 
-/// AUDIT-2026-11 Q6: fails today. With no `Owner`/`Creator` the signer key is
-/// the owner (signer fallback). Decision: every post-genesis write names an
-/// owner that is a name or an email.
+/// AUDIT-2026-11 Q6 (fixed, sbo-yd72): there is no signer-key fallback. A
+/// write with no `Owner`/`Creator` names no owner and is invalid, even from a
+/// key that has a name record.
 #[test]
-#[ignore]
 fn q6_signer_fallback_owner_is_rejected_after_genesis() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     put_root_policy(&db, serde_json::json!({ "grants": [{"to": "*", "can": ["create"], "on": "/u/**"}] }));
     let k = SigningKey::generate();
-    let r = validate(&db, &post(&k, "/u/", "x", b"{}"), &ctx(&db));
+    put_name(&db, "k", &k);
+    let mut msg = post(&k, "k", "/u/", "x", b"{}");
+    msg.owner = None;
+    msg.sign(&k);
+    let r = validate(&db, &msg, &ctx(&db));
     assert!(!is_valid(&r), "owner-less write must be rejected after genesis, got {r:?}");
+    // Sanity: the same write naming its owner is valid.
+    let r = validate(&db, &post(&k, "k", "/u/", "x", b"{}"), &ctx(&db));
+    assert!(is_valid(&r), "the write naming its owner must be valid, got {r:?}");
 }
 
 // ───────────────────────────── D16 / D55: creator fallback ─────────────────────────────
 
-/// Passes today (pins the Low finding): an unnamed, unattributed signer gets a
-/// durable creator id made of 64 bits of its key.
+/// AUDIT-2026-11 D16 / D55 (inverted by sbo-yd72): an unnamed, unattributed,
+/// owner-less signer has NO creator; the `e_<hex>` / `unknown` sentinels are
+/// gone. A named signer resolves to its name.
 #[test]
 fn d16_unnamed_signer_creator_is_a_truncated_key() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let k = SigningKey::generate();
-    let msg = post(&k, "/x/", "y", b"{}");
+    let mut msg = post(&k, "k", "/x/", "y", b"{}");
+    msg.owner = None;
+    msg.sign(&k);
     let creator = resolve_creator(&msg, Some(&db), &ctx(&db));
-    let hex = key_ref(&k).trim_start_matches("ed25519:").to_string();
-    assert_eq!(creator.as_str(), format!("e_{}", &hex[..16]));
+    assert!(creator.is_err(), "no creator for an unnamed signer, got {creator:?}");
+    put_name(&db, "k", &k);
+    assert_eq!(resolve_creator(&msg, Some(&db), &ctx(&db)).unwrap().as_str(), "k");
 }
 
 // ───────────────────────────── D17: overlay vs reconcile ─────────────────────────────
@@ -634,8 +680,9 @@ fn d7_domain_with_failing_self_cert_is_invalid() {
     put_obj(&db, "/sys/dnssec/", "example.com", "sys", Some("dnssec.v1"), b"not-a-proof");
 
     let k = SigningKey::generate();
+    put_name(&db, "k", &k);
     let jwt = sbo_core::jwt::create_domain(&k, "example.com").unwrap();
-    let mut msg = post(&k, "/sys/domains/", "example.com", jwt.as_bytes());
+    let mut msg = post(&k, "k", "/sys/domains/", "example.com", jwt.as_bytes());
     msg.content_type = Some("application/jwt".into());
     msg.content_schema = Some("domain.v1".into());
     msg.auth_evidence = Some("ref:/sys/dnssec/example.com".into());
@@ -654,7 +701,7 @@ fn d7_genesis_mismatch_is_reported_by_verify_genesis() {
     let mut repo = Repo::new("sbo+raw://avail:turing:9/".into(), uri, dir_path(), None);
     repo.expected_genesis = Some("sha256:deadbeef".into());
     let k = SigningKey::generate();
-    let wire = sbo_core::wire::serialize(&post(&k, "/sys/test/", "a", b"{}"));
+    let wire = sbo_core::wire::serialize(&post(&k, "k", "/sys/test/", "a", b"{}"));
     assert!(repo.verify_genesis(&wire).unwrap_err().contains("mismatch"));
 }
 

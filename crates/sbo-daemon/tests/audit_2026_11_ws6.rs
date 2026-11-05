@@ -1,6 +1,5 @@
-//! Security audit 2026-11, WS6 — daemon side: genesis fail-open (D5) and the
-//! Content-Hash gap as seen by `validate_message` (D1). `#[ignore]`d tests fail
-//! today and are the acceptance tests for their fix. No production code changed.
+//! Security audit 2026-11, WS6 — daemon side: genesis fail-open (D5, fixed by
+//! sbo-3q6x) and the Content-Hash gap as seen by `validate_message` (D1).
 
 use sbo_core::crypto::{ContentHash, Signature, SigningKey};
 use sbo_core::message::{Action, Id, Message, ObjectType, Path};
@@ -35,11 +34,10 @@ fn signed(key: &SigningKey, path: &str, id: &str, schema: Option<&str>, payload:
     msg
 }
 
-/// Q7 (a): without a root policy, nothing outside the genesis batch at the
-/// anchor is valid. Today an empty state is "genesis mode": every post by
-/// anyone to any path is accepted with no policy evaluation at all.
+/// Q7 (a) (fixed, sbo-3q6x): without a root policy, nothing outside the
+/// genesis prefix at the anchor is valid; an empty state is not "genesis
+/// mode".
 #[test]
-#[ignore] // AUDIT-2026-11 D5: fails today — validate_post allows any post when no root policy exists
 fn d5_without_a_root_policy_an_ordinary_write_is_invalid() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
@@ -49,10 +47,10 @@ fn d5_without_a_root_policy_an_ordinary_write_is_invalid() {
     assert!(matches!(r, ValidationResult::Invalid { .. }), "accepted in genesis mode: {r:?}");
 }
 
-/// Same hole for policy objects: a `policy.v2` write anywhere is accepted
-/// before a root policy exists, so a stranger can plant governing policies.
+/// Same for policy objects (fixed, sbo-3q6x): a `policy.v2` write anywhere is
+/// refused before a root policy exists, so a stranger cannot plant governing
+/// policies.
 #[test]
-#[ignore] // AUDIT-2026-11 D5: fails today — policy writes bypass `govern` in genesis mode
 fn d5_without_a_root_policy_a_policy_write_outside_genesis_is_invalid() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();

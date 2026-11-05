@@ -84,7 +84,7 @@ fn post(key: &SigningKey, path: &str, id: &str, schema: &str, content_type: &str
         content_type: Some(content_type.to_string()),
         content_hash: Some(ContentHash::sha256(payload)),
         payload: Some(payload.to_vec()),
-        owner: None,
+        owner: Some(Id::new(&q6_name_for(key)).unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: Some(schema.to_string()),
@@ -99,6 +99,38 @@ fn post(key: &SigningKey, path: &str, id: &str, schema: &str, content_type: &str
     };
     msg.sign(key);
     msg
+}
+
+/// A deterministic local name for a test key: every write names an owner that
+/// is a name or an email (audit 2026-11 Q6, no signer-key fallback).
+fn q6_name_for(key: &SigningKey) -> String {
+    let pk = key.public_key().to_string();
+    format!("n{}", &pk.trim_start_matches("ed25519:")[..12])
+}
+
+/// Register the key-rooted `identity.v1` record `q6_name_for(key)` resolves to.
+fn q6_register(db: &StateDb, key: &SigningKey) {
+    let name = q6_name_for(key);
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, &name, None).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(&name).unwrap(),
+        creator: Id::new(&name).unwrap(),
+        owner: Id::new(&name).unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(jwt.as_bytes()),
+        payload: jwt.into_bytes(),
+        policy_ref: None,
+        related: None,
+        content_schema: Some("identity.v1".to_string()),
+        owner_ref: Some(name.clone()),
+        block_number: 1,
+        object_hash: [6u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+    db.put_name_claim(&key.public_key().to_string(), &name).unwrap();
 }
 
 fn dnssec_write(key: &SigningKey, proof: &[u8]) -> Message {
@@ -124,6 +156,7 @@ fn d6_dnssec_write_is_verified_against_the_pinned_root() {
     // Not pinned: library IANA anchors → rejected.
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    q6_register(&db, &k);
     put_root_policy(&db);
     let r = validate(&db, &msg, T1);
     assert!(!is_valid(&r), "unpinned root must reject the synthetic chain, got {r:?}");
@@ -153,6 +186,7 @@ fn d6_dns_root_history_window_is_checked_at_inclusion_time() {
 
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    q6_register(&db, &k);
     put_root_policy(&db);
     let history = sbo_core::dnssec_fixture::dns_root_v1(&[old_root.root_ksk(0, Some(T1 - 1)), new_root.root_ksk(T1, None)]);
     put_obj(&db, "/sys/trust/", "dns-root", Some("dns-root.v1"), "application/json", &history);
@@ -174,6 +208,7 @@ fn d6_domain_self_cert_uses_pinned_root() {
 
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    q6_register(&db, &domain_key);
     put_root_policy(&db);
     put_obj(&db, "/sys/dnssec/", DOMAIN, Some("dnssec.v1"), "application/octet-stream", &chain);
     let jwt = sbo_core::jwt::create_domain(&domain_key, DOMAIN).unwrap();

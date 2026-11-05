@@ -86,7 +86,7 @@ fn post(key: &SigningKey, path: &str, id: &str, schema: &str, content_type: &str
         content_type: Some(content_type.to_string()),
         content_hash: Some(ContentHash::sha256(payload)),
         payload: Some(payload.to_vec()),
-        owner: None,
+        owner: Some(Id::new(&q6_name_for(key)).unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: Some(schema.to_string()),
@@ -101,6 +101,38 @@ fn post(key: &SigningKey, path: &str, id: &str, schema: &str, content_type: &str
     };
     msg.sign(key);
     msg
+}
+
+/// A deterministic local name for a test key: every write names an owner that
+/// is a name or an email (audit 2026-11 Q6, no signer-key fallback).
+fn q6_name_for(key: &SigningKey) -> String {
+    let pk = key.public_key().to_string();
+    format!("n{}", &pk.trim_start_matches("ed25519:")[..12])
+}
+
+/// Register the key-rooted `identity.v1` record `q6_name_for(key)` resolves to.
+fn q6_register(db: &StateDb, key: &SigningKey) {
+    let name = q6_name_for(key);
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, &name, None).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(&name).unwrap(),
+        creator: Id::new(&name).unwrap(),
+        owner: Id::new(&name).unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(jwt.as_bytes()),
+        payload: jwt.into_bytes(),
+        policy_ref: None,
+        related: None,
+        content_schema: Some("identity.v1".to_string()),
+        owner_ref: Some(name.clone()),
+        block_number: 1,
+        object_hash: [6u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+    db.put_name_claim(&key.public_key().to_string(), &name).unwrap();
 }
 
 fn dnssec_write(key: &SigningKey, proof: &[u8]) -> Message {
@@ -122,6 +154,7 @@ fn d33_refresh_cannot_lower_the_incumbent_rrsig_expiration() {
     let k = SigningKey::generate();
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    q6_register(&db, &k);
     put_root_policy(&db);
     pin_root(&db, &root);
 
@@ -139,6 +172,7 @@ fn d33_refresh_cannot_lower_the_incumbent_rrsig_expiration() {
     assert!(is_valid(&validate(&db, &newer, T1)), "newer expiration refreshes");
     // Any other party may refresh (permissionless), subject to the same rule.
     let stranger = SigningKey::generate();
+    q6_register(&db, &stranger);
     assert!(is_valid(&validate(&db, &dnssec_write(&stranger, &root.browserid_chain(DOMAIN, &txt, T0, T2 + 1)), T1)));
     assert!(!is_valid(&validate(&db, &dnssec_write(&stranger, &root.browserid_chain(DOMAIN, &txt, T0, T2 - 1)), T1)));
 }
@@ -152,6 +186,7 @@ fn d33_refresh_cannot_carry_a_pre_rotation_dnskey_set() {
     let k = SigningKey::generate();
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    q6_register(&db, &k);
     put_root_policy(&db);
     pin_root(&db, &root);
 
@@ -175,6 +210,7 @@ fn d33_refresh_cannot_carry_a_pre_rotation_dnskey_set() {
     let dir2 = tempdir().unwrap();
     let db2 = StateDb::open(dir2.path()).unwrap();
     put_root_policy(&db2);
+    q6_register(&db2, &k);
     pin_root(&db2, &root);
     assert!(is_valid(&validate(&db2, &dnssec_write(&k, &pre_rotation), T1 + 1)));
 }

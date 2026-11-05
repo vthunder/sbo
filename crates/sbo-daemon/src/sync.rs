@@ -554,6 +554,11 @@ impl SyncEngine {
         // captured from the raw wire message (which still carries the signing key —
         // the stored object does not). The tail loop feeds these to the TrustGate.
         let mut trust_evidence: Vec<crate::trust::ObservedClaim> = Vec::new();
+        // Genesis bookkeeping for this block (Genesis Spec §Failure): the hash
+        // of the genesis submission accepted per repo, and the anchors to
+        // record for repos followed without a known hash.
+        let mut genesis_accepted: HashMap<String, String> = HashMap::new();
+        let mut genesis_to_record: Vec<(String, String)> = Vec::new();
 
         tracing::debug!("Processing block {} for app_ids {:?}", block_number, app_ids);
 
@@ -745,7 +750,28 @@ impl SyncEngine {
                 };
 
                 for repo in matching_repos {
-                    for (msg, raw) in &messages {
+                    // Bootstrap gate (Genesis Spec §Bootstrap Window, §Failure;
+                    // Q7 (a), Q33 (b)). While the repo has no root policy the
+                    // only thing that can be applied is the mode-object prefix
+                    // of a structurally valid genesis submission at the anchor
+                    // block; every other message is invalid. The prefix is
+                    // applied here, and the rest of the submission falls
+                    // through to ordinary validation under the root policy it
+                    // just installed. A halt is a hard error from this block.
+                    let skip = match self.genesis_gate(
+                        repo,
+                        block_number,
+                        block_timestamp,
+                        &payload,
+                        &messages,
+                        &mut genesis_accepted,
+                        &mut genesis_to_record,
+                        &mut touched_objects,
+                    )? {
+                        Some(prefix_len) => prefix_len,
+                        None => continue,
+                    };
+                    for (msg, raw) in messages.iter().skip(skip) {
                         // The signature covers the received header block (minus
                         // the Signature line) as it was sent, not a reconstruction.
                         if let Err(e) = sbo_core::message::verify_received(msg, raw) {
@@ -863,6 +889,43 @@ impl SyncEngine {
             }
         }
 
+        // 4b. Genesis outcome for this block (Genesis Spec §Failure). A repo
+        // whose anchor block this is must have left its bootstrap window; a
+        // repo followed without a hash records the genesis it just accepted.
+        for repo in app_ids.iter().flat_map(|&app_id| repos.get_by_app_id(app_id)) {
+            if repo.uri.first_block != Some(block_number) {
+                continue;
+            }
+            let uri = repo.uri.to_string();
+            let present = self
+                .state_dbs
+                .get(&uri)
+                .map(|db| crate::validate::root_policy_present(db.as_ref()))
+                .unwrap_or(false);
+            if !present {
+                let expected = repo
+                    .expected_genesis
+                    .as_deref()
+                    .map(|h| format!(" matching the expected genesisHash {h}"))
+                    .unwrap_or_default();
+                tracing::error!(
+                    "GENESIS FAILED for repo {}: no submission in anchor block {} validates as a genesis{}; halting sync",
+                    repo.display_uri, block_number, expected
+                );
+                return Err(crate::DaemonError::Sync(format!(
+                    "no valid genesis at anchor block {block_number} for {}{expected}",
+                    repo.display_uri
+                )));
+            }
+        }
+        for (id, hash) in genesis_to_record {
+            if let Err(e) = repos.set_expected_genesis(&id, Some(hash.clone())) {
+                tracing::warn!("Failed to record genesis {} for repo {}: {}", hash, id, e);
+            } else {
+                tracing::info!("Recorded genesis identity for repo {}: @{} {}", id, block_number, hash);
+            }
+        }
+
         // 5. Update head for all repos with these app_ids
         let paths_to_update: Vec<_> = app_ids
             .iter()
@@ -953,6 +1016,141 @@ impl SyncEngine {
             state_witness,
             trust_evidence,
         })
+    }
+
+    /// The bootstrap gate for one submission of one repo. Returns
+    /// `Ok(Some(n))` when the first `n` messages have been consumed (`0` when
+    /// the repo is past genesis and the whole submission is ordinary),
+    /// `Ok(None)` when the submission must be skipped entirely (the repo is in
+    /// its bootstrap window and this is not its genesis), and `Err` when sync
+    /// must halt (a second valid genesis at an anchor with no known hash, or
+    /// data past an anchor that never produced a genesis).
+    #[allow(clippy::too_many_arguments)]
+    fn genesis_gate(
+        &mut self,
+        repo: &Repo,
+        block_number: u64,
+        block_timestamp: Option<i64>,
+        payload: &[u8],
+        messages: &[(sbo_core::message::Message, &[u8])],
+        genesis_accepted: &mut HashMap<String, String>,
+        genesis_to_record: &mut Vec<(String, String)>,
+        touched: &mut TouchedObjects,
+    ) -> crate::Result<Option<usize>> {
+        let resolved_uri = repo.uri.to_string();
+        let (bootstrap, l2) = {
+            let state_db = self.get_state_db(&resolved_uri).map_err(|e| {
+                crate::DaemonError::Sync(format!("Failed to open state DB for {}: {}", repo.display_uri, e))
+            })?;
+            (
+                !crate::validate::root_policy_present(state_db),
+                crate::validate::L2Context::for_block(block_timestamp, state_db)
+                    .with_db(repo.uri.clone(), repo.expected_genesis.clone()),
+            )
+        };
+        let msgs: Vec<sbo_core::message::Message> = messages.iter().map(|(m, _)| m.clone()).collect();
+
+        if !bootstrap {
+            // Past genesis. At the anchor block with no known hash, a SECOND
+            // structurally valid genesis submission makes the anchor ambiguous:
+            // halt rather than guess (URI spec rule). With a known hash the
+            // others are ordinary submissions and fail on occupied slots.
+            if let Some(accepted) = genesis_accepted.get(&repo.id) {
+                if repo.expected_genesis.is_none()
+                    && sbo_core::Genesis::validate_at(&msgs, block_timestamp, &l2.anchors).is_ok()
+                {
+                    let hash = sbo_core::ContentHash::sha256(payload).to_string();
+                    if &hash != accepted {
+                        tracing::error!(
+                            "GENESIS AMBIGUOUS for repo {} at block {}: two valid genesis submissions ({} and {}) and no genesisHash to choose by; halting sync",
+                            repo.display_uri, block_number, accepted, hash
+                        );
+                        return Err(crate::DaemonError::Sync(format!(
+                            "ambiguous genesis at block {block_number} for {}",
+                            repo.display_uri
+                        )));
+                    }
+                }
+            }
+            return Ok(Some(0));
+        }
+
+        // In the bootstrap window: nothing before the anchor is valid, and
+        // data past an anchor that produced no genesis means the repo has none.
+        match repo.uri.first_block {
+            Some(anchor) if block_number < anchor => return Ok(None),
+            Some(anchor) if block_number > anchor => {
+                tracing::error!(
+                    "GENESIS FAILED for repo {}: block {} is past anchor {} and no genesis was applied; halting sync",
+                    repo.display_uri, block_number, anchor
+                );
+                return Err(crate::DaemonError::Sync(format!(
+                    "no genesis at anchor {anchor} for {}", repo.display_uri
+                )));
+            }
+            _ => {}
+        }
+
+        let info = match sbo_core::Genesis::validate_at(&msgs, block_timestamp, &l2.anchors) {
+            Ok(info) => info,
+            Err(e) => {
+                if sbo_core::Genesis::is_candidate(&msgs) {
+                    tracing::warn!(
+                        "[{}] genesis candidate for {} rejected: {}",
+                        block_number, repo.display_uri, e
+                    );
+                } else {
+                    tracing::debug!(
+                        "[{}] submission for {} is not a genesis ({}); nothing is valid before the root policy",
+                        block_number, repo.display_uri, e
+                    );
+                }
+                return Ok(None);
+            }
+        };
+
+        // genesisHash covers the submission bytes as included (Q35 (a)).
+        let hash = sbo_core::ContentHash::sha256(payload).to_string();
+        if let Some(expected) = repo.expected_genesis.as_deref() {
+            if expected != hash {
+                tracing::warn!(
+                    "[{}] valid genesis submission for {} has hash {} but the expected genesisHash is {}; not the genesis",
+                    block_number, repo.display_uri, hash, expected
+                );
+                return Ok(None);
+            }
+        }
+
+        // Apply the mode-object prefix structurally. The mode objects are
+        // created by and owned by `sys` (self-certifying; Identity Spec §Owner
+        // References): the stored creator is the sys identity the JWT names
+        // and the owner reference is the `sys` name record.
+        let sys_creator = sbo_core::message::Id::new(&info.sys_identity)
+            .map_err(|e| crate::DaemonError::Sync(format!("genesis sys identity is not an id: {e}")))?;
+        let sys_owner = sbo_core::message::Id::new("sys").expect("sys is a valid id");
+        for (msg, raw) in messages.iter().take(info.prefix_len) {
+            let mut m = msg.clone();
+            if m.creator.is_none() {
+                m.creator = Some(sys_creator.clone());
+            }
+            if m.owner.is_none() {
+                m.owner = Some(sys_owner.clone());
+            }
+            tracing::info!(
+                "[{}] GENESIS {:?} {}{} → structural:✓ applied",
+                block_number, m.action, m.path, m.id
+            );
+            self.write_object(repo, &m, raw, block_number, &l2, touched)?;
+        }
+        tracing::warn!(
+            "GENESIS accepted for repo {} at block {}: {:?}, sys {}, genesisHash {}",
+            repo.display_uri, block_number, info.mode, info.sys_identity, hash
+        );
+        genesis_accepted.insert(repo.id.clone(), hash.clone());
+        if repo.expected_genesis.is_none() {
+            genesis_to_record.push((repo.id.clone(), hash));
+        }
+        Ok(Some(info.prefix_len))
     }
 
     /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`

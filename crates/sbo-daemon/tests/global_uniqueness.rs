@@ -61,7 +61,7 @@ fn signed_post(key: &SigningKey, path: &str, id: &str) -> Message {
         content_type: Some("application/json".to_string()),
         content_hash: Some(ContentHash::sha256(&payload)),
         payload: Some(payload),
-        owner: None,
+        owner: Some(Id::new(&q6_name_for(key)).unwrap()),
         creator: None,
         content_encoding: None,
         content_schema: None,
@@ -74,6 +74,38 @@ fn signed_post(key: &SigningKey, path: &str, id: &str) -> Message {
     };
     msg.sign(key);
     msg
+}
+
+/// A deterministic local name for a test key: every write names an owner that
+/// is a name or an email (audit 2026-11 Q6, no signer-key fallback).
+fn q6_name_for(key: &SigningKey) -> String {
+    let pk = key.public_key().to_string();
+    format!("n{}", &pk.trim_start_matches("ed25519:")[..12])
+}
+
+/// Register the key-rooted `identity.v1` record `q6_name_for(key)` resolves to.
+fn q6_register(db: &StateDb, key: &SigningKey) {
+    let name = q6_name_for(key);
+    let jwt = sbo_core::jwt::create_self_signed_identity(key, &name, None).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/names/").unwrap(),
+        id: Id::new(&name).unwrap(),
+        creator: Id::new(&name).unwrap(),
+        owner: Id::new(&name).unwrap(),
+        content_type: "application/jwt".to_string(),
+        content_hash: ContentHash::sha256(jwt.as_bytes()),
+        payload: jwt.into_bytes(),
+        policy_ref: None,
+        related: None,
+        content_schema: Some("identity.v1".to_string()),
+        owner_ref: Some(name.clone()),
+        block_number: 1,
+        object_hash: [6u8; 32],
+        hlc: None,
+        prev: None,
+    })
+    .unwrap();
+    db.put_name_claim(&key.public_key().to_string(), &name).unwrap();
 }
 
 fn signed_transfer(key: &SigningKey, path: &str, id: &str, new_path: &str, new_id: &str) -> Message {
@@ -106,7 +138,9 @@ fn two_creators_same_slot_second_create_is_invalid() {
     put_root_policy(&db);
 
     let alice = SigningKey::generate();
+    q6_register(&db, &alice);
     let bob = SigningKey::generate();
+    q6_register(&db, &bob);
 
     // Alice creates /pub/p1 first — she occupies the slot.
     let a = create_and_store(&db, &signed_post(&alice, "/pub/", "p1"));
@@ -140,7 +174,9 @@ fn transfer_into_slot_occupied_by_different_creator_is_rejected() {
     put_root_policy(&db);
 
     let alice = SigningKey::generate();
+    q6_register(&db, &alice);
     let bob = SigningKey::generate();
+    q6_register(&db, &bob);
 
     // Alice occupies /pub/dest; Bob occupies /pub/src.
     create_and_store(&db, &signed_post(&alice, "/pub/", "dest"));
@@ -168,7 +204,9 @@ fn delete_frees_slot_for_another_creator() {
     put_root_policy(&db);
 
     let alice = SigningKey::generate();
+    q6_register(&db, &alice);
     let bob = SigningKey::generate();
+    q6_register(&db, &bob);
     let path = Path::parse("/pub/").unwrap();
     let id = Id::new("p1").unwrap();
 
@@ -197,7 +235,9 @@ fn different_signer_updates_self_authorizing_slot_no_fork() {
     put_root_policy(&db);
 
     let first = SigningKey::generate();
+    q6_register(&db, &first);
     let second = SigningKey::generate();
+    q6_register(&db, &second);
     let path = Path::parse("/shared/").unwrap();
     let id = Id::new("evidence").unwrap();
 
@@ -231,7 +271,9 @@ fn update_by_different_signer_preserves_immutable_creator() {
     put_root_policy(&db);
 
     let first = SigningKey::generate();
+    q6_register(&db, &first);
     let second = SigningKey::generate();
+    q6_register(&db, &second);
     let path = Path::parse("/shared/").unwrap();
     let id = Id::new("evidence").unwrap();
 
@@ -305,10 +347,8 @@ fn proof_round_trips_with_path_id_segments() {
     assert_eq!(proof.state_root, root, "proof state root matches the computed trie root");
 }
 
-/// The creator id `resolve_creator` derives for a bare key-rooted signer:
-/// `e_<first16hex>` of the ed25519 key (matching validate.rs's fallback).
+/// The creator id `resolve_creator` derives for a key-rooted signer: its
+/// registered name (audit 2026-11 Q6: there is no key-hex fallback).
 fn alice_creator(key: &SigningKey) -> String {
-    let pk = key.public_key().to_string();
-    let hex = pk.strip_prefix("ed25519:").unwrap();
-    format!("e_{}", &hex[..16])
+    q6_name_for(key)
 }

@@ -264,8 +264,8 @@ fn w3_1_id_pattern_matching_is_polynomial() {
 /// condition key is misspelled (`max_sise`, `not_attestd`) is accepted as an
 /// EMPTY requirement that every write satisfies — the restriction silently
 /// fails open. Threat model I11: unknown condition keys reject at write time.
+/// Fixed (sbo-zzx7, Q39 (a)): every policy struct is `deny_unknown_fields`.
 #[test]
-#[ignore] // AUDIT-2026-11 W3-3: fails today — unknown requirement/grant keys are accepted and ignored
 fn w3_3_unknown_policy_keys_are_rejected() {
     proptest!(cfg(), |(key in "[a-z_]{3,12}", val in 0u32..100)| {
         let known = ["max_size", "fields", "schema", "content_type", "require_payload_signed_by", "attested", "not_attested", "dnssec_proof"];

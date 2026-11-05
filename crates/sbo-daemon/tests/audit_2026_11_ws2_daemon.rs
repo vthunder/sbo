@@ -169,6 +169,11 @@ fn batch_vectors_daemon_sequential_application() {
         put_root_policy(&db, serde_json::json!({
             "grants": [{"to": "*", "can": ["create"], "on": "/communities/**"}]
         }));
+        // The vectors' owners: `alice` is the seed key, `bob` the second seed.
+        let seed = hex::decode(doc["key"]["seed_hex"].as_str().unwrap()).unwrap();
+        let seed_b = hex::decode(doc["key"]["second_seed_hex"].as_str().unwrap()).unwrap();
+        put_key_rooted_name(&db, "alice", &SigningKey::from_bytes(&seed.try_into().unwrap()));
+        put_key_rooted_name(&db, "bob", &SigningKey::from_bytes(&seed_b.try_into().unwrap()));
         let mut applied = Vec::new();
         if let Ok(msgs) = sbo_core::wire::parse_batch(bytes) {
             for (i, m) in msgs.iter().enumerate() {
