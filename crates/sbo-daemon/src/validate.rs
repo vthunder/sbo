@@ -10,7 +10,7 @@ use sbo_core::authorize::{
 use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
-use sbo_core::policy::{evaluate_with, ActionType, AttestedSource, PolicyResult};
+use sbo_core::policy::{evaluate_with_dnssec, ActionType, AttestedSource, PolicyResult};
 use sbo_core::resolve::{resolve_controller, Controller, NameRecord, DEFAULT_HOP_LIMIT};
 use sbo_core::schema::{parse_attestation, validate_schema, SchemaError};
 use sbo_core::state::StoredObject;
@@ -131,26 +131,45 @@ impl L2Context {
     }
 }
 
-/// Trust-anchor path: the pinned authorized-broker list.
-const TRUST_BROKERS_PATH: &str = "/sys/trust/";
+/// Trust-anchor path: the pinned authorized-broker list and DNS root KSK history.
+const TRUST_PATH: &str = "/sys/trust/";
 const TRUST_BROKERS_ID: &str = "brokers";
+const TRUST_DNS_ROOT_ID: &str = "dns-root";
 
-/// Load the pinned trust anchors from `/sys/trust/brokers`.
+/// Load the pinned trust anchors from `/sys/trust/brokers` and
+/// `/sys/trust/dns-root` as of the current state (Authorization Spec §On-Chain
+/// Trust Anchors).
 ///
-/// The object payload is expected to be a JSON array of authorized broker
-/// provider domains. Absent or unparseable → an empty broker set (only
-/// primary-IdP attribution will succeed). The DNS root KSK is hardcoded inside
-/// `dnssec-prover`, so `/sys/trust/dns-root` is not consulted here.
+/// Brokers: a JSON array of authorized broker provider domains; absent or
+/// unparseable → an empty broker set (only primary-IdP attribution succeeds).
+///
+/// DNS root (audit 2026-11 D6, Q3 (a)): the `dns-root.v1` key history is the
+/// single a-priori DNSSEC anchor; the verifier selects the key(s) active at the
+/// write's inclusion time. An absent object leaves the root unpinned, which
+/// falls back to the validator library's compiled-in IANA anchors (see
+/// [`TrustAnchors::root_keys`]); an unparseable one pins an EMPTY history so
+/// nothing validates (fail closed, rather than silently reverting to the
+/// library's set).
 fn load_trust_anchors(state: &dyn StateView) -> TrustAnchors {
-    let brokers = (|| {
-        let path = SboPath::parse(TRUST_BROKERS_PATH).ok()?;
-        let id = Id::new(TRUST_BROKERS_ID).ok()?;
-        let obj = state.get_object(&path, &id).ok()??;
-        serde_json::from_slice::<Vec<String>>(&obj.payload).ok()
-    })()
-    .unwrap_or_default();
-    // TODO: also surface /sys/trust/dns-root for out-of-band auditing.
-    TrustAnchors::with_brokers(brokers)
+    let read = |id: &str| -> Option<Vec<u8>> {
+        let path = SboPath::parse(TRUST_PATH).ok()?;
+        let id = Id::new(id).ok()?;
+        Some(state.get_object(&path, &id).ok()??.payload)
+    };
+    let brokers = read(TRUST_BROKERS_ID)
+        .and_then(|p| serde_json::from_slice::<Vec<String>>(&p).ok())
+        .unwrap_or_default();
+    let mut anchors = TrustAnchors::with_brokers(brokers);
+    if let Some(payload) = read(TRUST_DNS_ROOT_ID) {
+        anchors = match TrustAnchors::parse_dns_root(&payload) {
+            Ok(keys) => anchors.with_dns_root(keys),
+            Err(e) => {
+                tracing::error!("/sys/trust/dns-root is unparseable ({e}); pinning an empty root history");
+                anchors.with_dns_root(Vec::new())
+            }
+        }
+    }
+    anchors
 }
 
 /// Build a `/sys/names/<name>` resolver closure over the state DB, mapping each
@@ -762,7 +781,13 @@ fn check_domain_self_cert(msg: &Message, state: &dyn StateView, l2: &L2Context) 
     let Some(t) = l2.inclusion_time else {
         return Err(format!("Domain {domain}: self-certification present but block has no inclusion time"));
     };
-    sbo_core::attribution::verify_domain_self_cert(&msg.signing_key.to_string(), &raw, domain, t)
+    sbo_core::attribution::verify_domain_self_cert_with_anchors(
+        &msg.signing_key.to_string(),
+        &raw,
+        domain,
+        t,
+        &l2.anchors,
+    )
     .map_err(|e| format!("Domain {domain}: self-certification failed: {e}"))
 }
 
@@ -2269,8 +2294,11 @@ fn evaluate_policy_for(
         sbo_core::crypto::PublicKey::parse(&claims.public_key).ok()
     };
 
-    // Evaluate the policy
-    let outcome = evaluate_with(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref());
+    // Evaluate the policy. The pinned DNS root anchors (and this block's
+    // inclusion time) reach the `dnssec_proof` restriction through here
+    // (AUDIT-2026-11 D6).
+    let dns = sbo_core::policy::DnssecContext { anchors: &l2.anchors, at: l2.inclusion_time };
+    let outcome = evaluate_with_dnssec(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref(), Some(&dns));
     if let Some(e) = attestation_read_error.into_inner() {
         tracing::error!("Cannot evaluate attestation condition for {:?} on {}: {}", action, target_path, e);
         return Err(PolicyError::State(format!("Cannot evaluate attestation condition: {e}")));
