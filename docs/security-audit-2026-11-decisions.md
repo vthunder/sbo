@@ -540,6 +540,21 @@ Follow-up (asked by Dan 2026-11-05): under (a), a mixed fleet means old
 nodes drop every message with a new header, and concurrent experiments are
 impossible; (c) was added in answer.
 
+Reserialization (asked by Dan 2026-11-05): today it happens twice in every
+consumer. Signature verification rebuilds the signing content from the
+parsed struct (`canonical_signing_content()`), and `object_hash` is
+`sha256(wire::serialize(msg))` after parse (`sync.rs:1122`,
+`main.rs:728`); the parsed struct holds only modelled headers, so an
+unknown header is dropped and a consumer that models a different subset
+reserializes differently. Under (c) the rule is "bytes in, bytes out":
+only the signer serializes, once, when signing; every consumer verifies
+and hashes the bytes it received and forwards those same bytes to storage,
+relays, snapshots and proofs. The parser keeps the raw bytes (bean
+`sbo-xypz`), and `wire::serialize` is for producers only. Two clients that
+understand different subsets of the headers then agree on signature and
+hash by construction, because neither rebuilds anything. Canonical order
+stays a producer rule, checked by consumers on the modelled headers only.
+
 ### Q33. Shape of the genesis batch under strict mode (WS6 D5)
 
 Q7 (a) says only the genesis batch at the anchor is valid before a root
