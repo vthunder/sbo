@@ -82,7 +82,7 @@ conformance_repro() {
 }
 cargo_audit() { command -v cargo-audit >/dev/null || { echo "cargo-audit not installed"; return 1; }; cargo audit; }
 cargo_deny() { command -v cargo-deny >/dev/null || { echo "cargo-deny not installed"; return 1; }; cargo deny check; }
-gitleaks_scan() { command -v gitleaks >/dev/null || { echo "gitleaks not installed"; return 1; }; gitleaks git --config .gitleaks.toml --redact .; }
+gitleaks_scan() { command -v gitleaks >/dev/null || { echo "gitleaks not installed"; return 1; }; gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts=HEAD .; }
 fuzz_replay() {
   rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal >/dev/null 2>&1 || return 1
   FUZZ_REPLAY=1 FUZZ_TOOLCHAIN="$FUZZ_TOOLCHAIN" scripts/fuzz-smoke.sh

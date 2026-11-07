@@ -14,4 +14,8 @@ description = "Reviewed test fixtures that are not credentials"
 paths = [
     # Issue notes: placeholders such as `SBO_TURBO_DA_API_KEY=…`, never values.
     '''^\.beans/.*\.md$''',
+    # cargo-fuzz seeds (fuzz/src/bin/gen_seeds.rs): JWTs and presentations
+    # signed with the fixed fuzz fixture keys (fx::key(n)) for alice and
+    # example.com. Test material, never credentials.
+    '''^fuzz/seeds/''',
 ]

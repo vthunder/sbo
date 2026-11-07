@@ -39,6 +39,8 @@ env:
   # Dated nightly for the fuzz build (cargo-fuzz needs nightly). Bump on purpose.
   FUZZ_TOOLCHAIN: nightly-2026-11-01
   CARGO_FUZZ_VERSION: 0.13.2
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
   rust:
@@ -114,12 +116,16 @@ jobs:
         with:
           command: check
           rust-version: "1.93.0"
-      - name: gitleaks (full history, .gitleaks.toml)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
-          GITLEAKS_ENABLE_SUMMARY: "false"
+      # The CLI over the full history of HEAD, as scripts/release-check.sh
+      # runs it. Not gitleaks-action: on a push that scans only the pushed
+      # range, so a commit already on the branch would first be scanned by
+      # the pull request to main, after approval.
+      - name: gitleaks (full history of HEAD, .gitleaks.toml)
+        run: |
+          curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o "$RUNNER_TEMP/gitleaks.tgz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --config .gitleaks.toml --redact --no-banner --log-opts=HEAD .
 
   # Builds every cargo-fuzz target on a dated nightly and replays the
   # committed seeds once (-runs=0): deterministic, so it can gate a merge.
