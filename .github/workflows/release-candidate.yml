@@ -69,6 +69,10 @@ jobs:
         shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
         run: |
           ip link set lo up
+          # The sandbox is real: no name resolution, no route out.
+          if getent hosts github.com >/dev/null || curl -s --max-time 5 -o /dev/null http://1.1.1.1; then
+            echo "::error::the offline test sandbox can reach the network"; exit 1
+          fi
           cargo test --locked --offline
       # Audit pins (AUDIT-2026-11 ids): the ones not #[ignore]d must pass.
       - name: audit pins (offline)
