@@ -48,6 +48,7 @@ step() {
 
 wf_env() { sed -nE "s/^  $1: *\"?([^\" #]+)\"?.*/\1/p" "$WF" | head -1; }
 MINGO_DEPLOY_REV="$(wf_env MINGO_DEPLOY_REV)"
+MINGO_DEPLOY_REPO="$(wf_env MINGO_DEPLOY_REPO)"
 FUZZ_TOOLCHAIN="$(wf_env FUZZ_TOOLCHAIN)"
 
 # The toolchain the daemon image builds with (FROM rust:X in mingo's
@@ -56,13 +57,15 @@ FUZZ_TOOLCHAIN="$(wf_env FUZZ_TOOLCHAIN)"
 TC=""
 rust_pinned() {
   local df v
-  df="$(curl -sfL "https://raw.githubusercontent.com/vthunder/mingo/$MINGO_DEPLOY_REV/deploy/sbo-daemon/Dockerfile")" \
+  df="$(curl -sfL "https://raw.githubusercontent.com/$MINGO_DEPLOY_REPO/$MINGO_DEPLOY_REV/deploy/sbo-daemon/Dockerfile")" \
     || { echo "could not fetch mingo deploy/sbo-daemon/Dockerfile at $MINGO_DEPLOY_REV"; return 1; }
-  v="$(sed -nE 's/^FROM rust:([0-9.]+)-.*/\1/p' <<<"$df" | head -1)"
+  # Exact version (e.g. 1.93.1); CI also checks the pinned image's RUST_VERSION.
+  v="$(sed -nE 's/^FROM rust:([0-9.]+)-[^ ]* AS chef.*/\1/p' <<<"$df" | head -1)"
   [ -n "$v" ] || { echo "no FROM rust:<version> in the daemon Dockerfile"; return 1; }
-  grep -qE "rust-toolchain@[0-9a-f]{40} # $v(\.[0-9]+)?$" "$WF" || { echo "$WF pins a different toolchain than the daemon Dockerfile ($v)"; return 1; }
+  grep -qE "rust-toolchain@[0-9a-f]{40} # $v$" "$WF" || { echo "$WF pins a different toolchain than the daemon Dockerfile ($v)"; return 1; }
   rustup toolchain install "$v" --profile minimal >/dev/null 2>&1 || return 1
   TC="$v"
+  [ "$(cargo "+$TC" --version | awk '{print $2}')" = "$v" ] || { echo "toolchain $TC is not rust $v"; return 1; }
   echo "daemon image and CI build with rust $v: $(cargo "+$TC" --version)"
 }
 cargo_tc() { [ -n "$TC" ] || { echo "no pinned toolchain (rust-pinned failed or was skipped)"; return 1; }; cargo "+$TC" "$@"; }

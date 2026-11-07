@@ -33,9 +33,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   # The mingo commit whose deploy/sbo-daemon/ (Dockerfile, entrypoint,
-  # config) the image job builds. Pinned so this workflow's result depends
-  # only on this commit; bump it when mingo's deploy directory changes.
-  MINGO_DEPLOY_REV: e0e6d42bb0cac64d92f0c47efb89e5f85cff6453
+  # config) the image job builds, fetched from MINGO_DEPLOY_REPO (the mingo
+  # staging mirror, where release-candidate commits exist before they reach
+  # canonical mingo). Pinned so this workflow's result depends only on this
+  # commit; bump it when mingo's deploy directory changes. Deploy order: the
+  # mingo batch carrying this rev ships before the sbo batch that needs it.
+  MINGO_DEPLOY_REPO: vthunder/mingo-staging
+  MINGO_DEPLOY_REV: a465b6d6791daeaf3ee90043161bfd62ad36e862
   # Dated nightly for the fuzz build (cargo-fuzz needs nightly). Bump on purpose.
   FUZZ_TOOLCHAIN: nightly-2026-11-01
   CARGO_FUZZ_VERSION: 0.13.2
@@ -49,13 +53,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The same toolchain as the daemon image's builder stage; checked below.
-      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
-      - name: toolchain pin agrees with the daemon Dockerfile
+      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
+      - name: toolchain is exactly the one the daemon Dockerfile's pinned image carries
         run: |
-          curl -sfL "https://raw.githubusercontent.com/vthunder/mingo/$MINGO_DEPLOY_REV/deploy/sbo-daemon/Dockerfile" -o "$RUNNER_TEMP/daemon.Dockerfile"
-          v="$(sed -nE 's/^FROM rust:([0-9.]+)-.*/\1/p' "$RUNNER_TEMP/daemon.Dockerfile" | head -1)"
-          [ -n "$v" ] || { echo "::error::no FROM rust:<version> in mingo deploy/sbo-daemon/Dockerfile"; exit 1; }
-          rustc --version | grep -q " $v\." || { echo "::error::the daemon image builds with rust $v, this job with $(rustc --version)"; exit 1; }
+          curl -sfL "https://raw.githubusercontent.com/$MINGO_DEPLOY_REPO/$MINGO_DEPLOY_REV/deploy/sbo-daemon/Dockerfile" -o "$RUNNER_TEMP/daemon.Dockerfile"
+          ref="$(sed -nE 's/^FROM (rust:[^ ]+) AS chef.*/\1/p' "$RUNNER_TEMP/daemon.Dockerfile" | head -1)"
+          [ -n "$ref" ] || { echo "::error::no FROM rust:<tag> AS chef in mingo deploy/sbo-daemon/Dockerfile"; exit 1; }
+          tag="$(sed -nE 's/^rust:([0-9.]+)-.*/\1/p' <<<"$ref")"
+          img="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' | jq -r '."linux/amd64".config.Env[]? // .config.Env[]?' | sed -n 's/^RUST_VERSION=//p')"
+          have="$(rustc --version | awk '{print $2}')"
+          echo "Dockerfile tag $tag, image carries $img, this job runs $have"
+          [ -n "$tag" ] && [ "$tag" = "$img" ] && [ "$img" = "$have" ] || { echo "::error::toolchain mismatch: tag $tag, image $img, CI $have"; exit 1; }
       - name: native build deps (rocksdb bindgen, protobuf for avail-rust)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -109,7 +117,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # gitleaks scans every commit
-      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
       - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: cargo-audit
@@ -119,7 +127,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
         with:
           command: check
-          rust-version: "1.93.0"
+          rust-version: "1.93.1"
       # The CLI over the full history of HEAD, as scripts/release-check.sh
       # runs it. Not gitleaks-action: on a push that scans only the pushed
       # range, so a commit already on the branch would first be scanned by
@@ -141,7 +149,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
         with:
           toolchain: ${{ env.FUZZ_TOOLCHAIN }}
       - name: native build deps
@@ -187,7 +195,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: vthunder/mingo
+          repository: ${{ env.MINGO_DEPLOY_REPO }}
           ref: ${{ env.MINGO_DEPLOY_REV }}
           path: .rc-mingo
           sparse-checkout: deploy/sbo-daemon
