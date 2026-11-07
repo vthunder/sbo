@@ -2,6 +2,9 @@
 #
 #   make build            compile the workspace
 #   make test             run the test suite
+#   make release-check    the fast local equivalent of the release-candidate
+#                         workflow (scripts/release-check.sh); the workflow on
+#                         the staging mirror is what qualifies a submission
 #   make fuzz-smoke       run every cargo-fuzz target for FUZZ_SECS (default 60) — see fuzz/README.md
 #   make fuzz-smoke-install  (dev box) install the weekly launchd agent org.sandmill.sbo-fuzz-smoke
 #   make push             push HEAD to origin
@@ -21,13 +24,17 @@
 
 SHA := $(shell git rev-parse HEAD)
 
-.PHONY: build test fuzz-smoke fuzz-smoke-install push watch deploy
+.PHONY: build test release-check fuzz-smoke fuzz-smoke-install push watch deploy
 
 build:
 	cargo build --workspace
 
 test:
 	cargo test --workspace
+
+# On the dev box: ssh localtest 'cd ~/src/sbo && make release-check'
+release-check:
+	scripts/release-check.sh
 
 # cargo-fuzz smoke run (security audit 2026-11 WS3). Standalone workspace under
 # fuzz/ — nothing here is built by `make build`/CI-test/Docker. On the dev box:

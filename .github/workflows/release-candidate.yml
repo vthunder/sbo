@@ -1,0 +1,216 @@
+# Release candidate: every check that decides a merge AND a deploy, run on
+# the exact commit (sandmill-infra/ip-approval/PLAN.md). The public staging
+# mirror (vthunder/sbo-staging) runs it on every push, and
+# sandmill-infra/bin/ip-submit.sh refuses a commit unless all of these jobs
+# passed there. The canonical repo runs the identical workflow on every pull
+# request to main, and branch protection requires every job. No path
+# filters: a job that does not run is a failure, never a pass by absence.
+#
+# It covers test.yml, conformance.yml, supply-chain.yml and fuzz-smoke.yml,
+# plus what none of them do: build the production sbo-daemon image (mingo's
+# deploy/sbo-daemon/Dockerfile, the one deploy-daemon.yml ships, with this
+# commit's source in place of its `git clone` at SBO_REV), start it with its
+# real entrypoint and config on a network with no route out, and require
+# its health endpoint.
+#
+# Deterministic: every test step runs in a network namespace with only
+# loopback, so no test can reach DNS, a chain RPC or a third-party API.
+# Network is used only to fetch toolchains, crates and the advisory
+# databases (rc / audit, time-dependent by design: PLAN.md section 4).
+name: release-candidate
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The mingo commit whose deploy/sbo-daemon/ (Dockerfile, entrypoint,
+  # config) the image job builds. Pinned so this workflow's result depends
+  # only on this commit; bump it when mingo's deploy directory changes.
+  MINGO_DEPLOY_REV: e0e6d42bb0cac64d92f0c47efb89e5f85cff6453
+  # Dated nightly for the fuzz build (cargo-fuzz needs nightly). Bump on purpose.
+  FUZZ_TOOLCHAIN: nightly-2026-11-01
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  rust:
+    name: rc / rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The same toolchain as the daemon image's builder stage; checked below.
+      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+      - name: toolchain pin agrees with the daemon Dockerfile
+        run: |
+          curl -sfL "https://raw.githubusercontent.com/vthunder/mingo/$MINGO_DEPLOY_REV/deploy/sbo-daemon/Dockerfile" -o "$RUNNER_TEMP/daemon.Dockerfile"
+          v="$(sed -nE 's/^FROM rust:([0-9.]+)-.*/\1/p' "$RUNNER_TEMP/daemon.Dockerfile" | head -1)"
+          [ -n "$v" ] || { echo "::error::no FROM rust:<version> in mingo deploy/sbo-daemon/Dockerfile"; exit 1; }
+          rustc --version | grep -q " $v\." || { echo "::error::the daemon image builds with rust $v, this job with $(rustc --version)"; exit 1; }
+      - name: native build deps (rocksdb bindgen, protobuf for avail-rust)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: build every test binary (network allowed for crate downloads)
+        run: cargo test --locked --no-run
+      - name: allow an unprivileged network namespace for the offline test steps
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # `cargo test` with no -p runs default-members (Cargo.toml), which
+      # excludes the RISC Zero crates (decision Q19).
+      - name: workspace tests (offline)
+        shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
+        run: |
+          ip link set lo up
+          cargo test --locked --offline
+      # Audit pins (AUDIT-2026-11 ids): the ones not #[ignore]d must pass.
+      - name: audit pins (offline)
+        shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
+        run: |
+          ip link set lo up
+          cargo test --locked --offline -- audit_2026_11
+      # Every implementation of the same check against conformance/*.json;
+      # each runner's expected-fail table names the finding that owns a
+      # disagreement (see conformance.yml).
+      - name: conformance vectors (offline)
+        shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
+        run: |
+          ip link set lo up
+          cargo test --locked --offline -p sbo-types  --test audit_2026_11_ws2_types
+          cargo test --locked --offline -p sbo-crypto --test audit_2026_11_ws2_crypto
+          cargo test --locked --offline -p sbo-core   --test audit_2026_11_ws2_core
+          cargo test --locked --offline -p sbo-wasm   --test audit_2026_11_ws2_wasm
+          cargo test --locked --offline -p sbo-daemon --test audit_2026_11_ws2_daemon
+      - name: conformance vectors are reproducible (offline)
+        shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
+        run: |
+          ip link set lo up
+          cargo test --locked --offline -p sbo-core --test audit_2026_11_ws2_generate -- --ignored
+          git -c safe.directory='*' diff --exit-code -- conformance/
+      - name: tree clean after the tests
+        run: |
+          [ -z "$(git status --porcelain)" ] || { echo "::error::the tests left the tree dirty"; git status --short; exit 1; }
+
+  supply-chain:
+    name: rc / supply-chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans every commit
+      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-audit
+      - name: cargo audit (ignores in .cargo/audit.toml)
+        run: cargo audit
+      - name: cargo deny (deny.toml)
+        uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check
+          rust-version: "1.93.0"
+      - name: gitleaks (full history, .gitleaks.toml)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_SUMMARY: "false"
+
+  # Builds every cargo-fuzz target on a dated nightly and replays the
+  # committed seeds once (-runs=0): deterministic, so it can gate a merge.
+  # The time-boxed exploration stays in fuzz-smoke.yml (weekly) and on the
+  # dev box, where a new crash becomes a finding, not a blocked merge.
+  fuzz:
+    name: rc / fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: native build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake protobuf-compiler
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz -> target
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+      - name: build every target
+        working-directory: fuzz
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
+      - name: allow an unprivileged network namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: replay the committed seeds (offline)
+        shell: unshare --map-root-user --net bash --noprofile --norc -eo pipefail {0}
+        env:
+          FUZZ_REPLAY: "1"
+        run: |
+          ip link set lo up
+          scripts/fuzz-smoke.sh
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # The production daemon image, built exactly as mingo's deploy-daemon.yml
+  # builds it (same Dockerfile, same base image, same context), except that
+  # the planner stage takes this commit's tracked files instead of cloning
+  # vthunder/sbo at SBO_REV. Then started with its own entrypoint and config
+  # on an internal docker network (no route to Avail or anywhere else) with
+  # a throwaway /data, and probed. A dependency needing a newer compiler, a
+  # dependency the daemon package misses, or a startup refusal fails here
+  # instead of at deploy.
+  image:
+    name: rc / image sbo-daemon
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vthunder/mingo
+          ref: ${{ env.MINGO_DEPLOY_REV }}
+          path: .rc-mingo
+          sparse-checkout: deploy/sbo-daemon
+      - name: this commit's source, as a clone at SBO_REV would see it
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbo-src"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/sbo-src"
+      - name: point the Dockerfile's planner at that source
+        run: |
+          f=.rc-mingo/deploy/sbo-daemon/Dockerfile
+          perl -0pi -e 's|RUN git clone https://github\.com/vthunder/sbo \. \\\n\s*&& git checkout "\$SBO_REV"\n|COPY --from=sbo . .\n|' "$f"
+          grep -qx 'COPY --from=sbo \. \.' "$f" && ! grep -q 'git clone' "$f" || { echo "::error::mingo's Dockerfile no longer has the expected clone step"; cat "$f"; exit 1; }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: build (no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .rc-mingo
+          file: .rc-mingo/deploy/sbo-daemon/Dockerfile
+          build-contexts: sbo=${{ runner.temp }}/sbo-src
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: rc-sbo-daemon
+          cache-from: type=gha,scope=rc-sbo-daemon
+          cache-to: type=gha,scope=rc-sbo-daemon,mode=max
+      - name: start offline with the production entrypoint and config, probe /health
+        run: |
+          docker network create --internal rc-offline >/dev/null
+          docker run -d --name rc --network rc-offline --tmpfs /data rc-sbo-daemon
+          ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' rc)"
+          for i in $(seq 1 60); do
+            if [ "$(curl -sf "http://$ip:5000/health")" = ok ]; then echo "healthy after ${i}s"; docker logs rc 2>&1 | tail -20; exit 0; fi
+            [ "$(docker inspect -f '{{.State.Running}}' rc)" = true ] || break
+            sleep 1
+          done
+          echo "::error::the sbo-daemon image did not become healthy"; docker logs rc; exit 1
