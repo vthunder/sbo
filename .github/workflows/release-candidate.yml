@@ -206,7 +206,11 @@ jobs:
       - name: point the Dockerfile's planner at that source
         run: |
           f=.rc-mingo/deploy/sbo-daemon/Dockerfile
-          perl -0pi -e 's|RUN git clone https://github\.com/vthunder/sbo \. \\\n\s*&& git checkout "\$SBO_REV"\n|COPY --from=sbo . .\n|' "$f"
+          # Only the clone and checkout are replaced; whatever the RUN line
+          # chains after them (e.g. `&& mkdir -p vendor`) still runs, after
+          # `RUN true`, on the copied tree.
+          perl -0pi -e 's|RUN git clone https://github\.com/vthunder/sbo \. \\\n\s*&& git checkout "\$SBO_REV"|COPY --from=sbo . .\nRUN true|' "$f"
+          grep -A3 'COPY --from=sbo' "$f"
           grep -qx 'COPY --from=sbo \. \.' "$f" && ! grep -q 'git clone' "$f" || { echo "::error::mingo's Dockerfile no longer has the expected clone step"; cat "$f"; exit 1; }
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: build (no push)
