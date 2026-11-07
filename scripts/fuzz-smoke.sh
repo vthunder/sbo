@@ -29,9 +29,11 @@ fi
 
 status=0
 for t in "${TARGETS[@]}"; do
-  mkdir -p "corpus/$t"
+  # Replay reads only the committed seeds: a fresh empty dir stands in for
+  # the local corpus (libFuzzer writes into the first directory it is given).
+  if [ -n "${FUZZ_REPLAY:-}" ]; then corpus="$(mktemp -d)"; else corpus="corpus/$t"; mkdir -p "$corpus"; fi
   echo "=== $t (${BUDGET[*]})"
-  if ! cargo "+$TOOLCHAIN" fuzz run "$t" "corpus/$t" "seeds/$t" -- \
+  if ! cargo "+$TOOLCHAIN" fuzz run "$t" "$corpus" "seeds/$t" -- \
         "${BUDGET[@]}" -jobs="$JOBS" -workers="$JOBS" \
         -rss_limit_mb=2048 -timeout=20 -max_len=16384 2>&1 | tail -6; then
     echo "!!! $t: crash/timeout — see fuzz/artifacts/$t"
