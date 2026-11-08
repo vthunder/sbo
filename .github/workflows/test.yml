@@ -13,7 +13,6 @@ name: test
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch: {}
 
 concurrency:
@@ -33,9 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Same toolchain the deploy image builds with (rust:1.93-bookworm in
+      # Same toolchain the deploy image builds with (rust:1.93.1-bookworm in
       # mingo/deploy/sbo-daemon/Dockerfile).
-      - uses: dtolnay/rust-toolchain@48b64ba94bc1a6fe819fd9afc0799a7647efdc65 # 1.93.0
+      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
 
       - name: Native build deps (rocksdb bindgen, protobuf for avail-rust)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake protobuf-compiler

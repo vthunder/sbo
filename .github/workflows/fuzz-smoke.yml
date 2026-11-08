@@ -17,11 +17,6 @@ on:
       - "fuzz/**"
       - "scripts/fuzz-smoke.sh"
       - ".github/workflows/fuzz-smoke.yml"
-  pull_request:
-    paths:
-      - "fuzz/**"
-      - "scripts/fuzz-smoke.sh"
-      - ".github/workflows/fuzz-smoke.yml"
   workflow_dispatch:
     inputs:
       secs:
