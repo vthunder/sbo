@@ -241,7 +241,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         msg
@@ -375,7 +375,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         msg
@@ -443,7 +443,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 
@@ -485,7 +485,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&signing_key);
 
@@ -524,7 +524,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 
@@ -566,7 +566,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 

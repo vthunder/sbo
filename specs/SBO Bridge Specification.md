@@ -9,7 +9,9 @@ license: CC-BY-4.0
 **Part of SBO Protocol v0.5**
 
 ## Status
-Draft
+**Aspirational — not implemented.** Draft.
+
+> **Nothing in this document is enforced by any SBO implementation today** (2026-11 audit, Q10/S11, July `sbo-rx1z`). The reference daemon rejects `Action: import` outright, models none of the bridge headers (`Origin`, `Registry-Path`, `Object-Path`, `Attestation`, `Proof`, `Proof-Type`), verifies no oracle attestation, and applies no lock semantics: a `deny` on `/bridge/**` in a policy is an ordinary deny, not a bridge lock. The text below is a design sketch kept so the `import` action and the header names stay reserved; it is **not** a specification anyone may build against, assume a counterparty enforces, or cite as a security property of an SBO deployment. Wrapped tokens, locks and unlocks described here do not exist. When an implementation lands, this status line changes, the Wire Format header table gains normative entries, and the threat model gains the bridge adversary.
 
 ## Overview
 

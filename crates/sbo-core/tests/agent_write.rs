@@ -98,7 +98,7 @@ fn device_write(a: &Artifacts, action: Action, path: &str, schema: Option<&str>)
         // Real writes carry `inline:<dnssec>`; the smoke test verifies the
         // presentation against the provider key directly (DNSSEC is the live test).
         auth_evidence: Some("inline:placeholder".into()),
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(&key);
     msg
@@ -170,10 +170,15 @@ fn out_of_scope_write_is_rejected() {
 }
 
 #[test]
-fn plain_user_write_with_empty_scopes_is_unconstrained() {
-    // A warrant with no scopes attributes to the identity for any write.
+fn plain_user_write_with_empty_scopes_is_unauthorized() {
+    // Q40 (b), audit 2026-11: a warrant with no scopes authorizes NOTHING — a
+    // ledger warrant carries at least one `action:` / `sign:sbo:` scope. (Was
+    // `..._is_unconstrained` before the decision.)
     let a = artifacts(vec![], MINGO_AUD_BARE, "br.main");
     let msg = device_write(&a, Action::Post, "/u/attestor/", None);
-    let email = verify(&a, &msg).expect("empty scopes are unconstrained");
-    assert_eq!(email, IDENTITY);
+    assert!(verify(&a, &msg).is_err(), "an empty scope list authorized a write");
+    // The same write under a `sign:sbo:post` scope is attributed.
+    let a = artifacts(vec!["sign:sbo:post".into()], MINGO_AUD_BARE, "br.main");
+    let msg = device_write(&a, Action::Post, "/u/attestor/", None);
+    assert_eq!(verify(&a, &msg).expect("scoped write authorized"), IDENTITY);
 }

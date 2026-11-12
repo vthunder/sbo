@@ -180,8 +180,8 @@ Reading the real DA layer at `@firstBlock` is authoritative (the block content i
 
 ## Resolution Semantics
 
-- `@firstBlock` selects the **database** (where its genesis lives); it is inherited by all paths and does **not** snapshot reads. With no `genesis` hash, resolution MUST error if the anchor is ambiguous (>1 genesis at that height).
-- If `genesis` is present → the resolved database's genesis hash MUST match (verify; disambiguate).
+- `@firstBlock` selects the **database** (where its genesis lives); it is inherited by all paths and does **not** snapshot reads. With no `genesis` hash, resolution MUST error if the anchor is ambiguous (>1 valid genesis submission at that height): a resolver or syncing node **halts** rather than picking one (see the [Genesis Specification — Failure](./SBO%20Genesis%20Specification.md#failure)).
+- If `genesis` is present → the resolved database's genesis hash MUST match (verify; disambiguate). A mismatch halts sync; it is never a warning.
 - If `as_of` is present → resolve object state **as of** that block (historical snapshot).
 - If `content_hash` is present → payload must match specified hash.
 - Without `as_of`, resolves to the latest version (LWW).

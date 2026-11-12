@@ -39,9 +39,18 @@ pub struct TrustPolicy {
     pub threshold: usize,
 }
 
+impl Default for TrustPolicy {
+    /// No pinned keys: an open (non-enforcing) policy. It backs nothing in
+    /// [`crate::bootstrap::evaluate_trust`] and gates nothing in [`TrustGate`].
+    fn default() -> Self {
+        Self::open()
+    }
+}
+
 impl TrustPolicy {
-    /// A policy that gates nothing: no pinned attestors. A fast-sync client with
-    /// no `[trust]` config keeps the legacy trust-the-serving-node behaviour.
+    /// A policy that gates nothing: no pinned attestors. A full-replay node needs
+    /// none; a fast-sync client without one cannot bootstrap except by explicitly
+    /// trusting the serving node (`--trust-serving-node`).
     pub fn open() -> Self {
         Self { attestors: Vec::new(), threshold: 0 }
     }
@@ -97,10 +106,49 @@ pub fn claim_from_message(msg: &sbo_core::message::Message) -> Option<ObservedCl
     let payload = msg.payload.as_ref()?;
     let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let block = v.get("block")?.as_u64()?;
-    let root_hex = v.get("state_root")?.as_str()?;
-    let root_vec = hex::decode(root_hex).ok()?;
-    let state_root: [u8; 32] = root_vec.as_slice().try_into().ok()?;
+    let state_root = parse_state_root(v.get("state_root")?.as_str()?)?;
     Some(ObservedClaim { kind, block, state_root, signing_key: msg.signing_key.clone() })
+}
+
+/// Parse a `state_root` as it appears on the wire. The State Commitment spec
+/// writes it `sha256:<hex>` (Q34 a); bare hex is accepted during migration
+/// (what the checkpointer emitted before this change). `None` for anything
+/// else, including another algorithm prefix.
+pub fn parse_state_root(s: &str) -> Option<[u8; 32]> {
+    let hex_part = match s.split_once(':') {
+        Some(("sha256", h)) => h,
+        Some(_) => return None,
+        None => s,
+    };
+    let v = hex::decode(hex_part).ok()?;
+    v.as_slice().try_into().ok()
+}
+
+/// The spec wire form of a state root: `sha256:<hex>`.
+pub fn format_state_root(root: &[u8; 32]) -> String {
+    format!("sha256:{}", hex::encode(root))
+}
+
+/// Where a serving node keeps the raw signed wire of every `checkpoint.v1` it
+/// observed on chain (`<repo dir>/checkpoints/<id>.wire`), so its sync-point
+/// manifest can carry the signed objects and a bootstrapping client can
+/// re-verify them by signature instead of trusting the manifest's bare
+/// `(block, state_root)` (audit 2026-11 D26).
+pub fn checkpoint_wire_dir(repo_uri: &str) -> PathBuf {
+    crate::repo_dir_for_uri(repo_uri).join("checkpoints")
+}
+
+/// Persist a verified checkpoint message's wire bytes for the manifest.
+pub fn save_checkpoint_wire(repo_uri: &str, id: &str, wire: &[u8]) -> Result<()> {
+    let dir = checkpoint_wire_dir(repo_uri);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{id}.wire"));
+    std::fs::write(&path, wire).with_context(|| format!("write {}", path.display()))
+}
+
+/// Load a persisted checkpoint wire, if any.
+pub fn load_checkpoint_wire(repo_uri: &str, id: &str) -> Option<Vec<u8>> {
+    std::fs::read(checkpoint_wire_dir(repo_uri).join(format!("{id}.wire"))).ok()
 }
 
 /// The anchor a fast-sync client loaded provisionally and must verify on chain
@@ -118,8 +166,7 @@ pub struct PendingAnchor {
 
 impl PendingAnchor {
     pub fn root_bytes(&self) -> Result<[u8; 32]> {
-        let v = hex::decode(&self.state_root).context("decode anchor root")?;
-        v.as_slice().try_into().map_err(|_| anyhow!("anchor root not 32 bytes"))
+        parse_state_root(&self.state_root).ok_or_else(|| anyhow!("anchor root is not sha256:<hex> / 32-byte hex"))
     }
 
     pub fn policy(&self) -> Result<TrustPolicy> {
@@ -218,6 +265,27 @@ impl TrustGate {
 
     pub fn threshold(&self) -> usize {
         self.policy.threshold
+    }
+
+    /// Whether the bounded wait for anchor verification is exhausted at
+    /// `block`: the gate is still gated, `timeout_blocks > 0`, and the chain
+    /// has moved more than `timeout_blocks` past the anchor without the
+    /// threshold being met.
+    ///
+    /// This daemon's liveness-fallback choice (State Commitment spec, "bounded
+    /// wait"; audit 2026-11 D15) is to REPORT trust not established: the sync
+    /// loop stops tailing and the gate stays closed. It never degrades to a
+    /// weaker policy or an older checkpoint -- a fast-synced node that cannot
+    /// verify its anchor serves nothing rather than something it cannot vouch
+    /// for; the operator picks a new anchor or a full replay.
+    pub fn wait_exhausted(&self, block: u64, timeout_blocks: u64) -> bool {
+        if !self.is_gated() || timeout_blocks == 0 {
+            return false;
+        }
+        match &self.anchor {
+            Some(anchor) => block > anchor.block.saturating_add(timeout_blocks),
+            None => false,
+        }
     }
 
     /// Feed a claim observed during replay. Counts it toward the anchor iff it is
@@ -338,7 +406,7 @@ mod tests {
         use sbo_core::message::{Action, Id, Message, ObjectType, Path};
         let payload = serde_json::to_vec(&serde_json::json!({
             "block": block,
-            "state_root": hex::encode(root),
+            "state_root": format_state_root(&root),
         }))
         .unwrap();
         let mut msg = Message {
@@ -361,7 +429,7 @@ mod tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(signer);
         msg

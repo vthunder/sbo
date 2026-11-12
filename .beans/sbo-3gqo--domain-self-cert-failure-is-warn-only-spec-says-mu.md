@@ -1,11 +1,11 @@
 ---
 # sbo-3gqo
 title: Domain self-cert failure is warn-only; spec says MUST reject; evidence not read as-of genesis block
-status: todo
+status: scrapped
 type: bug
 priority: high
 created_at: 2026-07-08T15:48:57Z
-updated_at: 2026-07-08T15:48:57Z
+updated_at: 2026-11-04T21:34:48Z
 parent: sbo-f5wn
 ---
 
@@ -13,3 +13,7 @@ sync.rs:1241 only tracing::warn!s on self-cert failure and applies the write (co
 - [ ] Make self-cert failure a hard reject
 - [ ] Resolve the explicit ref: leaf as-of THIS object's block (point-in-time), not current state
 - [ ] Tests: mismatched domain key rejected; refresh cannot shadow genesis evidence
+
+## Reasons for Scrapping
+
+Superseded by sbo-c46r (audit 2026-11 D7). Every unchecked item above is carried in that bean's checklist; the finding was re-verified by the 2026-11 audit and is encoded as an ignored `AUDIT-2026-11` test there.

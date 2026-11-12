@@ -24,6 +24,8 @@ pub mod dns;
 pub mod uri;
 pub mod jwt;
 pub mod attribution;
+#[cfg(feature = "dnssec-fixtures")]
+pub mod dnssec_fixture;
 pub mod device_attribution;
 pub mod resolve;
 pub mod authorize;
@@ -36,12 +38,10 @@ pub use browserid_core;
 
 mod genesis;
 #[cfg(feature = "storage")]
-mod indexer;
 
 pub use error::SboError;
-pub use genesis::{Genesis, genesis_hash, genesis_hash_from_wire};
+pub use genesis::{Genesis, GenesisError, GenesisInfo, GenesisMode, genesis_hash, genesis_hash_from_wire};
 #[cfg(feature = "storage")]
-pub use indexer::Indexer;
 pub use proof::{SbopMessage, parse_sbop, serialize_sbop, is_sbop_message, SbopError};
 
 // Re-export types from sbo-types
@@ -49,6 +49,9 @@ pub use sbo_types::id::Id;
 pub use sbo_types::path::Path;
 pub use sbo_types::action::Action;
 pub use sbo_types::error::ParseError as TypesParseError;
+// The one identity-comparison rule (Q5): exactly one `@`, lowercase A-label
+// domain, byte-exact local part. Every comparison site uses this module.
+pub use sbo_types::identity;
 
 // Re-export crypto from sbo-crypto
 pub use sbo_crypto::{sha256, ContentHash, HashAlgo, CryptoError};
@@ -60,7 +63,7 @@ pub use sbo_crypto::bls;
 pub use sbo_crypto::trie::{
     SparseTrie, TrieProof, TrieProofStep, TrieError,
     ObjectWitness, StateTransitionWitness, SiblingHint,
-    compute_trie_root, verify_state_transition, verify_trie_proof,
+    compute_trie_root, verify_state_transition, verify_trie_proof, empty_root,
 };
 
 use std::path::PathBuf;

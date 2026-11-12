@@ -1,0 +1,68 @@
+{
+  "description": "Decision Q4 (2026-11-04): per-message, ordered, state-threaded. Rules: (1) a submission that fails to parse anywhere is ignored whole; (2) messages validate and apply in submission order, N against state after 1..N-1; (3) a rejected message leaves state unchanged and is invisible to later messages; (4) an LWW loser is valid with no effect; (5) index within a submission breaks slot ties; (6) state root commits per block; (7) genesis is not an atomic exception. `parse` is the expected result of parsing the submission as a unit; `applied` lists the (0-based) indices of messages that end up in state after sequential validation from a root policy granting `*` create+update under the path.",
+  "key": {
+    "public_key": "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+    "second_seed_hex": "4343434343434343434343434343434343434343434343434343434343434343",
+    "seed_hex": "4242424242424242424242424242424242424242424242424242424242424242"
+  },
+  "suite": "sbo conformance 2026-11 / batch semantics",
+  "vectors": [
+    {
+      "applied": [
+        0,
+        1,
+        2
+      ],
+      "count": 3,
+      "description": "three valid messages",
+      "id": "B-01",
+      "parse": "accept",
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 02dc55e531ab36c2fba0a8cc755173bdaf0579309aed1382ab12ea9da6e3702f1236168521c6672dba7ccdd46b9fa1978e65730b1c6bcd1913793822fb047704\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p2\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 6cbf748aa63a169997a01b6aa89bfd7e426ff214d3c655a1cb2a8d2c81c8a35ba177a27bee303b437406210c88f036ed82d094e087c21f75f5b5f29d5de7db09\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p3\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 79c64b24d0f4b741367827acb3fdcee8a57543048ef365d749a108323671a91aaa8319e4db2e9bab5162560991ec3de6ebd85870aa8b4ada71850ecd95bcf90f\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "applied": [
+        0,
+        2
+      ],
+      "count": 3,
+      "description": "middle message has a bad signature: it is rejected alone; the others apply (rule 2, 3)",
+      "id": "B-02",
+      "parse": "accept",
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 02dc55e531ab36c2fba0a8cc755173bdaf0579309aed1382ab12ea9da6e3702f1236168521c6672dba7ccdd46b9fa1978e65730b1c6bcd1913793822fb047704\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p2\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 6dbf748aa63a169997a01b6aa89bfd7e426ff214d3c655a1cb2a8d2c81c8a35ba177a27bee303b437406210c88f036ed82d094e087c21f75f5b5f29d5de7db09\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p3\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 79c64b24d0f4b741367827acb3fdcee8a57543048ef365d749a108323671a91aaa8319e4db2e9bab5162560991ec3de6ebd85870aa8b4ada71850ecd95bcf90f\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "applied": [],
+      "count": 0,
+      "description": "middle message does not parse: the whole submission is ignored (rule 1)",
+      "id": "B-03",
+      "parse": "reject",
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 02dc55e531ab36c2fba0a8cc755173bdaf0579309aed1382ab12ea9da6e3702f1236168521c6672dba7ccdd46b9fa1978e65730b1c6bcd1913793822fb047704\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p2\nType: Object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 6cbf748aa63a169997a01b6aa89bfd7e426ff214d3c655a1cb2a8d2c81c8a35ba177a27bee303b437406210c88f036ed82d094e087c21f75f5b5f29d5de7db09\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p3\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 79c64b24d0f4b741367827acb3fdcee8a57543048ef365d749a108323671a91aaa8319e4db2e9bab5162560991ec3de6ebd85870aa8b4ada71850ecd95bcf90f\n\n{\"body\":\"hello\"}"
+    },
+    {
+      "applied": [
+        0
+      ],
+      "count": 2,
+      "description": "two creates into the same slot by different signers: the lower index wins, the second is an unauthorized update (rule 5)",
+      "id": "B-04",
+      "parse": "accept",
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 02dc55e531ab36c2fba0a8cc755173bdaf0579309aed1382ab12ea9da6e3702f1236168521c6672dba7ccdd46b9fa1978e65730b1c6bcd1913793822fb047704\n\n{\"body\":\"hello\"}SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 17\nContent-Hash: sha256:a0df26d51aa0837c92004bdbab316797b869cea13377e4ed047f984fb9ae1049\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: bob\nPublic-Key: ed25519:22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6\nSignature: 084d7c0995be8c98352ba3c07baffb2017d801542709260e78b53a49ac5450ee32cd1d697b27cb2896584a43bf3ebc032330cfec25922c08cec12a52d278ba08\n\n{\"body\":\"second\"}"
+    },
+    {
+      "applied": [],
+      "count": 0,
+      "description": "trailing garbage after the last message",
+      "id": "B-05",
+      "parse": "reject",
+      "wire": "SBO-Version: 0.5\nAction: post\nPath: /communities/cooks/spaces/general/\nID: p1\nType: object\nContent-Type: application/json\nContent-Length: 16\nContent-Hash: sha256:1da63ae1d1c64f4549cece58555b23ef253aa7bb2c5ca6c48c12918863cff51a\nContent-Schema: post.v1\nHLC: 1703001234567.0\nOwner: alice\nPublic-Key: ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\nSignature: 02dc55e531ab36c2fba0a8cc755173bdaf0579309aed1382ab12ea9da6e3702f1236168521c6672dba7ccdd46b9fa1978e65730b1c6bcd1913793822fb047704\n\n{\"body\":\"hello\"}garbage"
+    },
+    {
+      "applied": [],
+      "count": 0,
+      "description": "empty submission",
+      "id": "B-06",
+      "parse": "accept",
+      "wire": ""
+    }
+  ]
+}

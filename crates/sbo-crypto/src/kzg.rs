@@ -79,6 +79,11 @@ pub enum KzgError {
     InvalidProof,
     InvalidPoint,
     VerificationFailed,
+    /// The pairing check is not implemented in this build: the verifier
+    /// cannot decide the opening and FAILS CLOSED rather than answer `true`
+    /// (audit 2026-11 D9, Q20 (c); the pairing lands with the light-node
+    /// migration, `sbo-wn15`).
+    Unsupported,
 }
 
 impl core::fmt::Display for KzgError {
@@ -88,6 +93,7 @@ impl core::fmt::Display for KzgError {
             Self::InvalidProof => write!(f, "Invalid KZG proof"),
             Self::InvalidPoint => write!(f, "Invalid curve point"),
             Self::VerificationFailed => write!(f, "KZG verification failed"),
+            Self::Unsupported => write!(f, "KZG pairing verification is not implemented"),
         }
     }
 }
@@ -104,7 +110,7 @@ pub fn domain_point(col: u32, _domain_size: u32) -> [u8; SCALAR_SIZE] {
 
 /// Verify a KZG proof that commitment(x) = y
 ///
-/// This verifies: e(C - y*G1, G2) = e(proof, tau*G2 - x*G2)
+/// The full check is: e(C - y*G1, G2) = e(proof, tau*G2 - x*G2)
 ///
 /// For Avail cells:
 /// - commitment: row commitment from header
@@ -112,7 +118,12 @@ pub fn domain_point(col: u32, _domain_size: u32) -> [u8; SCALAR_SIZE] {
 /// - y: cell data (as scalar)
 /// - proof: KZG proof for this evaluation
 ///
-/// Note: In zkVM, blst operations are accelerated via precompiles
+/// **This build performs no pairing.** It decodes and sanity-checks both G1
+/// points and then returns `Err(KzgError::Unsupported)`: it never answers
+/// `Ok(true)`, because it cannot know the proof opens the commitment (audit
+/// 2026-11 D9 — the previous version returned `Ok(true)` after the point
+/// checks). The light-client read path does not call this (Q20 (c)); the
+/// pairing against Avail's SRS arrives with the light-node migration.
 pub fn verify_kzg_proof(
     commitment: &KzgCommitment,
     x: &[u8; SCALAR_SIZE],
@@ -151,10 +162,10 @@ pub fn verify_kzg_proof(
             return Err(KzgError::InvalidProof);
         }
 
-        // For now, return true for valid points
-        // Full pairing check requires SRS (trusted setup parameters)
-        // TODO: Add full pairing verification with Avail's SRS
-        Ok(true)
+        // Both points are well-formed, but without the pairing (which needs
+        // Avail's SRS) the opening cannot be decided. Fail closed.
+        let _ = (x, y);
+        Err(KzgError::Unsupported)
     }
 }
 

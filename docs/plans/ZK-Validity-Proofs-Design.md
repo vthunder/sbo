@@ -1,7 +1,27 @@
 # SBO ZK Validity Proofs Design
 
-**Status:** Draft
-**Date:** 2024-12-13
+**Status:** Draft — **experimental; the shipped `sbo-zkvm` carries no validity claim**
+**Date:** 2024-12-13 (status note 2026-11)
+
+> **Experimental, feature-gated, no trust claim (2026-11 audit, Q19/D8, July `sbo-5rww`).**
+> The `sbo-zkvm` crate and the daemon's `--light` / `--prover` modes are an
+> experiment behind the non-default `zkvm` feature. The guest program as it
+> exists today does **not** prove SBO validity: it verifies a header chain,
+> a raw-cells hash, app completeness and a trie witness, but the SBO actions
+> hash it computes is discarded, the trie witness is an independent input
+> never derived from the block's `actions_data`, `header_data: None` yields
+> a zero data root without asserting anything, and the first proof in a
+> chain accepts any `prev_state_root`. A receipt therefore attests that
+> *some* trie transition happened over *some* data — it is not evidence that
+> the resulting state root is the SBO state, and a light client that trusts
+> it is trusting the prover. `verify_app_completeness` also uses unchecked
+> arithmetic (D49). No SBO deployment relies on these proofs; the
+> State Commitment specification's **T1-zk** tier is a design slot, not an
+> available trust level. Nothing below should be read as describing a
+> property a current build has. Real remediation (bind the witness to
+> `actions_data`, run SBO validation in the guest, assert the data root,
+> pin the genesis root) is tracked by `sbo-5rww` and is out of scope for
+> the 2026-11 audit.
 
 ## Problem Statement
 

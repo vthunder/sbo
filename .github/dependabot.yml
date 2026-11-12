@@ -1,0 +1,17 @@
+# Dependabot, limited to GitHub Actions (security audit 2026-11, WS7 W7-2).
+# Every `uses:` in .github/workflows is pinned by commit SHA with the release
+# in a trailing comment; Dependabot moves the SHA and the comment together.
+# Not enabled for cargo: advisories are gated by supply-chain.yml and bumped
+# on purpose with `cargo update`.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(actions)"

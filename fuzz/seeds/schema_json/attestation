@@ -1,0 +1,1 @@
+attestation.v1\x00{"subject":"alice@example.com","type":"role:moderator","value":true,"issued_at":1700000000,"expires":1800000000}

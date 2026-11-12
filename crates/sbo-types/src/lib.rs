@@ -14,5 +14,11 @@ pub use alloc::{string::String, vec::Vec, vec};
 
 pub mod error;
 pub mod id;
+pub mod identity;
 pub mod path;
 pub mod action;
+
+pub use action::Action;
+pub use error::ParseError;
+pub use id::Id;
+pub use path::Path;

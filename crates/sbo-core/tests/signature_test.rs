@@ -29,7 +29,7 @@ fn test_sign_and_verify_message() {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
 
     // Sign the message
@@ -67,7 +67,7 @@ fn test_verify_fails_with_wrong_key() {
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
 
     msg.sign(&signing_key);

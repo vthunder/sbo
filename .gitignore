@@ -6,3 +6,12 @@ my-repo/
 
 # wasm-pack generated package (build with sbo-wasm/build-web.sh)
 crates/sbo-wasm/pkg/
+
+# cargo-fuzz run state (security audit 2026-11 WS3); seeds/ is committed
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/target/
+
+# proptest failure-persistence files (audit 2026-11 WS3): regenerated locally, never committed
+*.proptest-regressions
+fuzz/fuzz-*.log

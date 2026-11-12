@@ -10,7 +10,7 @@ use sbo_core::authorize::{
 use sbo_core::attribution::TrustAnchors;
 use sbo_core::uri::SboRawUri;
 use sbo_core::message::{Message, Action, Id, Path as SboPath};
-use sbo_core::policy::{evaluate, ActionType, AttestedSource, PolicyResult};
+use sbo_core::policy::{evaluate_with_dnssec, ActionType, AttestedSource, PolicyResult};
 use sbo_core::resolve::{resolve_controller, Controller, NameRecord, DEFAULT_HOP_LIMIT};
 use sbo_core::schema::{parse_attestation, validate_schema, SchemaError};
 use sbo_core::state::StoredObject;
@@ -45,12 +45,57 @@ impl std::fmt::Display for ValidationStage {
     }
 }
 
+/// Why a policy check did not pass. A `State` error is a failed read of the
+/// state the decision depends on (RocksDB error while listing attestations,
+/// resolving a policy, ...) and is reported as [`ValidationStage::State`] -- never
+/// as a plain denial, and never as an allow (D11: `not_attested` fails closed on
+/// a state-read error). `Denied` is an evaluated refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyError {
+    State(String),
+    Denied(String),
+}
+
+impl PolicyError {
+    fn stage(&self) -> ValidationStage {
+        match self {
+            PolicyError::State(_) => ValidationStage::State,
+            PolicyError::Denied(_) => ValidationStage::Policy,
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            PolicyError::State(r) | PolicyError::Denied(r) => r,
+        }
+    }
+
+    /// Turn this into the validation outcome, with `wrap` adding the caller's
+    /// context around the bare reason.
+    fn into_invalid(self, wrap: impl FnOnce(&str) -> String) -> ValidationResult {
+        ValidationResult::Invalid {
+            stage: self.stage(),
+            reason: wrap(self.reason()),
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 /// Context for the L2 attribution layer: the write's DA inclusion time and the
 /// pinned trust anchors. Threaded from the block being replayed.
 pub struct L2Context {
     /// The DA block's inclusion time (UNIX seconds), if known. `None` means the
-    /// block carried no usable timestamp — email-rooted owners then cannot be
-    /// attributed and their writes are carried-but-filtered.
+    /// block carried no usable timestamp. The sync path never gets here with
+    /// `None` (Q23 (a): a block whose timestamp cannot be read is a fetch
+    /// failure and is retried, never processed); when a caller does pass
+    /// `None`, every time-dependent rule fails closed -- email-rooted owners
+    /// cannot be attributed, an `HLC` cannot be bounded and attestations
+    /// cannot be judged in force -- so nodes never disagree on a block.
     pub inclusion_time: Option<i64>,
     /// Pinned trust anchors (authorized brokers + informational root KSK).
     pub anchors: TrustAnchors,
@@ -86,26 +131,45 @@ impl L2Context {
     }
 }
 
-/// Trust-anchor path: the pinned authorized-broker list.
-const TRUST_BROKERS_PATH: &str = "/sys/trust/";
+/// Trust-anchor path: the pinned authorized-broker list and DNS root KSK history.
+const TRUST_PATH: &str = "/sys/trust/";
 const TRUST_BROKERS_ID: &str = "brokers";
+const TRUST_DNS_ROOT_ID: &str = "dns-root";
 
-/// Load the pinned trust anchors from `/sys/trust/brokers`.
+/// Load the pinned trust anchors from `/sys/trust/brokers` and
+/// `/sys/trust/dns-root` as of the current state (Authorization Spec §On-Chain
+/// Trust Anchors).
 ///
-/// The object payload is expected to be a JSON array of authorized broker
-/// provider domains. Absent or unparseable → an empty broker set (only
-/// primary-IdP attribution will succeed). The DNS root KSK is hardcoded inside
-/// `dnssec-prover`, so `/sys/trust/dns-root` is not consulted here.
+/// Brokers: a JSON array of authorized broker provider domains; absent or
+/// unparseable → an empty broker set (only primary-IdP attribution succeeds).
+///
+/// DNS root (audit 2026-11 D6, Q3 (a)): the `dns-root.v1` key history is the
+/// single a-priori DNSSEC anchor; the verifier selects the key(s) active at the
+/// write's inclusion time. An absent object leaves the root unpinned, which
+/// falls back to the validator library's compiled-in IANA anchors (see
+/// [`TrustAnchors::root_keys`]); an unparseable one pins an EMPTY history so
+/// nothing validates (fail closed, rather than silently reverting to the
+/// library's set).
 fn load_trust_anchors(state: &dyn StateView) -> TrustAnchors {
-    let brokers = (|| {
-        let path = SboPath::parse(TRUST_BROKERS_PATH).ok()?;
-        let id = Id::new(TRUST_BROKERS_ID).ok()?;
-        let obj = state.get_object(&path, &id).ok()??;
-        serde_json::from_slice::<Vec<String>>(&obj.payload).ok()
-    })()
-    .unwrap_or_default();
-    // TODO: also surface /sys/trust/dns-root for out-of-band auditing.
-    TrustAnchors::with_brokers(brokers)
+    let read = |id: &str| -> Option<Vec<u8>> {
+        let path = SboPath::parse(TRUST_PATH).ok()?;
+        let id = Id::new(id).ok()?;
+        Some(state.get_object(&path, &id).ok()??.payload)
+    };
+    let brokers = read(TRUST_BROKERS_ID)
+        .and_then(|p| serde_json::from_slice::<Vec<String>>(&p).ok())
+        .unwrap_or_default();
+    let mut anchors = TrustAnchors::with_brokers(brokers);
+    if let Some(payload) = read(TRUST_DNS_ROOT_ID) {
+        anchors = match TrustAnchors::parse_dns_root(&payload) {
+            Ok(keys) => anchors.with_dns_root(keys),
+            Err(e) => {
+                tracing::error!("/sys/trust/dns-root is unparseable ({e}); pinning an empty root history");
+                anchors.with_dns_root(Vec::new())
+            }
+        }
+    }
+    anchors
 }
 
 /// Build a `/sys/names/<name>` resolver closure over the state DB, mapping each
@@ -343,16 +407,16 @@ pub fn resolve_transfer_target(
     state.get_object(&msg.path, &msg.id)
 }
 
-pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Id {
+pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Context) -> Result<Id, String> {
     // If message has explicit creator, use it
     if let Some(creator) = &msg.creator {
-        return creator.clone();
+        return Ok(creator.clone());
     }
 
     // An attributed email is the author's stable, rotation-independent identity.
     if let Some(email) = attributed_email(msg, state, l2) {
         if let Ok(id) = Id::new(&email) {
-            return id;
+            return Ok(id);
         }
     }
 
@@ -371,7 +435,7 @@ pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Cont
                     None => name,
                 };
                 if let Ok(id) = Id::new(&canonical) {
-                    return id;
+                    return Ok(id);
                 }
             }
             Ok(None) => {} // No name claim, fall through
@@ -381,29 +445,38 @@ pub fn resolve_creator(msg: &Message, state: Option<&dyn StateView>, l2: &L2Cont
         }
     }
 
-    // Fall back to truncated key hex with type disambiguation
-    // 16 hex chars of key material + 2 char prefix = 18 chars total
-    let (prefix, key_hex) = if let Some(hex) = pubkey.strip_prefix("ed25519:") {
-        ("e_", hex)
-    } else if let Some(hex) = pubkey.strip_prefix("bls12-381:") {
-        ("b_", hex)
-    } else {
-        ("", pubkey.as_str())
-    };
-    let key_part = &key_hex[..std::cmp::min(16, key_hex.len())];
-    let creator_str = format!("{}{}", prefix, key_part);
-    Id::new(&creator_str).unwrap_or_else(|_| Id::new("unknown").unwrap())
+    // A name claim creates the very record that would name its author: the
+    // claimed name is the creator (self-certifying, see `effective_owner_ref`).
+    if is_name_claim_path(&msg.path) && matches!(msg.action, Action::Post) {
+        return Ok(msg.id.clone());
+    }
+
+    // The declared owner the signer was authorized against (step 2.5) is a
+    // named identity the author controls; it stands in for an author with no
+    // attribution and no name record of its own.
+    if let Some(owner) = &msg.owner {
+        return Ok(owner.clone());
+    }
+
+    // There is no signing-key encoding fallback (Identity Spec §The stored
+    // creator; audit 2026-11 D16/D55, Q6): the `e_<hex>` / `unknown` sentinels
+    // are gone. A message that yields no creator is invalid.
+    Err(format!(
+        "no creator: signer {pubkey} carries no Creator, no attribution, no name record and no Owner"
+    ))
 }
 
 /// Enforce the HLC ordering-integrity rule (Content Spec §Validity bound) for a
 /// write that carries an `HLC` header. A malformed `HLC` is always rejected. The
-/// `T_b − W ≤ physical ≤ T_b + ε` bound is enforced only when the block's
-/// inclusion time is known; absent a timestamp the bound cannot be evaluated and
-/// we fail open on it (the write is still carried, matching the attribution
-/// carry semantics). Returns `Err(reason)` if the write must be filtered.
+/// `T_b − W ≤ physical ≤ T_b + ε` bound needs the block's inclusion time; a
+/// write that carries an `HLC` in a block whose inclusion time is unknown is
+/// rejected (D28: the bound is never skipped -- a node that cannot evaluate it
+/// must not admit what a node that can would refuse). Returns `Err(reason)` if
+/// the write must be filtered.
 ///
-/// `W` (max authoring lag) defaults to [`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`];
-/// per-collection `W` from a `collection.v1` descriptor is wired in a later step.
+/// `W` (max authoring lag) defaults to [`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`]
+/// and is read from the collection's `collection.v1` descriptor, capped at the
+/// protocol maximum [`sbo_core::hlc::MAX_AUTHORING_LAG_MS`] (D22 / Q9).
 fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
     let hlc_str = match &msg.hlc {
         Some(h) => h,
@@ -411,21 +484,22 @@ fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Resu
     };
     let hlc = sbo_core::hlc::Hlc::parse(hlc_str).map_err(|e| format!("malformed HLC: {e}"))?;
 
-    if let Some(t_b_secs) = l2.inclusion_time {
-        let t_b_ms = t_b_secs.saturating_mul(1000);
-        let max_lag = collection_max_lag_ms(msg, state);
-        let skew = sbo_core::hlc::DEFAULT_SKEW_TOLERANCE_MS;
-        if !hlc.within_bound(t_b_ms, max_lag, skew) {
-            return Err(format!(
-                "HLC physical {} outside validity bound [{}, {}] (T_b={}ms, W={}ms, ε={}ms)",
-                hlc.physical,
-                t_b_ms - max_lag,
-                t_b_ms + skew,
-                t_b_ms,
-                max_lag,
-                skew
-            ));
-        }
+    let Some(t_b_secs) = l2.inclusion_time else {
+        return Err("block inclusion time unknown: HLC validity bound cannot be evaluated".to_string());
+    };
+    let t_b_ms = t_b_secs.saturating_mul(1000);
+    let max_lag = collection_max_lag_ms(msg, state);
+    let skew = sbo_core::hlc::DEFAULT_SKEW_TOLERANCE_MS;
+    if !hlc.within_bound(t_b_ms, max_lag, skew) {
+        return Err(format!(
+            "HLC physical {} outside validity bound [{}, {}] (T_b={}ms, W={}ms, ε={}ms)",
+            hlc.physical,
+            t_b_ms.saturating_sub(max_lag),
+            t_b_ms.saturating_add(skew),
+            t_b_ms,
+            max_lag,
+            skew
+        ));
     }
     Ok(())
 }
@@ -434,8 +508,11 @@ fn check_hlc_bound(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Resu
 /// write, from a `collection.v1` descriptor at the write's collection root
 /// (`<path>/_config`). Absent a descriptor (or its `max_authoring_lag_s`), the
 /// collection defaults to a small `W` ([`sbo_core::hlc::DEFAULT_MAX_AUTHORING_LAG_MS`]).
-/// The descriptor is looked up at the write's own path; deeper ancestor
-/// resolution is a later refinement.
+/// Whatever the descriptor says, `W` never exceeds the protocol maximum
+/// [`sbo_core::hlc::MAX_AUTHORING_LAG_MS`] (D22 / Q9 (a)): a hostile or
+/// legacy `_config` cannot make the authoring bound vacuous. The descriptor is
+/// looked up at the write's own path; deeper ancestor resolution is a later
+/// refinement.
 fn collection_max_lag_ms(msg: &Message, state: &dyn StateView) -> i64 {
     let descriptor = state
         .get_object(&msg.path, &Id::new(sbo_core::schema::COLLECTION_CONFIG_ID).unwrap())
@@ -445,7 +522,9 @@ fn collection_max_lag_ms(msg: &Message, state: &dyn StateView) -> i64 {
         if obj.content_schema.as_deref() == Some("collection.v1") {
             if let Ok(collection) = sbo_core::schema::parse_collection(&obj.payload) {
                 if let Some(lag_s) = collection.max_authoring_lag_s {
-                    return lag_s.saturating_mul(1000);
+                    return lag_s
+                        .saturating_mul(1000)
+                        .clamp(0, sbo_core::hlc::MAX_AUTHORING_LAG_MS);
                 }
             }
         }
@@ -504,17 +583,35 @@ pub fn lww_admits(msg: &Message, existing: Option<&StoredObject>, object_hash: &
     sbo_core::hlc::lww_wins(new_key, old_key)
 }
 
+/// Whether a reference is a raw key (`ed25519:<hex>`, `bls12-381:<hex>`)
+/// rather than a name or an email. Such a reference is not an identity
+/// (Identity Spec §Owner References; audit 2026-11 Q6 / sbo-yd72).
+fn is_bare_key_reference(reference: &str) -> bool {
+    reference.starts_with("ed25519:") || reference.starts_with("bls12-381:")
+}
+
 /// The effective owner reference for a message, per the Authorization Spec
-/// verification algorithm: the `Owner` header, else the `Creator` header, else
-/// the signing key. The L2 gate authorizes the signer against this reference.
-fn effective_owner_ref(msg: &Message) -> String {
-    if let Some(owner) = &msg.owner {
+/// verification algorithm: the `Owner` header, else the `Creator` header. There
+/// is **no signing-key fallback** and a bare key is **not** a reference
+/// (Q6 / sbo-yd72): a write that names neither is invalid, and one that names
+/// a raw key is invalid. The one self-certifying form is a `/sys/names/<name>`
+/// claim with no `Owner`, whose owner is the name it creates (the genesis
+/// `sys` record is the archetype; the daemon validates the genesis prefix
+/// structurally and never reaches here for it).
+pub fn effective_owner_ref(msg: &Message) -> Result<String, String> {
+    let reference = if let Some(owner) = &msg.owner {
         owner.as_str().to_string()
     } else if let Some(creator) = &msg.creator {
         creator.as_str().to_string()
+    } else if is_name_claim_path(&msg.path) && matches!(msg.action, Action::Post) {
+        msg.id.as_str().to_string()
     } else {
-        msg.signing_key.to_string()
+        return Err("no owner: a write must name an Owner or Creator that is a name or an email (no signer-key fallback)".to_string());
+    };
+    if is_bare_key_reference(&reference) {
+        return Err(format!("owner '{reference}' is a bare key; an owner is a name or an email"));
     }
+    Ok(reference)
 }
 
 /// Validate a message against the current state
@@ -530,6 +627,27 @@ pub fn validate_message(
             stage: ValidationStage::Signature,
             reason: e.to_string(),
         };
+    }
+
+    // 1.5. The payload is bound to the signed headers only through
+    // `Content-Hash` (audit 2026-11 D1): recompute it here, independently of
+    // the parser, so an in-memory message with a swapped payload cannot pass.
+    if let Some(payload) = msg.payload.as_deref() {
+        match msg.content_hash.as_ref() {
+            Some(h) if *h == sbo_core::crypto::ContentHash::sha256(payload) => {}
+            Some(_) => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Signature,
+                    reason: "Content-Hash does not match the payload".to_string(),
+                };
+            }
+            None => {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Signature,
+                    reason: "payload without Content-Hash".to_string(),
+                };
+            }
+        }
     }
 
     // 2. Validate payload against Content-Schema (if specified). Transfer/delete
@@ -586,12 +704,29 @@ pub fn validate_message(
     // owner-speaks-for-self gate would wrongly reject a legitimate admin move.
     // (`is_transfer_or_delete` computed above at the schema gate.)
     if !is_transfer_or_delete {
-        let effective_owner = effective_owner_ref(msg);
-        if let Err(reason) = l2_authorize(msg, state, l2, &effective_owner) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Attribution,
-                reason,
-            };
+        let effective_owner = match effective_owner_ref(msg) {
+            Ok(o) => o,
+            Err(reason) => {
+                return ValidationResult::Invalid { stage: ValidationStage::Attribution, reason };
+            }
+        };
+        // A name claim into an EMPTY slot is self-certifying: the record it
+        // writes is the one that would resolve its owner, and the schema stage
+        // already verified the identity JWT against the signing key. Any
+        // other write — including an update to an existing name — resolves
+        // its owner through state.
+        let self_certifying_claim = msg.owner.is_none()
+            && msg.creator.is_none()
+            && is_name_claim_path(&msg.path)
+            && matches!(msg.action, Action::Post)
+            && matches!(state.get_object(&msg.path, &msg.id), Ok(None));
+        if !self_certifying_claim {
+            if let Err(reason) = l2_authorize(msg, state, l2, &effective_owner) {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Attribution,
+                    reason,
+                };
+            }
         }
     }
 
@@ -616,6 +751,31 @@ pub fn validate_message(
         }
     }
 
+    // 2.7. Domain self-certification (Identity Spec §Domain Objects, Validation
+    // Rule 4). A `domain.v1` MAY carry DNSSEC self-certification; when the
+    // evidence is present it MUST verify at this block's inclusion time, and a
+    // domain whose self-certification is present but fails MUST be rejected.
+    // Absence of evidence falls back to a plain self-signed domain object.
+    // AUDIT-2026-11 D7: this used to be a warn-only check in the apply path.
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DOMAIN_SCHEMA) {
+        if let Err(reason) = check_domain_self_cert(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Attribution,
+                reason,
+            };
+        }
+    }
+
+    // 2.8. Monotonic `/sys/dnssec` refresh (AUDIT-2026-11 D33, Q16 (a)).
+    if matches!(msg.action, Action::Post) && msg.content_schema.as_deref() == Some(DNSSEC_SCHEMA) {
+        if let Err(reason) = check_dnssec_refresh_monotonic(msg, state, l2) {
+            return ValidationResult::Invalid {
+                stage: ValidationStage::Policy,
+                reason,
+            };
+        }
+    }
+
     // 3. Check if root policy exists (genesis check)
     // SECURITY: Fail closed if we can't determine root policy state
     let root_policy_status = check_root_policy_exists(state);
@@ -626,13 +786,22 @@ pub fn validate_message(
             reason: format!("Cannot verify root policy state: {}", e),
         };
     }
-    let root_policy_exists = matches!(root_policy_status, RootPolicyCheck::Exists);
+    // There is no genesis mode (Genesis Spec §Bootstrap Window; audit 2026-11
+    // D5/D23, Q7 (a)): with no root policy nothing is applied. The genesis
+    // prefix itself is validated structurally by `sbo_core::Genesis` in the
+    // sync path and never reaches this gate.
+    if !matches!(root_policy_status, RootPolicyCheck::Exists) {
+        return ValidationResult::Invalid {
+            stage: ValidationStage::Policy,
+            reason: "no root policy: nothing is valid before the genesis root policy (Q7 strict bootstrap)".to_string(),
+        };
+    }
 
     // 4. Handle based on action
     match &msg.action {
-        Action::Post => validate_post(msg, state, root_policy_exists, l2),
-        Action::Transfer { .. } => validate_transfer(msg, state, root_policy_exists, l2),
-        Action::Delete => validate_delete(msg, state, root_policy_exists, l2),
+        Action::Post => validate_post(msg, state, l2),
+        Action::Transfer { .. } => validate_transfer(msg, state, l2),
+        Action::Delete => validate_delete(msg, state, l2),
         Action::Import { .. } => {
             ValidationResult::Invalid {
                 stage: ValidationStage::State,
@@ -642,15 +811,84 @@ pub fn validate_message(
     }
 }
 
+/// Content-Schema of a repository root-of-trust domain object.
+const DOMAIN_SCHEMA: &str = "domain.v1";
+
+/// Resolve and verify a `domain.v1` write's DNSSEC self-certification
+/// (Identity Spec Validation Rule 4). The evidence is the message's own
+/// `Auth-Evidence` (`inline:` or `ref:<sbo-path>`), else the conventional
+/// `/sys/dnssec/<domain>` object as-of this block. `Ok(())` when no evidence
+/// resolves (plain self-signed domain); `Err` when evidence is present but
+/// cannot be verified — including when the block carries no inclusion time,
+/// since the RRSIG window cannot be checked (fail closed).
+fn check_domain_self_cert(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let domain = msg.id.as_str();
+    let evidence = match msg.auth_evidence.as_deref() {
+        Some(inline) if inline.starts_with("inline:") => {
+            Some(parse_auth_evidence(inline).map_err(|e| format!("Domain {domain}: bad inline Auth-Evidence: {e}"))?)
+        }
+        Some(reference) if reference.starts_with("ref:") => {
+            let target = reference.trim_start_matches("ref:");
+            Some(fetch_evidence_object(state, target).ok_or_else(|| {
+                format!("Domain {domain}: Auth-Evidence ref {target} does not resolve")
+            })?)
+        }
+        Some(other) => return Err(format!("Domain {domain}: unrecognized Auth-Evidence form: {other}")),
+        None => fetch_evidence_object(state, &format!("/sys/dnssec/{domain}")),
+    };
+    let Some(raw) = evidence else {
+        return Ok(());
+    };
+    let Some(t) = l2.inclusion_time else {
+        return Err(format!("Domain {domain}: self-certification present but block has no inclusion time"));
+    };
+    sbo_core::attribution::verify_domain_self_cert_with_anchors(
+        &msg.signing_key.to_string(),
+        &raw,
+        domain,
+        t,
+        &l2.anchors,
+    )
+    .map_err(|e| format!("Domain {domain}: self-certification failed: {e}"))
+}
+
+/// Content-Schema of a self-authorizing DNSSEC evidence object.
+const DNSSEC_SCHEMA: &str = "dnssec.v1";
+
+/// Monotonic `/sys/dnssec/<domain>` refresh (Q16 (a), audit 2026-11 D33): a
+/// `dnssec.v1` write that replaces an existing evidence object must not lower
+/// the incumbent's RRSIG expiration nor carry an older DNSKEY set. Both proofs
+/// are validated against the pinned anchors as of this block; an incumbent that
+/// no longer validates (e.g. a root rollover) does not block the refresh.
+fn check_dnssec_refresh_monotonic(msg: &Message, state: &dyn StateView, l2: &L2Context) -> Result<(), String> {
+    let Some(new_proof) = msg.payload.as_deref() else {
+        return Ok(()); // the schema/policy gates reject a payload-less dnssec.v1
+    };
+    let incumbent = match state.get_object(&msg.path, &msg.id) {
+        Ok(Some(o)) => o.payload,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("dnssec refresh: cannot read incumbent: {e}")),
+    };
+    let domain = msg.id.as_str();
+    let t = l2.inclusion_time;
+    let new_f = sbo_core::attribution::dnssec_proof_freshness(new_proof, domain, &l2.anchors, t)
+        .map_err(|e| format!("dnssec refresh for {domain}: new proof invalid: {e}"))?;
+    let Ok(old_f) = sbo_core::attribution::dnssec_proof_freshness(&incumbent, domain, &l2.anchors, t) else {
+        return Ok(());
+    };
+    sbo_core::attribution::check_dnssec_refresh_monotonic(&new_f, &old_f)
+        .map_err(|e| format!("dnssec refresh for {domain} rejected: {e}"))
+}
+
 /// Whether the root policy (`/sys/policies/root`) is present in `state`.
 ///
-/// When this is false, `validate_message` runs in "genesis mode" and accepts
-/// EVERY write with no policy enforcement. That is only correct before genesis
-/// has been applied; on any synced chain the root policy is posted at genesis
-/// and must be present. Callers use this to assert enforcement is active after
-/// genesis and catch a silent regression into genesis mode (see mingo-9vck /
-/// the Mode-B hardcoded-creator bug). Returns false on DB error (fail-closed:
-/// treat an unverifiable root policy as "assert the invariant loudly").
+/// When this is false the repository is still in its bootstrap window:
+/// `validate_message` refuses every write (there is no genesis mode, Q7 (a))
+/// and only a structurally valid genesis submission at the anchor can leave
+/// the window (`crate::sync`). On any synced chain the root policy is posted
+/// at genesis and must be present; callers assert that at startup (see
+/// mingo-9vck). Returns false on DB error (fail-closed: treat an unverifiable
+/// root policy as "assert the invariant loudly").
 pub fn root_policy_present(state: &dyn StateView) -> bool {
     matches!(check_root_policy_exists(state), RootPolicyCheck::Exists)
 }
@@ -678,9 +916,8 @@ fn check_root_policy_exists(state: &dyn StateView) -> RootPolicyCheck {
     // whatever form the sys identity resolves to — a bare name ("sys") for a
     // key-rooted genesis, but an email ("sys@<domain>") for a domain-certified
     // (Mode B) genesis. Hardcoding creator "sys" here would miss the email-rooted
-    // case and silently drop the daemon into genesis mode (no policy enforcement
-    // at all). The object's existence is what gates genesis mode; its creator is
-    // irrelevant to that question.
+    // case and refuse every write on a Mode B chain. The object's existence is
+    // what closes the bootstrap window; its creator is irrelevant.
     match state.get_object(&path, &id) {
         Ok(Some(_)) => RootPolicyCheck::Exists,
         Ok(None) => RootPolicyCheck::DoesNotExist,
@@ -692,7 +929,6 @@ fn check_root_policy_exists(state: &dyn StateView) -> RootPolicyCheck {
 fn validate_post(
     msg: &Message,
     state: &dyn StateView,
-    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
     // Name-claim paths carry a dedicated authorization flow: the primary-domain
@@ -701,11 +937,14 @@ fn validate_post(
     // general `(path, id)` point lookup below — but the name-specific
     // authorization is retained (Authorization Spec §Name-claim anti-hijack).
     if is_name_claim_path(&msg.path) {
-        return validate_name_claim(msg, state, root_policy_exists, l2);
+        return validate_name_claim(msg, state, l2);
     }
 
     // Get the creator (use name resolution if available)
-    let creator = resolve_creator(msg, Some(state), l2);
+    let creator = match resolve_creator(msg, Some(state), l2) {
+        Ok(c) => c,
+        Err(reason) => return ValidationResult::Invalid { stage: ValidationStage::Attribution, reason },
+    };
 
     // Look up the object occupying the globally-unique `(path, id)` slot. Global
     // uniqueness makes this a point lookup: an occupied slot means this write is
@@ -725,18 +964,14 @@ fn validate_post(
     };
 
     // Installing/replacing a governing policy is a `govern` action authorized by
-    // the PARENT policy, not by ordinary create/update grants and NOT by the
-    // owner fast-path — otherwise any `create` grant (or owning the policy slot)
-    // would let a signer plant a shadowing policy and capture the subtree. Genesis
-    // (no root policy yet) still bootstraps freely.
+    // the PARENT policy, not by ordinary create/update grants and never by
+    // ownership — otherwise any `create` grant (or owning the policy slot)
+    // would let a signer plant a shadowing policy and capture the subtree.
     if is_policy_write(msg) {
-        if !root_policy_exists {
-            tracing::debug!("Allowing policy write without root policy (genesis mode)");
-        } else if let Err(reason) = require_govern(state, msg, l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason),
-            };
+        if let Err(e) = require_govern(state, msg, l2) {
+            return e.into_invalid(|reason| {
+                format!("Policy write requires `govern` on {} (from parent policy): {}", msg.path, reason)
+            });
         } else if let Err(reason) = check_policy_delegation(state, msg) {
             // P2/P3/P4 delegation terms: version pin rules, descendant-constraint
             // template, and the no-pin restriction.
@@ -748,41 +983,104 @@ fn validate_post(
         return ValidationResult::Valid { creator: creator.to_string() };
     }
 
-    if let Some(existing_obj) = existing {
-        // Slot occupied - this is an update. Authorize the signer against the
-        // object's *resolved controller* (its stored `owner_ref`), not the legacy
-        // signer-key `owner`: a direct key match for key-rooted owners, browserid
-        // attribution for email-rooted owners. The controller can always update
-        // their own object; anyone else must be granted `update` by policy (which
-        // also covers the "create into a slot held by a different creator" case —
-        // it is an unauthorized update and is rejected).
-        let owner_ref = stored_owner_ref(&existing_obj);
-        if l2_authorize(msg, state, l2, owner_ref).is_ok() {
-            tracing::debug!("Controller updating object {}:{}", msg.path, msg.id);
-        } else {
-            // Signer is not the controller - must check policy for update.
-            if let Err(reason) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
-                return ValidationResult::Invalid {
-                    stage: ValidationStage::Policy,
-                    reason,
-                };
-            }
+    // A collection descriptor (`_config`) sets the collection's `W`, which
+    // widens the authoring instant every attributed write in the collection is
+    // judged at. Writing it is therefore a governance act (Content spec
+    // "Writing `_config` needs an explicit grant"; D22 / Q9 (a)): the
+    // governing policy must grant it EXPLICITLY -- a `govern` grant on the
+    // collection, or a grant whose `id` names `_config` -- never an ordinary
+    // `create`/`update` grant that happens to cover the path, and never by
+    // ownership alone.
+    if is_collection_config_write(msg) {
+        if let Err(e) = check_collection_config_grant(state, msg, existing.as_ref(), l2) {
+            return e.into_invalid(|reason| {
+                format!(
+                    "Collection descriptor write requires an explicit grant (`govern`, or `id: \"_config\"`) on {}: {}",
+                    msg.path, reason
+                )
+            });
         }
-    } else if !root_policy_exists {
-        // No root policy yet - this might be genesis
-        // Allow any post since we're bootstrapping
-        tracing::debug!("Allowing post without root policy (genesis mode)");
-    } else {
-        // New object creation into an empty slot - must check policy
-        if let Err(reason) = check_policy(state, msg, ActionType::Create, None, l2) {
+        return ValidationResult::Valid { creator: creator.to_string() };
+    }
+
+    if let Some(existing_obj) = existing {
+        // `Policy-Ref` may be set or changed only by the object's creator (Core
+        // spec; D12). Anyone else -- the controller included -- may update the
+        // object but must leave its policy reference alone.
+        if msg.policy_ref != existing_obj.policy_ref && creator != existing_obj.creator {
             return ValidationResult::Invalid {
                 stage: ValidationStage::Policy,
-                reason,
+                reason: format!(
+                    "Policy-Ref may only be set or changed by the object's creator {} (signer acts as {})",
+                    existing_obj.creator, creator
+                ),
             };
+        }
+        // Slot occupied - this is an update. The governing policy decides for
+        // EVERY principal, the object's controller included (Q13 (a) / D57,
+        // sbo-2jtp): `deny` and `restrictions` bind the owner, and the owner is
+        // admitted by a `to: owner` grant — `evaluate_policy_for` sets
+        // `signer_is_owner` from the signer's control of the stored
+        // `owner_ref` (a direct key match for key-rooted owners, browserid
+        // attribution for email-rooted ones). There is no fast-path. A `create`
+        // into a slot held by someone else lands here too and is an
+        // unauthorized update unless policy grants it.
+        let owner_ref = stored_owner_ref(&existing_obj);
+        if let Err(e) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
+            return e.into_invalid(|r| r.to_string());
+        }
+    } else {
+        // New object creation into an empty slot - must check policy
+        if let Err(e) = check_policy(state, msg, ActionType::Create, None, l2) {
+            return e.into_invalid(|r| r.to_string());
         }
     }
 
     ValidationResult::Valid { creator: creator.to_string() }
+}
+
+/// Whether this write installs or replaces a collection descriptor
+/// (`<path>/_config`), the object `collection_max_lag_ms` reads `W` from.
+fn is_collection_config_write(msg: &Message) -> bool {
+    msg.id.as_str() == sbo_core::schema::COLLECTION_CONFIG_ID
+}
+
+/// Authorize a `_config` write by an EXPLICIT grant only: `govern` on the
+/// collection, or the collection's `create`/`update` evaluated against only
+/// those grants whose `id` pattern is the literal `_config` (a wildcard or
+/// absent `id` is not explicit). Restrictions and `deny` still apply in the
+/// second form, since it runs through the ordinary evaluator.
+fn check_collection_config_grant(
+    state: &dyn StateView,
+    msg: &Message,
+    existing: Option<&StoredObject>,
+    l2: &L2Context,
+) -> Result<(), PolicyError> {
+    let govern = match check_policy(state, msg, ActionType::Govern, None, l2) {
+        Ok(()) => return Ok(()),
+        Err(e @ PolicyError::State(_)) => return Err(e),
+        Err(PolicyError::Denied(reason)) => reason,
+    };
+    let policy = match state.resolve_policy(&msg.path) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err(PolicyError::Denied("No applicable policy found".to_string())),
+        Err(e) => return Err(PolicyError::State(format!("Error resolving policy: {e}"))),
+    };
+    let mut explicit = policy.clone();
+    explicit.grants.retain(|g| {
+        // `IdPattern` serializes transparently as its pattern string.
+        serde_json::to_value(&g.id).ok().and_then(|v| v.as_str().map(|s| s == sbo_core::schema::COLLECTION_CONFIG_ID)).unwrap_or(false)
+    });
+    if explicit.grants.is_empty() {
+        return Err(PolicyError::Denied(format!(
+            "no `govern` grant ({govern}) and no grant with `id: \"_config\"`"
+        )));
+    }
+    let (action, owner) = match existing {
+        Some(obj) => (ActionType::Update, Some(stored_owner_ref(obj))),
+        None => (ActionType::Create, None),
+    };
+    evaluate_policy_for(state, msg, &explicit, &msg.path, action, owner, l2)
 }
 
 /// Whether `path` is a name-claim path (`/sys/names/…`), which carries the
@@ -796,10 +1094,11 @@ fn is_name_claim_path(path: &SboPath) -> bool {
 /// point lookup, no per-creator scan); what remains name-specific is the
 /// authorization: a new claim on a primary-domain repo must control the mapped
 /// email (anti-hijack), and an update is controller-only (no policy override).
+/// On top of that the governing policy is evaluated for both creates and
+/// updates (Q14 (a) / D56), so name claims are not policy-free.
 fn validate_name_claim(
     msg: &Message,
     state: &dyn StateView,
-    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
     // The object occupying this `(path, id)` slot, if any (a point lookup —
@@ -830,6 +1129,13 @@ fn validate_name_claim(
                 reason: format!("Name '{}' already claimed by {}: {}", msg.id.as_str(), owner_ref, reason),
             };
         }
+        // The governing policy is evaluated as well (Q14 (a) / D56): a name
+        // record is an ordinary object under policy, so `deny` and
+        // `not_attested` on `/sys/names/**` bind the controller too. The
+        // controller satisfies a `to: owner` grant via `signer_is_owner`.
+        if let Err(e) = check_policy(state, msg, ActionType::Update, Some(owner_ref), l2) {
+            return e.into_invalid(|r| r.to_string());
+        }
         tracing::debug!("Controller updating name claim: {}", msg.id.as_str());
     } else {
         // New name claim. On a primary-domain repo a local name `<local>` governs
@@ -838,21 +1144,25 @@ fn validate_name_claim(
         // front-runner) could hijack it. This anti-hijack layers ON TOP of the
         // global first-valid-write-wins uniqueness rule: policy makes the slot
         // claimable only by the rightful email; uniqueness makes the first valid
-        // claim final. Off a primary-domain repo, or during genesis (no root
-        // policy yet), name claims remain first-come.
-        if root_policy_exists {
-            if let Some(domain) = primary_domain(state) {
-                let email = format!("{}@{}", claimed_name, domain);
-                if let Err(reason) = l2_authorize(msg, state, l2, &email) {
-                    return ValidationResult::Invalid {
-                        stage: ValidationStage::Attribution,
-                        reason: format!(
-                            "Name '{}' maps to {} on this repo; claiming it requires controlling that identity: {}",
-                            claimed_name, email, reason
-                        ),
-                    };
-                }
+        // claim final. Off a primary-domain repo name claims remain first-come.
+        if let Some(domain) = primary_domain(state) {
+            let email = format!("{}@{}", claimed_name, domain);
+            if let Err(reason) = l2_authorize(msg, state, l2, &email) {
+                return ValidationResult::Invalid {
+                    stage: ValidationStage::Attribution,
+                    reason: format!(
+                        "Name '{}' maps to {} on this repo; claiming it requires controlling that identity: {}",
+                        claimed_name, email, reason
+                    ),
+                };
             }
+        }
+        // After the anti-hijack check, the governing policy decides whether
+        // this signer may create under `/sys/names/` at all (Q14 (a) / D56):
+        // root-policy grants, `deny` and `not_attested` bans apply to name
+        // claims exactly as to any other create.
+        if let Err(e) = check_policy(state, msg, ActionType::Create, None, l2) {
+            return e.into_invalid(|r| r.to_string());
         }
         tracing::debug!("New name claim: {}", msg.id.as_str());
     }
@@ -864,16 +1174,8 @@ fn validate_name_claim(
 fn validate_transfer(
     msg: &Message,
     state: &dyn StateView,
-    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
-    if !root_policy_exists {
-        return ValidationResult::Invalid {
-            stage: ValidationStage::State,
-            reason: "Cannot transfer before genesis".to_string(),
-        };
-    }
-
     // Locate the TARGET object. The actor is the signer; the object is named by
     // (path, id). Prefer the signer's own object at that path+id (the common
     // owner case); otherwise fall back to the sole object there regardless of
@@ -911,37 +1213,41 @@ fn validate_transfer(
     let is_delete = matches!(msg.action, sbo_core::message::Action::Delete)
         || new_owner.as_deref() == Some("null:");
 
-    // (A) SOURCE AUTHORIZATION. Deleting or relocating a governing POLICY object
-    // is a `govern` action: authorized by the PARENT policy, never the owner
-    // fast-path — so an ancestor with `govern` can always reclaim a delegated
-    // subtree (reversibility), and owning a policy cannot be used to transfer it
-    // out of governance. Ordinary objects keep the owner-or-policy rule below.
-    if is_policy_object(&obj) {
-        if let Err(reason) = require_govern(state, msg, l2) {
+    // `New-Owner` is an identity reference: a name or an email (or the `null:`
+    // delete sentinel); a bare key is not one (Q6 / sbo-yd72).
+    if let Some(no) = new_owner.as_deref() {
+        if is_bare_key_reference(no) {
             return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!(
+                stage: ValidationStage::Attribution,
+                reason: format!("New-Owner '{no}' is a bare key; an owner is a name or an email"),
+            };
+        }
+    }
+
+    // (A) SOURCE AUTHORIZATION. Deleting or relocating a governing POLICY object
+    // is a `govern` action: authorized by the PARENT policy, never by ownership
+    // — so an ancestor with `govern` can always reclaim a delegated subtree
+    // (reversibility), and owning a policy cannot be used to transfer it out of
+    // governance. Ordinary objects are decided by the source path's policy for
+    // every principal, the owner included (Q13 (a) / D57 / D25, sbo-2jtp): a
+    // `deny` bridge lock holds against the owner, and the owner is admitted by
+    // a `to: owner` grant through `signer_is_owner`. No fast-path.
+    if is_policy_object(&obj) {
+        if let Err(e) = require_govern(state, msg, l2) {
+            return e.into_invalid(|reason| {
+                format!(
                     "{:?} of policy object {} requires `govern` (from parent policy): {}",
                     if is_delete { ActionType::Delete } else { ActionType::Transfer },
                     msg.path, reason
-                ),
-            };
+                )
+            });
         }
-    } else if l2_authorize(msg, state, l2, &owner_ref).is_err() {
-        // The current owner may always act on the object; otherwise the object's
-        // (source-path) policy must grant the action to the signer. This is the
-        // "unless allowed by the object's policy" clause in SBO
-        // Specification.md §transfer, and is how a sys/admin role (granted
-        // `transfer`/`delete` on `/**`) acts on objects it does not own.
+    } else {
         let action = if is_delete { ActionType::Delete } else { ActionType::Transfer };
-        if let Err(reason) = check_policy(state, msg, action, Some(&owner_ref), l2) {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!(
-                    "Signer does not control owner {} and policy denies {:?}: {}",
-                    owner_ref, action, reason
-                ),
-            };
+        if let Err(e) = check_policy(state, msg, action, Some(&owner_ref), l2) {
+            return e.into_invalid(|reason| {
+                format!("Policy denies {:?} on {} (owner {}): {}", action, msg.path, owner_ref, reason)
+            });
         }
     }
 
@@ -987,13 +1293,12 @@ fn validate_transfer(
         // so a move into `/u/$owner/**` succeeds when the object lands in its
         // owner's namespace, for both self-moves and admin filing.
         let owner_after = new_owner.clone().unwrap_or_else(|| owner_ref.clone());
-        if let Err(reason) =
+        if let Err(e) =
             check_policy_at(state, msg, &dest_path, ActionType::Create, Some(&owner_after), l2)
         {
-            return ValidationResult::Invalid {
-                stage: ValidationStage::Policy,
-                reason: format!("Destination {} does not admit object: {}", dest_path, reason),
-            };
+            return e.into_invalid(|reason| {
+                format!("Destination {} does not admit object: {}", dest_path, reason)
+            });
         }
     }
 
@@ -1004,11 +1309,10 @@ fn validate_transfer(
 fn validate_delete(
     msg: &Message,
     state: &dyn StateView,
-    root_policy_exists: bool,
     l2: &L2Context,
 ) -> ValidationResult {
     // Same rules as transfer
-    validate_transfer(msg, state, root_policy_exists, l2)
+    validate_transfer(msg, state, l2)
 }
 
 /// The controller reference an existing object is owned by: its stored
@@ -1073,6 +1377,7 @@ mod dnssec_repro_tests {
 
         // A garbage, key-rooted /sys/dnssec/<domain> write.
         let key = SigningKey::generate();
+        register_name(&db, &key);
         let payload = b"garbage-not-a-proof".to_vec();
         let mut msg = Message {
             action: Action::Post,
@@ -1093,7 +1398,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
 
@@ -1162,6 +1467,7 @@ mod dnssec_repro_tests {
         let db = StateDb::open(dir.path()).unwrap();
 
         let owner_key = SigningKey::generate();
+        register_name(&db, &owner_key);
         let owner_ref = owner_key.public_key().to_string();
 
         // Owner-can-always-act root policy (owner has * on their own subtree).
@@ -1226,7 +1532,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&owner_key);
 
@@ -1271,6 +1577,38 @@ mod dnssec_repro_tests {
         }).unwrap();
     }
 
+    /// A deterministic local name for a test key (every write names an owner
+    /// that is a name or an email; audit 2026-11 Q6).
+    fn name_for(key: &SigningKey) -> String {
+        let pk = key.public_key().to_string();
+        format!("n{}", &pk.trim_start_matches("ed25519:")[..12])
+    }
+
+    /// Register a key-rooted `identity.v1` record for `key` under `name`.
+    fn register_name_as(db: &StateDb, name: &str, key: &SigningKey) {
+        let jwt = sbo_core::jwt::create_self_signed_identity(key, name, None).unwrap();
+        db.put_object(&StoredObject {
+            path: SboPath::parse("/sys/names/").unwrap(),
+            id: Id::new(name).unwrap(),
+            creator: Id::new(name).unwrap(),
+            owner: Id::new(name).unwrap(),
+            content_type: "application/jwt".to_string(),
+            content_hash: ContentHash::sha256(jwt.as_bytes()),
+            payload: jwt.into_bytes(),
+            policy_ref: None, related: None,
+            content_schema: Some("identity.v1".to_string()),
+            owner_ref: Some(name.to_string()),
+            block_number: 1,
+            object_hash: [9u8; 32],
+            hlc: None,
+            prev: None,
+        }).unwrap();
+    }
+
+    fn register_name(db: &StateDb, key: &SigningKey) {
+        register_name_as(db, &name_for(key), key);
+    }
+
     fn policy_write_msg(key: &SigningKey, path: &str, policy_json: serde_json::Value) -> Message {
         let payload = serde_json::to_vec(&policy_json).unwrap();
         let mut msg = Message {
@@ -1283,7 +1621,7 @@ mod dnssec_repro_tests {
             content_type: Some("application/json".to_string()),
             content_hash: Some(ContentHash::sha256(&payload)),
             payload: Some(payload),
-            owner: None,
+            owner: Some(Id::new(&name_for(key)).unwrap()),
             creator: None,
             content_encoding: None,
             content_schema: Some("policy.v2".to_string()),
@@ -1292,7 +1630,7 @@ mod dnssec_repro_tests {
             prev: None,
             auth_cert: None,
             auth_evidence: None,
-            auth_warrant: None,
+            auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(key);
         msg
@@ -1308,6 +1646,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let sys = SigningKey::generate();
+        register_name(&db, &sys);
         install_root_with_admin_govern(&db, &sys.public_key().to_string());
 
         // Community policy: anyone may CREATE under spaces/** (no govern).
@@ -1318,6 +1657,7 @@ mod dnssec_repro_tests {
 
         // A member (random key) plants a self-serving policy under spaces/**.
         let member = SigningKey::generate();
+        register_name(&db, &member);
         let evil = serde_json::json!({
             "grants": [{ "to": "*", "can": ["*"], "on": "/communities/cooks/spaces/**" }]
         });
@@ -1342,6 +1682,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let sys = SigningKey::generate();
+        register_name(&db, &sys);
         install_root_with_admin_govern(&db, &sys.public_key().to_string());
 
         let comm = serde_json::json!({
@@ -1361,6 +1702,7 @@ mod dnssec_repro_tests {
 
         // A stranger cannot.
         let stranger = SigningKey::generate();
+        register_name(&db, &stranger);
         let bad = policy_write_msg(&stranger, "/communities/cooks/", comm);
         match validate_message(&bad, &db, std::path::Path::new("/tmp"), &l2) {
             ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
@@ -1380,8 +1722,14 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
 
-        let issuer = SigningKey::generate().public_key().to_string();
-        let subject = SigningKey::generate().public_key().to_string();
+        // Issuer and subject are NAMED identities (bare keys are not identity
+        // references, Q6): key-rooted records under /sys/names/.
+        let issuer_key = SigningKey::generate();
+        let subject_key = SigningKey::generate();
+        register_name_as(&db, "cooks", &issuer_key);
+        register_name_as(&db, "alice", &subject_key);
+        let issuer = "cooks".to_string();
+        let subject = "alice".to_string();
 
         // The moderator attestation, stored under /u/<issuer>/attestations/ (NOT
         // the bare /<issuer>/ the old prefix scan assumed).
@@ -1414,15 +1762,17 @@ mod dnssec_repro_tests {
         let requester = resolve_controller(&subject, &name_lookup(&db), DEFAULT_HOP_LIMIT, None);
         let source = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(issuer.clone()) };
         assert!(
-            attested_subject_matches(&db, &l2, &requester, &source),
+            attested_subject_matches(&db, &l2, &requester, &source).unwrap(),
             "by-qualified moderator attestation under /u/ must resolve"
         );
 
         // A different issuer must NOT match (the per-candidate issuer filter still bites).
-        let other = SigningKey::generate().public_key().to_string();
+        let other_key = SigningKey::generate();
+        register_name_as(&db, "bob", &other_key);
+        let other = "bob".to_string();
         let wrong = AttestedSource { type_: "role:moderator:cooks".to_string(), by: Some(other) };
         assert!(
-            !attested_subject_matches(&db, &l2, &requester, &wrong),
+            !attested_subject_matches(&db, &l2, &requester, &wrong).unwrap(),
             "an attestation by a different issuer must not satisfy the role"
         );
     }
@@ -1522,6 +1872,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
+        register_name(&db, &board);
         let root_hash = install_root(&db, &root_policy(&board.public_key().to_string(), true), 1);
         let l2 = L2Context::for_block(Some(1_700_000_000), &db);
 
@@ -1560,6 +1911,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
+        register_name(&db, &board);
         let bk = board.public_key().to_string();
 
         // Root V1 grants board govern; community pins root@V1.
@@ -1589,6 +1941,7 @@ mod dnssec_repro_tests {
         // Control: an UNPINNED community tracks latest V2 → board govern is gone → denied.
         let dir2 = tempfile::tempdir().unwrap();
         let db2 = StateDb::open(dir2.path()).unwrap();
+        register_name(&db2, &board);
         install_root(&db2, &root_policy(&bk, true), 1);
         let unpinned = community_policy(None);
         index_policy(&db2, "/communities/cooks/", "root", "board", &unpinned, 2);
@@ -1601,13 +1954,20 @@ mod dnssec_repro_tests {
         }
     }
 
-    // P2 — a snapshot round-trip carries the pinned historical version, so a
-    // fast-synced node authorizes a write under the pinned child.
+    // P2 under fast-sync after AUDIT-2026-11 D27 (Q12 (a), `sbo-syib`): a
+    // snapshot's `policy_versions` are reconstructed from covered objects only,
+    // so a pinned version whose ancestor has since moved on is NOT carried — the
+    // fast-synced node fails closed (denies the pinned child's governed write)
+    // instead of trusting the serving node's copy of frozen governance. This
+    // test used to assert the opposite (an unverified carry); a full replay, or
+    // a future snapshot format carrying the raw pinned payload bytes, restores
+    // the authorization.
     #[test]
-    fn p2_snapshot_roundtrip_authorizes_pinned_child() {
+    fn p2_snapshot_roundtrip_drops_uncovered_pinned_version() {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
+        register_name(&db, &board);
         let bk = board.public_key().to_string();
 
         let root_v1_hash = install_root(&db, &root_policy(&bk, true), 1);
@@ -1625,16 +1985,21 @@ mod dnssec_repro_tests {
 
         let dir2 = tempfile::tempdir().unwrap();
         let db2 = StateDb::open(dir2.path()).unwrap();
+        register_name(&db2, &board);
         crate::bootstrap::verify_and_load_payload(&db2, &payload, root).unwrap();
 
-        // On the fast-synced node the board updates the pinned community policy → authorized.
+        // The pinned V1 is no longer a covered object (root moved on), so the
+        // fast-synced node does not carry it …
+        assert!(db2.get_policy_version(&comm.pin.as_ref().unwrap().hash).unwrap().is_none());
+        // … and the board's governed update under the pinned child is denied
+        // (fail closed), not authorized from an unverifiable version.
         let comm2 = community_policy(comm.pin.clone());
         let l2 = L2Context::for_block(Some(1_700_000_000), &db2);
         let update = policy_write_msg(&board, "/communities/cooks/", serde_json::to_value(&comm2).unwrap());
-        assert!(
-            matches!(validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2), ValidationResult::Valid { .. }),
-            "fast-synced node must authorize a write under a pinned child using the snapshotted version"
-        );
+        match validate_message(&update, &db2, std::path::Path::new("/tmp"), &l2) {
+            ValidationResult::Invalid { stage, .. } => assert_eq!(stage, ValidationStage::Policy),
+            ValidationResult::Valid { .. } => panic!("an uncovered pinned version must not authorize on a fast-synced node"),
+        }
     }
 
     // P3 — a child grant exceeding the parent's descendant-constraint template is
@@ -1644,6 +2009,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
+        register_name(&db, &board);
         let bk = board.public_key().to_string();
 
         // Root grants board govern broadly + a descendant-constraint template that
@@ -1713,6 +2079,7 @@ mod dnssec_repro_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let board = SigningKey::generate();
+        register_name(&db, &board);
         let bk = board.public_key().to_string();
 
         let root: Policy = serde_json::from_value(serde_json::json!({
@@ -1762,7 +2129,7 @@ fn check_policy(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     check_policy_at(state, msg, &msg.path, action, owner, l2)
 }
 
@@ -1776,7 +2143,7 @@ fn check_policy_at(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     check_policy_resolving_at(state, msg, target, target, action, owner, l2)
 }
 
@@ -1815,7 +2182,7 @@ fn is_policy_object(obj: &StoredObject) -> bool {
 /// fast-path is deliberately NOT consulted here — owning a policy object must not
 /// let you rewrite/relocate it without `govern`, else first-writer-owns would
 /// re-introduce self-governing capture.
-fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), String> {
+fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Result<(), PolicyError> {
     // Pin-aware (P2): a pinned policy's governance resolves against the version
     // its EXISTING object pinned, so a later ancestor amendment cannot reach in
     // (the sovereignty property). Unpinned/create → the current latest parent.
@@ -1835,12 +2202,12 @@ fn require_govern(state: &dyn StateView, msg: &Message, l2: &L2Context) -> Resul
 fn governing_parent_policy(
     state: &dyn StateView,
     msg: &Message,
-) -> Result<(sbo_core::policy::Policy, String), String> {
+) -> Result<(sbo_core::policy::Policy, String), PolicyError> {
     let parent = parent_container_path(&msg.path);
     let parent_entry = match state.resolve_policy_entry(&parent) {
         Ok(Some(e)) => e,
-        Ok(None) => return Err("No applicable parent policy found".to_string()),
-        Err(e) => return Err(format!("Error resolving parent policy: {e}")),
+        Ok(None) => return Err(PolicyError::Denied("No applicable parent policy found".to_string())),
+        Err(e) => return Err(PolicyError::State(format!("Error resolving parent policy: {e}"))),
     };
     let latest_hash = parent_entry.content_hash.clone();
 
@@ -1955,18 +2322,18 @@ fn check_policy_resolving_at(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     // Resolve the applicable policy by walking up the path hierarchy
     let policy = match state.resolve_policy(resolve_at) {
         Ok(Some(p)) => p,
         Ok(None) => {
             // No policy found - deny by default
             // This shouldn't happen if root policy exists, but fail closed
-            return Err("No applicable policy found".to_string());
+            return Err(PolicyError::Denied("No applicable policy found".to_string()));
         }
         Err(e) => {
             tracing::error!("Error resolving policy: {}", e);
-            return Err(format!("Error resolving policy: {}", e));
+            return Err(PolicyError::State(format!("Error resolving policy: {}", e)));
         }
     };
     evaluate_policy_for(state, msg, &policy, match_target, action, owner, l2)
@@ -1985,10 +2352,11 @@ fn evaluate_policy_for(
     action: ActionType,
     owner: Option<&str>,
     l2: &L2Context,
-) -> Result<(), String> {
+) -> Result<(), PolicyError> {
     let target = match_target;
-    // Resolve the actor's identity (name if available, otherwise key-based)
-    let actor = resolve_creator(msg, Some(state), l2);
+    // Resolve the actor's identity (Creator, attributed email, name, Owner).
+    let actor = resolve_creator(msg, Some(state), l2)
+        .map_err(|e| PolicyError::Denied(format!("cannot resolve the acting identity: {e}")))?;
     let target_path = target.to_string();
 
     // The `$owner` reference (literal, never path-derived): the existing object's
@@ -2028,7 +2396,19 @@ fn evaluate_policy_for(
         Some(email) => Controller::Email(email),
         None => Controller::Key(msg.signing_key.to_string()),
     };
-    let is_attested = |source: &AttestedSource| attested_subject_matches(state, l2, &requester, source);
+    // A failed state read while answering an attestation question is recorded
+    // here and turned into a `State` error after evaluation (D11): the policy
+    // engine's callback is a plain bool, so the error cannot travel through it.
+    // The bool returned for a failed read is irrelevant -- the write is refused
+    // either way -- `false` just keeps `attested` roles from matching.
+    let attestation_read_error: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let is_attested = |source: &AttestedSource| match attested_subject_matches(state, l2, &requester, source) {
+        Ok(matched) => matched,
+        Err(e) => {
+            attestation_read_error.borrow_mut().get_or_insert(e);
+            false
+        }
+    };
 
     // The repo's primary domain scopes resolution-based name matching in the
     // evaluator: a bare grant name `<local>` resolves to `<local>@<primary_domain>`,
@@ -2036,8 +2416,27 @@ fn evaluate_policy_for(
     // (no/ambiguous domain) keeps bare-name matching literal.
     let pd = primary_domain(state);
 
-    // Evaluate the policy
-    match evaluate(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, msg, pd.as_deref()) {
+    // The signing key an on-chain object publishes, for
+    // `require_payload_signed_by` (D24): a `/sys/domains/<d>` object's key is
+    // the `public_key` of its self-signed `domain.v1` JWT, taken only after that
+    // JWT verifies.
+    let signer_key = |path: &sbo_core::message::Path, id: &Id| -> Option<sbo_core::crypto::PublicKey> {
+        let obj = state.get_object(path, id).ok()??;
+        let token = std::str::from_utf8(&obj.payload).ok()?;
+        let claims = sbo_core::jwt::verify_domain(token).ok()?;
+        sbo_core::crypto::PublicKey::parse(&claims.public_key).ok()
+    };
+
+    // Evaluate the policy. The pinned DNS root anchors (and this block's
+    // inclusion time) reach the `dnssec_proof` restriction through here
+    // (AUDIT-2026-11 D6).
+    let dns = sbo_core::policy::DnssecContext { anchors: &l2.anchors, at: l2.inclusion_time };
+    let outcome = evaluate_with_dnssec(policy, &actor, action, &target_path, &policy_vars, signer_is_owner, &is_attested, &signer_key, msg, pd.as_deref(), Some(&dns));
+    if let Some(e) = attestation_read_error.into_inner() {
+        tracing::error!("Cannot evaluate attestation condition for {:?} on {}: {}", action, target_path, e);
+        return Err(PolicyError::State(format!("Cannot evaluate attestation condition: {e}")));
+    }
+    match outcome {
         PolicyResult::Allowed => {
             tracing::debug!(
                 "Policy allowed {:?} on {} by {}",
@@ -2055,7 +2454,7 @@ fn evaluate_policy_for(
                 actor,
                 reason
             );
-            Err(reason)
+            Err(PolicyError::Denied(reason))
         }
     }
 }
@@ -2076,19 +2475,27 @@ fn evaluate_policy_for(
 /// `by`-qualified role — moderators — and every `not_attested{by}` ban). All
 /// inputs are on-chain and inclusion-time-pinned, so the decision is
 /// deterministic on replay.
+///
+/// A failed state read is an `Err` (D11): the caller refuses the write rather
+/// than treating an unreadable attestation set as "no attestation".
 fn attested_subject_matches(
     state: &dyn StateView,
     l2: &L2Context,
     requester: &Controller,
     source: &AttestedSource,
-) -> bool {
+) -> Result<bool, String> {
     let lookup = name_lookup(state);
     let pd = primary_domain(state);
-    let t = l2.inclusion_time.unwrap_or(0);
+    // Whether an attestation is in force is a function of the block's inclusion
+    // time; without it the question has no answer, and guessing `t = 0` would
+    // lift every ban (D28). Fail closed.
+    let t = l2
+        .inclusion_time
+        .ok_or_else(|| "block inclusion time unknown: attestations cannot be evaluated".to_string())?;
     let candidates = state
         .list_objects_by_schema("attestation.v1")
-        .unwrap_or_default();
-    candidates.into_iter().any(|obj| {
+        .map_err(|e| format!("cannot list attestations: {e}"))?;
+    Ok(candidates.into_iter().any(|obj| {
         if obj.content_schema.as_deref() != Some("attestation.v1") {
             return false;
         }
@@ -2113,7 +2520,7 @@ fn attested_subject_matches(
             }
         }
         resolve_controller(&att.subject, &lookup, DEFAULT_HOP_LIMIT, pd.as_deref()) == *requester
-    })
+    }))
 }
 
 /// Create a StoredObject from a Message
@@ -2144,15 +2551,29 @@ pub fn message_to_stored_object(
     // *valid update* (creator preserved → same creator → LWW) — see
     // `state_view::merge`. Recomputing creator per-write would flip the stored
     // creator on a self-auth refresh and cause the overlay to drop it.
-    let creator = match state.and_then(|s| s.get_object(&msg.path, &msg.id).ok().flatten()) {
-        Some(existing) => existing.creator,
-        None => resolve_creator(msg, state, l2),
+    let existing = state.and_then(|s| s.get_object(&msg.path, &msg.id).ok().flatten());
+    // A message with no resolvable author is invalid (validation refused it);
+    // there is no sentinel to store in its place.
+    let author = resolve_creator(msg, state, l2).ok()?;
+    let creator = match &existing {
+        Some(existing) => existing.creator.clone(),
+        None => author.clone(),
+    };
+    // `Policy-Ref` is the creator's to set or change (Core spec; D12). On an
+    // update by anyone else the stored reference is carried forward unchanged
+    // -- validation already refuses a differing header from a non-creator, this
+    // keeps the stored object right even for a caller that skipped it.
+    let policy_ref = match &existing {
+        Some(existing) if author != existing.creator => existing.policy_ref.clone(),
+        _ => msg.policy_ref.clone(),
     };
 
-    // Legacy signer-key owner record (retained for objects/proofs that still
-    // read it). Ownership checks key off `owner_ref` (the resolved controller).
-    let owner = Id::new(&msg.signing_key.to_string())
-        .unwrap_or_else(|_| Id::new("unknown").unwrap());
+    // The effective owner reference (Owner → else Creator; a self-certifying
+    // name claim owns itself). Validation refused a write with none.
+    let owner_ref = effective_owner_ref(msg).ok()?;
+    // Legacy `owner` record: the same reference as an `Id` (an email or a
+    // name), never a key and never a sentinel (D16/D55).
+    let owner = Id::new(&owner_ref).unwrap_or_else(|_| creator.clone());
 
     Some(StoredObject {
         path: msg.path.clone(),
@@ -2162,17 +2583,17 @@ pub fn message_to_stored_object(
         content_type: content_type.clone(),
         content_hash: content_hash.clone(),
         payload: payload.clone(),
-        policy_ref: msg.policy_ref.clone(),
+        policy_ref,
         // Descriptive only (Wire Format Spec §Related Objects): carried so
         // readers see an object's declared references without re-parsing raw
         // wire. `ref` is NOT resolved or checked to exist, and nothing
         // authorizes on it.
         related: msg.related.clone(),
         content_schema: msg.content_schema.clone(),
-        // Record the resolved effective owner (Owner → else Creator → else
-        // signer) so later ownership checks authorize against the controller,
-        // not the ephemeral signer key. Always set (never None for new writes).
-        owner_ref: Some(effective_owner_ref(msg)),
+        // Record the effective owner reference so later ownership checks
+        // authorize against the resolved controller, not the ephemeral signer
+        // key. Always set (never None for new writes).
+        owner_ref: Some(owner_ref),
         block_number,
         object_hash,
         hlc: msg.hlc.clone(),

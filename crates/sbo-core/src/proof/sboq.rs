@@ -14,7 +14,7 @@
 //! Proof-Length: <n>
 //! Object-Length: <bytes>
 //!
-//! [{"segment":"seg1","siblings":{"other":"sha256:..."}},...]
+//! [{"segment":"seg1","siblings":{"other":"sha256:..."}[,"object":"sha256:..."][,"children":{...}]},...]
 //! <raw SBO object bytes>
 //! ```
 
@@ -164,15 +164,17 @@ pub fn parse_sboq(data: &[u8]) -> Result<SboqMessage, SboqError> {
     };
 
     // Parse object if Object-Length was specified
-    let obj_start = body_start + proof_end;
+    // Length headers come from an untrusted indexer (W3-6): checked
+    // arithmetic, and never a slice the buffer cannot hold.
+    let obj_start = body_start + proof_end; // both derived from `data`, so in range
     let object_bytes = if let Some(obj_len) = object_length {
         if obj_len > 0 {
-            let obj_end = obj_start + obj_len;
-            if obj_end > data.len() {
+            let obj_end = obj_start.checked_add(obj_len).filter(|&e| e <= data.len());
+            let Some(obj_end) = obj_end else {
                 return Err(SboqError::InvalidFormat(
-                    format!("Data too short for object: need {} bytes, have {}", obj_len, data.len() - obj_start)
+                    format!("Data too short for object: need {} bytes, have {}", obj_len, data.len().saturating_sub(obj_start))
                 ));
-            }
+            };
             Some(data[obj_start..obj_end].to_vec())
         } else {
             None
@@ -257,23 +259,42 @@ fn parse_proof_json(json: &str) -> Result<Vec<TrieProofStep>, SboqError> {
             .and_then(|v| v.as_object())
             .ok_or_else(|| SboqError::InvalidJson("Missing siblings object".to_string()))?;
 
-        let mut siblings = BTreeMap::new();
-        for (key, val) in siblings_obj {
-            let hash_str = val.as_str()
-                .ok_or_else(|| SboqError::InvalidJson("Sibling hash must be string".to_string()))?;
+        let siblings = parse_hash_map(siblings_obj)?;
 
-            // Parse "sha256:<hex>" format
-            let hex_part = hash_str.strip_prefix("sha256:")
-                .ok_or_else(|| SboqError::InvalidJson("Hash must start with sha256:".to_string()))?;
+        // Optional `object` (object at this level's node) and, on the final
+        // step, `children` (the target's own children): State Commitment v2.
+        let object = match obj.get("object") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => {
+                let hex_part = s.strip_prefix("sha256:")
+                    .ok_or_else(|| SboqError::InvalidJson("Hash must start with sha256:".to_string()))?;
+                Some(parse_hex_32(hex_part)?)
+            }
+            _ => return Err(SboqError::InvalidJson("Invalid object type".to_string())),
+        };
+        let children = match obj.get("children") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Object(map)) => Some(parse_hash_map(map)?),
+            _ => return Err(SboqError::InvalidJson("Invalid children type".to_string())),
+        };
 
-            let hash = parse_hex_32(hex_part)?;
-            siblings.insert(key.clone(), hash);
-        }
-
-        steps.push(TrieProofStep { segment, siblings });
+        steps.push(TrieProofStep { segment, siblings, object, children });
     }
 
     Ok(steps)
+}
+
+/// Parse a `{segment: "sha256:<hex>"}` map
+fn parse_hash_map(map: &serde_json::Map<String, serde_json::Value>) -> Result<BTreeMap<String, [u8; 32]>, SboqError> {
+    let mut out = BTreeMap::new();
+    for (key, val) in map {
+        let hash_str = val.as_str()
+            .ok_or_else(|| SboqError::InvalidJson("Sibling hash must be string".to_string()))?;
+        let hex_part = hash_str.strip_prefix("sha256:")
+            .ok_or_else(|| SboqError::InvalidJson("Hash must start with sha256:".to_string()))?;
+        out.insert(key.clone(), parse_hex_32(hex_part)?);
+    }
+    Ok(out)
 }
 
 /// Find the position of a blank line (empty line = just a newline after previous newline)
@@ -348,24 +369,39 @@ fn serialize_proof_json(steps: &[TrieProofStep]) -> String {
             None => json.push_str("null"),
         }
 
-        json.push_str(",\"siblings\":{");
-        let mut first = true;
-        for (key, hash) in &step.siblings {
-            if !first {
-                json.push(',');
-            }
-            first = false;
-            json.push('"');
-            json.push_str(&escape_json_string(key));
-            json.push_str("\":\"sha256:");
-            json.push_str(&hex::encode(hash));
+        json.push_str(",\"siblings\":");
+        push_hash_map(&mut json, &step.siblings);
+        if let Some(object) = &step.object {
+            json.push_str(",\"object\":\"sha256:");
+            json.push_str(&hex::encode(object));
             json.push('"');
         }
-        json.push_str("}}");
+        if let Some(children) = &step.children {
+            json.push_str(",\"children\":");
+            push_hash_map(&mut json, children);
+        }
+        json.push('}');
     }
 
     json.push(']');
     json
+}
+
+fn push_hash_map(json: &mut String, map: &BTreeMap<String, [u8; 32]>) {
+    json.push('{');
+    let mut first = true;
+    for (key, hash) in map {
+        if !first {
+            json.push(',');
+        }
+        first = false;
+        json.push('"');
+        json.push_str(&escape_json_string(key));
+        json.push_str("\":\"sha256:");
+        json.push_str(&hex::encode(hash));
+        json.push('"');
+    }
+    json.push('}');
 }
 
 /// Escape special characters for JSON string
@@ -439,10 +475,14 @@ mod tests {
                         m.insert("other".to_string(), [3u8; 32]);
                         m
                     },
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: Some("names".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: Some("alice".to_string()),
@@ -451,6 +491,8 @@ mod tests {
                         m.insert("bob".to_string(), [5u8; 32]);
                         m
                     },
+                    object: None,
+                    children: None,
                 },
             ],
         };
@@ -494,14 +536,20 @@ mod tests {
                 TrieProofStep {
                     segment: Some("sys".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: Some("names".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: Some("alice".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
             ],
         };
@@ -537,10 +585,14 @@ mod tests {
                 TrieProofStep {
                     segment: Some("sys".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: Some("names".to_string()),
                     siblings: BTreeMap::new(),
+                    object: None,
+                    children: None,
                 },
                 TrieProofStep {
                     segment: None, // Divergence point
@@ -550,6 +602,8 @@ mod tests {
                         m.insert("bob".to_string(), [3u8; 32]);
                         m
                     },
+                    object: None,
+                    children: None,
                 },
             ],
         };

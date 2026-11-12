@@ -1,0 +1,21 @@
+# gitleaks configuration (security audit 2026-11, WS7). Run by the
+# supply-chain workflow over the full history. The default ruleset found no
+# leak in 514 commits on 2026-11-04 (docs/security-audit-2026-11-ws7-supply-chain.md
+# §4); the allowlist below exists so that future reviewed test material can be
+# recorded with a reason, not because anything needed excluding today.
+
+title = "sbo"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed test fixtures that are not credentials"
+paths = [
+    # Issue notes: placeholders such as `SBO_TURBO_DA_API_KEY=…`, never values.
+    '''^\.beans/.*\.md$''',
+    # cargo-fuzz seeds (fuzz/src/bin/gen_seeds.rs): JWTs and presentations
+    # signed with the fixed fuzz fixture keys (fx::key(n)) for alice and
+    # example.com. Test material, never credentials.
+    '''^fuzz/seeds/''',
+]

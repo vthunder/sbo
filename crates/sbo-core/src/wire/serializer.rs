@@ -1,43 +1,18 @@
-//! Wire format serializer
+//! Wire format serializer — the producer side only.
+//!
+//! Decision Q32 (c), "bytes in, bytes out": a consumer never reserializes a
+//! received message to verify, hash, store or forward it; it uses the bytes it
+//! received (see [`super::signing_content`] and [`super::parse_batch_raw`]).
+//! `serialize` exists for the signer, which serializes once, when it signs.
+//! Because the parser admits only canonical input, `serialize(parse(x)) == x`
+//! for every accepted `x`, which the audit suite pins.
 
 use crate::message::{Message, ObjectType};
+use super::headers::header_rank;
 
-/// Canonical header order per Wire Format spec
-const HEADER_ORDER: &[&str] = &[
-    "SBO-Version",
-    "Action",
-    "Path",
-    "ID",
-    "Type",
-    "Content-Type",
-    "Content-Encoding",
-    "Content-Length",
-    "Content-Hash",
-    "Attestation",
-    "Content-Schema",
-    "Creator",
-    "HLC",
-    "New-ID",
-    "New-Owner",
-    "New-Path",
-    "Object-Path",
-    "Origin",
-    "Owner",
-    "Policy-Ref",
-    "Prev",
-    "Proof",
-    "Proof-Type",
-    "Registry-Path",
-    "Related",
-    "Auth-Cert",
-    "Auth-Evidence",
-    "Auth-Warrant",
-    "Public-Key",
-    "Signature",
-];
-
-/// Serialize a Message to wire format bytes
-pub fn serialize(msg: &Message) -> Vec<u8> {
+/// Every header line of `msg` in canonical order, including `Signature` when
+/// `with_signature` is set.
+pub(crate) fn header_lines(msg: &Message, with_signature: bool) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> = Vec::new();
 
     headers.push(("SBO-Version".to_string(), "0.5".to_string()));
@@ -89,15 +64,22 @@ pub fn serialize(msg: &Message) -> Vec<u8> {
     if let Some(ref v) = msg.auth_evidence { headers.push(("Auth-Evidence".to_string(), v.clone())); }
     if let Some(ref v) = msg.auth_warrant { headers.push(("Auth-Warrant".to_string(), v.clone())); }
 
+    // Headers this implementation does not model (Q32 (c)): listed ones sort
+    // to their listed slot, unknown ones to slot 27 in byte order of name.
+    for (name, value) in &msg.extra_headers {
+        headers.push((name.clone(), value.clone()));
+    }
+
     headers.push(("Public-Key".to_string(), msg.signing_key.to_string()));
-    headers.push(("Signature".to_string(), msg.signature.to_hex()));
+    if with_signature {
+        headers.push(("Signature".to_string(), msg.signature.to_hex()));
+    }
 
-    // Sort by canonical order
-    headers.sort_by_key(|(name, _)| {
-        HEADER_ORDER.iter().position(|&h| h == name).unwrap_or(999)
-    });
+    headers.sort_by(|(a, _), (b, _)| header_rank(a).cmp(&header_rank(b)).then_with(|| a.cmp(b)));
+    headers
+}
 
-    // Build output
+fn write_header_block(headers: &[(String, String)]) -> Vec<u8> {
     let mut output = Vec::new();
     for (name, value) in headers {
         output.extend_from_slice(name.as_bytes());
@@ -106,10 +88,21 @@ pub fn serialize(msg: &Message) -> Vec<u8> {
         output.push(b'\n');
     }
     output.push(b'\n');
+    output
+}
 
+/// The signing content of a message built by a producer: every header in
+/// canonical order except `Signature`, then the blank line. For a parsed
+/// message this equals [`super::signing_content`] of the received bytes.
+pub(crate) fn signing_content_of(msg: &Message) -> Vec<u8> {
+    write_header_block(&header_lines(msg, false))
+}
+
+/// Serialize a Message to wire format bytes
+pub fn serialize(msg: &Message) -> Vec<u8> {
+    let mut output = write_header_block(&header_lines(msg, true));
     if let Some(ref payload) = msg.payload {
         output.extend_from_slice(payload);
     }
-
     output
 }

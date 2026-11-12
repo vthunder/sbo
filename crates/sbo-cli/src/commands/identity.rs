@@ -454,7 +454,7 @@ pub async fn update(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(&signing_key);
 
@@ -882,7 +882,7 @@ pub async fn create_domain_certified(
         .ok_or_else(|| anyhow::anyhow!("'{}' is not a valid email address", email))?;
 
     let repo_dom = repo_domain(uri);
-    let domain_matches = repo_dom.as_deref() == Some(email_dom);
+    let domain_matches = repo_dom.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(&email_dom));
 
     // Decide the name to register (if any).
     let chosen: Option<String> = match name_override {

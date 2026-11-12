@@ -1,0 +1,63 @@
+{
+  "description": "State Commitment spec examples write `state_root` as `sha256:<hex>`; the daemon's `trust::claim_from_message` and `bootstrap` read bare hex (S18). One form must win; until Dan decides (Q22) the spec form is expected and the bare form is tolerated.",
+  "suite": "sbo conformance 2026-11 / checkpoint claims",
+  "vectors": [
+    {
+      "claim": {
+        "block": 100,
+        "state_root": "2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "id": "CP-01",
+      "payload": {
+        "block": 100,
+        "state_root": "sha256:2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "schema": "checkpoint.v1"
+    },
+    {
+      "claim": {
+        "block": 100,
+        "state_root": "2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "id": "CP-02",
+      "note": "bare hex tolerated",
+      "payload": {
+        "block": 100,
+        "state_root": "2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "schema": "checkpoint.v1"
+    },
+    {
+      "claim": {
+        "block": 7,
+        "state_root": "2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "id": "CP-03",
+      "payload": {
+        "block": 7,
+        "state_root": "sha256:2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "schema": "checkpoint-attestation.v1"
+    },
+    {
+      "claim": null,
+      "id": "CP-04",
+      "note": "wrong length",
+      "payload": {
+        "block": 100,
+        "state_root": "sha256:abc"
+      },
+      "schema": "checkpoint.v1"
+    },
+    {
+      "claim": null,
+      "id": "CP-05",
+      "note": "unsupported algorithm",
+      "payload": {
+        "block": 100,
+        "state_root": "keccak256:2646d8e79386162d729ed31d20ed07547bf08afacf164304f54115c4e75a100b"
+      },
+      "schema": "checkpoint.v1"
+    }
+  ]
+}

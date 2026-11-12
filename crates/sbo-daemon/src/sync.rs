@@ -161,10 +161,10 @@ fn verify_proof(
     // Check we have state roots for the claimed blocks
     // Note: get_state_root_at_block(N) returns state AFTER block N was processed
     // So for prev_state_root (state BEFORE block_from), we need block_from - 1
-    // For genesis (block_from == 0 or first proof), prev_state_root should be [0; 32]
+    // For genesis (block_from == 0 or first proof), prev_state_root is the empty root
     #[allow(unused_variables)] // Used in zkvm feature
     let pre_root = if sbop.block_from == 0 {
-        Some([0u8; 32]) // Genesis starts with empty state
+        Some(sbo_core::empty_root()) // Genesis starts with empty state
     } else {
         state_db.get_state_root_at_block(sbop.block_from - 1)
             .map_err(|e| crate::DaemonError::State(format!("Failed to get pre-state root: {}", e)))?
@@ -211,12 +211,12 @@ fn verify_proof(
                         }
 
                         // Verify state roots match what we computed
-                        // Note: For bootstrap proofs (first proof in chain), the prover uses [0; 32] as
+                        // Note: For bootstrap proofs (first proof in chain), the prover uses the empty root as
                         // prev_state_root. We accept this if we don't have state at block_from - 1
                         // (meaning we also started syncing from this point).
                         if let Some(our_pre_root) = pre_root {
-                            // Allow bootstrap proofs where prev_state_root is [0; 32]
-                            let is_bootstrap_proof = output.prev_state_root == [0u8; 32];
+                            // Allow bootstrap proofs where prev_state_root is the empty root
+                            let is_bootstrap_proof = output.prev_state_root == sbo_core::empty_root();
                             if !is_bootstrap_proof && output.prev_state_root != our_pre_root {
                                 tracing::warn!(
                                     "Journal prev_state_root {} doesn't match our state {}",
@@ -225,7 +225,7 @@ fn verify_proof(
                                 );
                                 return Ok(false);
                             }
-                            if is_bootstrap_proof && our_pre_root != [0u8; 32] {
+                            if is_bootstrap_proof && our_pre_root != sbo_core::empty_root() {
                                 // Bootstrap proof but we have different pre-state
                                 // This is acceptable if we're both starting from same point
                                 tracing::debug!(
@@ -478,7 +478,7 @@ impl SyncEngine {
             return Ok(BlockProcessResult {
                 tx_count: 0,
                 pre_state_root: None,
-                post_state_root: [0u8; 32],
+                post_state_root: sbo_core::empty_root(),
                 block_data: Vec::new(),
                 has_genesis: false,
                 state_witness: StateTransitionWitness::default(),
@@ -546,7 +546,7 @@ impl SyncEngine {
             "pre_trie.root_hash() = {}",
             hex::encode(&pre_state_root[..8])
         );
-        let pre_state_root_opt = if pre_state_root == [0u8; 32] { None } else { Some(pre_state_root) };
+        let pre_state_root_opt = if pre_state_root == sbo_core::empty_root() { None } else { Some(pre_state_root) };
 
         // Track touched objects for witness generation
         let mut touched_objects = TouchedObjects::default();
@@ -554,6 +554,11 @@ impl SyncEngine {
         // captured from the raw wire message (which still carries the signing key —
         // the stored object does not). The tail loop feeds these to the TrustGate.
         let mut trust_evidence: Vec<crate::trust::ObservedClaim> = Vec::new();
+        // Genesis bookkeeping for this block (Genesis Spec §Failure): the hash
+        // of the genesis submission accepted per repo, and the anchors to
+        // record for repos followed without a known hash.
+        let mut genesis_accepted: HashMap<String, String> = HashMap::new();
+        let mut genesis_to_record: Vec<(String, String)> = Vec::new();
 
         tracing::debug!("Processing block {} for app_ids {:?}", block_number, app_ids);
 
@@ -717,7 +722,10 @@ impl SyncEngine {
                 let payload = extract_sbo_payload(&tx.data);
 
                 // Parse SBO messages (may be a batch with multiple messages)
-                let messages = match sbo_core::wire::parse_batch(&payload) {
+                // Each message is kept with the exact bytes it was parsed from:
+                // the daemon verifies, hashes and stores those bytes, never a
+                // reserialization (Q32 (c), Q35 (a)).
+                let messages = match sbo_core::wire::parse_batch_raw(&payload) {
                     Ok(msgs) => {
                         if msgs.len() > 1 {
                             tracing::debug!(
@@ -742,7 +750,38 @@ impl SyncEngine {
                 };
 
                 for repo in matching_repos {
-                    for msg in &messages {
+                    // Bootstrap gate (Genesis Spec §Bootstrap Window, §Failure;
+                    // Q7 (a), Q33 (b)). While the repo has no root policy the
+                    // only thing that can be applied is the mode-object prefix
+                    // of a structurally valid genesis submission at the anchor
+                    // block; every other message is invalid. The prefix is
+                    // applied here, and the rest of the submission falls
+                    // through to ordinary validation under the root policy it
+                    // just installed. A halt is a hard error from this block.
+                    let skip = match self.genesis_gate(
+                        repo,
+                        block_number,
+                        block_timestamp,
+                        &payload,
+                        &messages,
+                        &mut genesis_accepted,
+                        &mut genesis_to_record,
+                        &mut touched_objects,
+                    )? {
+                        Some(prefix_len) => prefix_len,
+                        None => continue,
+                    };
+                    for (msg, raw) in messages.iter().skip(skip) {
+                        // The signature covers the received header block (minus
+                        // the Signature line) as it was sent, not a reconstruction.
+                        if let Err(e) = sbo_core::message::verify_received(msg, raw) {
+                            tracing::warn!(
+                                "[{}/{}] {:?} {}{} → sig:✗ ({})",
+                                block_number, tx.index, msg.action, msg.path, msg.id, e
+                            );
+                            continue;
+                        }
+
                         // Check path prefix filter
                         if let Some(ref prefix) = repo.uri.path {
                             if !msg.path.to_string().starts_with(prefix) {
@@ -771,6 +810,17 @@ impl SyncEngine {
                         // here and emit evidence regardless of the L2 outcome below.
                         if let Some(claim) = crate::trust::claim_from_message(msg) {
                             if sbo_core::message::verify_message(msg).is_ok() {
+                                // Keep the signed checkpoint wire so this node's
+                                // sync-point manifest can carry it (D26).
+                                if claim.kind == crate::trust::ClaimKind::Checkpoint {
+                                    if let Err(e) = crate::trust::save_checkpoint_wire(
+                                        &resolved_uri,
+                                        msg.id.as_str(),
+                                        &sbo_core::wire::serialize(msg),
+                                    ) {
+                                        tracing::warn!("could not retain checkpoint wire {}: {e}", msg.id.as_str());
+                                    }
+                                }
                                 trust_evidence.push(claim);
                             }
                         }
@@ -811,9 +861,8 @@ impl SyncEngine {
 
                         // Log raw data if verbose
                         if self.verbose_raw {
-                            // Serialize message to show wire format
-                            let wire_data = sbo_core::wire::serialize(msg);
-                            match std::str::from_utf8(&wire_data) {
+                            let wire_data: &[u8] = raw;
+                            match std::str::from_utf8(wire_data) {
                                 Ok(s) => {
                                     tracing::info!("  --- Wire format ---");
                                     for line in s.lines().take(30) {
@@ -834,9 +883,46 @@ impl SyncEngine {
                         // Write to filesystem and update state. Pass the same
                         // L2 context so creator derivation (attributed-email)
                         // matches what validation used.
-                        self.write_object(repo, msg, block_number, &l2, &mut touched_objects)?;
+                        self.write_object(repo, msg, raw, block_number, &l2, &mut touched_objects)?;
                     }
                 }
+            }
+        }
+
+        // 4b. Genesis outcome for this block (Genesis Spec §Failure). A repo
+        // whose anchor block this is must have left its bootstrap window; a
+        // repo followed without a hash records the genesis it just accepted.
+        for repo in app_ids.iter().flat_map(|&app_id| repos.get_by_app_id(app_id)) {
+            if repo.uri.first_block != Some(block_number) {
+                continue;
+            }
+            let uri = repo.uri.to_string();
+            let present = self
+                .state_dbs
+                .get(&uri)
+                .map(|db| crate::validate::root_policy_present(db.as_ref()))
+                .unwrap_or(false);
+            if !present {
+                let expected = repo
+                    .expected_genesis
+                    .as_deref()
+                    .map(|h| format!(" matching the expected genesisHash {h}"))
+                    .unwrap_or_default();
+                tracing::error!(
+                    "GENESIS FAILED for repo {}: no submission in anchor block {} validates as a genesis{}; halting sync",
+                    repo.display_uri, block_number, expected
+                );
+                return Err(crate::DaemonError::Sync(format!(
+                    "no valid genesis at anchor block {block_number} for {}{expected}",
+                    repo.display_uri
+                )));
+            }
+        }
+        for (id, hash) in genesis_to_record {
+            if let Err(e) = repos.set_expected_genesis(&id, Some(hash.clone())) {
+                tracing::warn!("Failed to record genesis {} for repo {}: {}", hash, id, e);
+            } else {
+                tracing::info!("Recorded genesis identity for repo {}: @{} {}", id, block_number, hash);
             }
         }
 
@@ -868,7 +954,7 @@ impl SyncEngine {
         }
 
         // Track the post-state root and genesis status for the result
-        let mut post_state_root = [0u8; 32];
+        let mut post_state_root = sbo_core::empty_root();
         let mut has_genesis = false;
 
         for uri in uris {
@@ -884,7 +970,7 @@ impl SyncEngine {
                         // Fall back to transition root
                         let prev_root = state_db.get_state_root_at_block(block_number.saturating_sub(1))
                             .unwrap_or(None)
-                            .unwrap_or([0u8; 32]);
+                            .unwrap_or(sbo_core::empty_root());
                         let actions_data = block_number.to_le_bytes();
                         compute_transition_root(prev_root, &actions_data)
                     }
@@ -932,14 +1018,145 @@ impl SyncEngine {
         })
     }
 
-    /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`.
-    fn object_file_path(repo: &Repo, path: &sbo_core::message::Path, id: &str) -> std::path::PathBuf {
-        let mut p = repo.path.clone();
-        for component in path.to_string().trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
-            p.push(component);
+    /// The bootstrap gate for one submission of one repo. Returns
+    /// `Ok(Some(n))` when the first `n` messages have been consumed (`0` when
+    /// the repo is past genesis and the whole submission is ordinary),
+    /// `Ok(None)` when the submission must be skipped entirely (the repo is in
+    /// its bootstrap window and this is not its genesis), and `Err` when sync
+    /// must halt (a second valid genesis at an anchor with no known hash, or
+    /// data past an anchor that never produced a genesis).
+    #[allow(clippy::too_many_arguments)]
+    fn genesis_gate(
+        &mut self,
+        repo: &Repo,
+        block_number: u64,
+        block_timestamp: Option<i64>,
+        payload: &[u8],
+        messages: &[(sbo_core::message::Message, &[u8])],
+        genesis_accepted: &mut HashMap<String, String>,
+        genesis_to_record: &mut Vec<(String, String)>,
+        touched: &mut TouchedObjects,
+    ) -> crate::Result<Option<usize>> {
+        let resolved_uri = repo.uri.to_string();
+        let (bootstrap, l2) = {
+            let state_db = self.get_state_db(&resolved_uri).map_err(|e| {
+                crate::DaemonError::Sync(format!("Failed to open state DB for {}: {}", repo.display_uri, e))
+            })?;
+            (
+                !crate::validate::root_policy_present(state_db),
+                crate::validate::L2Context::for_block(block_timestamp, state_db)
+                    .with_db(repo.uri.clone(), repo.expected_genesis.clone()),
+            )
+        };
+        let msgs: Vec<sbo_core::message::Message> = messages.iter().map(|(m, _)| m.clone()).collect();
+
+        if !bootstrap {
+            // Past genesis. At the anchor block with no known hash, a SECOND
+            // structurally valid genesis submission makes the anchor ambiguous:
+            // halt rather than guess (URI spec rule). With a known hash the
+            // others are ordinary submissions and fail on occupied slots.
+            if let Some(accepted) = genesis_accepted.get(&repo.id) {
+                if repo.expected_genesis.is_none()
+                    && sbo_core::Genesis::validate_at(&msgs, block_timestamp, &l2.anchors).is_ok()
+                {
+                    let hash = sbo_core::ContentHash::sha256(payload).to_string();
+                    if &hash != accepted {
+                        tracing::error!(
+                            "GENESIS AMBIGUOUS for repo {} at block {}: two valid genesis submissions ({} and {}) and no genesisHash to choose by; halting sync",
+                            repo.display_uri, block_number, accepted, hash
+                        );
+                        return Err(crate::DaemonError::Sync(format!(
+                            "ambiguous genesis at block {block_number} for {}",
+                            repo.display_uri
+                        )));
+                    }
+                }
+            }
+            return Ok(Some(0));
         }
-        p.push(id);
-        p
+
+        // In the bootstrap window: nothing before the anchor is valid, and
+        // data past an anchor that produced no genesis means the repo has none.
+        match repo.uri.first_block {
+            Some(anchor) if block_number < anchor => return Ok(None),
+            Some(anchor) if block_number > anchor => {
+                tracing::error!(
+                    "GENESIS FAILED for repo {}: block {} is past anchor {} and no genesis was applied; halting sync",
+                    repo.display_uri, block_number, anchor
+                );
+                return Err(crate::DaemonError::Sync(format!(
+                    "no genesis at anchor {anchor} for {}", repo.display_uri
+                )));
+            }
+            _ => {}
+        }
+
+        let info = match sbo_core::Genesis::validate_at(&msgs, block_timestamp, &l2.anchors) {
+            Ok(info) => info,
+            Err(e) => {
+                if sbo_core::Genesis::is_candidate(&msgs) {
+                    tracing::warn!(
+                        "[{}] genesis candidate for {} rejected: {}",
+                        block_number, repo.display_uri, e
+                    );
+                } else {
+                    tracing::debug!(
+                        "[{}] submission for {} is not a genesis ({}); nothing is valid before the root policy",
+                        block_number, repo.display_uri, e
+                    );
+                }
+                return Ok(None);
+            }
+        };
+
+        // genesisHash covers the submission bytes as included (Q35 (a)).
+        let hash = sbo_core::ContentHash::sha256(payload).to_string();
+        if let Some(expected) = repo.expected_genesis.as_deref() {
+            if expected != hash {
+                tracing::warn!(
+                    "[{}] valid genesis submission for {} has hash {} but the expected genesisHash is {}; not the genesis",
+                    block_number, repo.display_uri, hash, expected
+                );
+                return Ok(None);
+            }
+        }
+
+        // Apply the mode-object prefix structurally. The mode objects are
+        // created by and owned by `sys` (self-certifying; Identity Spec §Owner
+        // References): the stored creator is the sys identity the JWT names
+        // and the owner reference is the `sys` name record.
+        let sys_creator = sbo_core::message::Id::new(&info.sys_identity)
+            .map_err(|e| crate::DaemonError::Sync(format!("genesis sys identity is not an id: {e}")))?;
+        let sys_owner = sbo_core::message::Id::new("sys").expect("sys is a valid id");
+        for (msg, raw) in messages.iter().take(info.prefix_len) {
+            let mut m = msg.clone();
+            if m.creator.is_none() {
+                m.creator = Some(sys_creator.clone());
+            }
+            if m.owner.is_none() {
+                m.owner = Some(sys_owner.clone());
+            }
+            tracing::info!(
+                "[{}] GENESIS {:?} {}{} → structural:✓ applied",
+                block_number, m.action, m.path, m.id
+            );
+            self.write_object(repo, &m, raw, block_number, &l2, touched)?;
+        }
+        tracing::warn!(
+            "GENESIS accepted for repo {} at block {}: {:?}, sys {}, genesisHash {}",
+            repo.display_uri, block_number, info.mode, info.sys_identity, hash
+        );
+        genesis_accepted.insert(repo.id.clone(), hash.clone());
+        if repo.expected_genesis.is_none() {
+            genesis_to_record.push((repo.id.clone(), hash));
+        }
+        Ok(Some(info.prefix_len))
+    }
+
+    /// Compute the on-disk mirror path for an object at `(path, id)` in `repo`
+    /// (collision-free layout, see `crate::mirror`).
+    fn object_file_path(repo: &Repo, path: &sbo_core::message::Path, id: &str) -> std::path::PathBuf {
+        crate::mirror::object_file(&repo.path, path, id)
     }
 
     /// Apply a `transfer` (move / rename / re-own) or `delete` to state + mirror.
@@ -1052,12 +1269,15 @@ impl SyncEngine {
             .put_object(&moved)
             .map_err(|e| crate::DaemonError::Repo(format!("put_object failed: {}", e)))?;
 
-        // Move the mirror file (carry the original object's wire bytes).
+        // Move the mirror file (carry the original object's wire bytes). The
+        // mirror is best-effort (Q24): a failure here is logged, never fatal.
         let dest_file = Self::object_file_path(repo, &dest_path, dest_id.as_str());
-        if let Some(parent) = dest_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if let Err(e) = std::fs::rename(&src_file, &dest_file) {
+        let moved_ok = dest_file
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|_| std::fs::rename(&src_file, &dest_file));
+        if let Err(e) = moved_ok {
             tracing::warn!("Could not move mirror file {} -> {}: {}", src_file.display(), dest_file.display(), e);
         }
 
@@ -1081,10 +1301,13 @@ impl SyncEngine {
     }
 
     /// Write an SBO object to the filesystem and update state
+    /// `raw` is the message exactly as included on chain; `object_hash` is
+    /// `sha256(raw)` (State Commitment §Object Hash, decision Q35 (a)).
     fn write_object(
         &mut self,
         repo: &Repo,
         msg: &sbo_core::message::Message,
+        raw: &[u8],
         block_number: u64,
         l2: &crate::validate::L2Context,
         touched: &mut TouchedObjects,
@@ -1098,28 +1321,10 @@ impl SyncEngine {
             return self.apply_transfer_or_delete(repo, msg, l2, touched);
         }
 
-        // Build path: repo_root / sbo_path / sbo_id
-        let mut file_path = repo.path.clone();
-
-        // Add path components (skip leading slash)
-        let path_str = msg.path.to_string();
-        for component in path_str.trim_start_matches('/').split('/').filter(|s| !s.is_empty()) {
-            file_path.push(component);
-        }
-
-        // Add the ID as filename
-        file_path.push(msg.id.as_str());
-
-        // Create parent directories
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        // Serialize to wire format
-        let wire_data = sbo_core::wire::serialize(msg);
-
-        // Compute object hash for trie (hash of complete raw bytes)
-        let object_hash = sbo_core::sha256(&wire_data);
+        // The bytes as included on chain: hashed for the trie and written to
+        // the mirror unchanged ("bytes in, bytes out").
+        let wire_data: &[u8] = raw;
+        let object_hash = sbo_core::sha256(wire_data);
 
         // Check if object exists and track the touch operation
         let uri = repo.uri.to_string();
@@ -1181,17 +1386,24 @@ impl SyncEngine {
             }
         }
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = file_path.with_extension("tmp");
-        std::fs::write(&temp_path, &wire_data)?;
-        std::fs::rename(&temp_path, &file_path)?;
-
-        tracing::debug!(
-            "Wrote object {}{} to {}",
-            msg.path,
-            msg.id,
-            file_path.display()
-        );
+        // Filesystem mirror (best-effort, Q24): the state DB and trie are
+        // authoritative; a mirror failure is logged and never aborts the
+        // block (D58). Layout is collision-free (`crate::mirror`).
+        match crate::mirror::write_object(&repo.path, &msg.path, msg.id.as_str(), &wire_data) {
+            Ok(file_path) => tracing::debug!(
+                "Wrote object {}{} to {}",
+                msg.path,
+                msg.id,
+                file_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                "Mirror write failed for {}{} under {} (state still applied): {}",
+                msg.path,
+                msg.id,
+                repo.path.display(),
+                e
+            ),
+        }
 
         // Update state DB (keyed by URI)
         let uri = repo.uri.to_string();
@@ -1220,7 +1432,7 @@ impl SyncEngine {
                 }
 
                 // If this is a name claim at /sys/names/, index pubkey -> name
-                if path_str.starts_with("/sys/names/") {
+                if msg.path.to_string().starts_with("/sys/names/") {
                     let pubkey = msg.signing_key.to_string();
                     let name = msg.id.as_str();
                     if let Err(e) = db.put_name_claim(&pubkey, name) {
@@ -1235,11 +1447,11 @@ impl SyncEngine {
                     if let Some(ref payload) = msg.payload {
                         match serde_json::from_slice::<sbo_core::policy::Policy>(payload) {
                             Ok(policy) => {
-                                // Index the version with its on-chain content-hash
-                                // so child pins (P2) resolve deterministically.
-                                let content_hash = msg.content_hash.as_ref()
-                                    .map(|h| h.to_string())
-                                    .unwrap_or_else(|| sbo_core::crypto::ContentHash::sha256(payload).to_string());
+                                // Index the version under the hash computed over
+                                // the body — never the claimed header value — so
+                                // child pins (P2) resolve to the policy that was
+                                // actually written (audit 2026-11 D1 / WS8 P1b).
+                                let content_hash = sbo_core::crypto::ContentHash::sha256(payload).to_string();
                                 if let Err(e) = db.put_policy_at(&msg.path, &policy, &content_hash, block_number) {
                                     tracing::warn!("Failed to index policy at {}: {}", msg.path, e);
                                 } else {
@@ -1278,38 +1490,11 @@ impl SyncEngine {
                     }
                 }
 
-                // If this is a domain object (Content-Schema: domain.v1), verify its
-                // DNSSEC self-certification (Identity Spec §Domain Objects, Rule 4):
-                // the self-signed domain key must be proven to control the zone by a
-                // `dnssec.v1` evidence object that domain.v1 references via its own
-                // `Auth-Evidence: ref:/sys/dnssec/<domain>` — resolved as of THIS block —
-                // with the RRSIG window covering this block's inclusion time. Reading
-                // the object's declared ref (not a bare current-state lookup) keeps the
-                // binding self-contained and unambiguous. Non-fatal (warn-log) for now to
-                // de-risk first rollout; flip to a hard reject once verified live.
+                // Domain self-certification (Identity Spec Rule 4) is enforced in
+                // `validate_message` (AUDIT-2026-11 D7): a `domain.v1` whose evidence
+                // fails never reaches this apply path.
                 if msg.content_schema.as_deref() == Some("domain.v1") {
-                    let domain = msg.id.as_str();
-                    let domain_key = msg.signing_key.to_string();
-                    // The path the domain object points at: its own `Auth-Evidence: ref:<path>`
-                    // if present, else the conventional /sys/dnssec/<domain>.
-                    let ref_path = match msg.auth_evidence.as_deref() {
-                        Some(r) if r.starts_with("ref:") => r.trim_start_matches("ref:").to_string(),
-                        _ => format!("/sys/dnssec/{domain}"),
-                    };
-                    let evidence = crate::validate::fetch_evidence_object(
-                        db as &dyn crate::state_view::StateView,
-                        &ref_path,
-                    );
-                    match (evidence, l2.inclusion_time) {
-                        (Some(raw), Some(t)) => {
-                            match sbo_core::attribution::verify_domain_self_cert(&domain_key, &raw, domain, t) {
-                                Ok(()) => tracing::info!("Domain {} self-certified (DNSSEC) at block {}", domain, block_number),
-                                Err(e) => tracing::warn!("Domain {} SELF-CERT FAILED at block {}: {:?}", domain, block_number, e),
-                            }
-                        }
-                        (Some(_), None) => tracing::warn!("Domain {}: cannot verify DNSSEC self-cert — no inclusion time at block {}", domain, block_number),
-                        (None, _) => tracing::debug!("Domain {}: no DNSSEC self-cert evidence (plain self-signed)", domain),
-                    }
+                    tracing::info!("Domain {} applied at block {}", msg.id.as_str(), block_number);
                 }
             }
         }

@@ -1,24 +1,36 @@
-//! HTTP server for web-based auth
+//! HTTP server: the daemon's browser-facing read + submit API (`/v1/*`).
 //!
-//! Exposes the sign request flow over HTTP for browser-based apps.
-//! Listens on localhost:7890 by default.
+//! Two exposure modes (security audit 2026-11, Q15):
+//!
+//! - **loopback** — the localhost convenience server: CORS reflects any
+//!   origin and the `Access-Control-Allow-Private-Network` header is set so a
+//!   public page may reach a daemon on `127.0.0.1`. No limits.
+//! - **public** — for a daemon bound on a routable address (da.sandmill.org
+//!   binds `0.0.0.0:5000`): CORS reflects only the configured origin
+//!   allowlist, the private-network header is never sent, every source is
+//!   rate-limited, and the spend route (`/v1/submit`) is admitted only for an
+//!   allowlisted browser `Origin` or an operator-configured bearer token.
+//!
+//! The mode is chosen from `[http]` in config (or derived from the bind
+//! address); binding a routable address in loopback mode is refused.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{header, HeaderName, HeaderValue, Method, StatusCode},
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use serde::{Deserialize, Serialize};
-
-use crate::ipc::{SignRequest, SignRequestStatus};
 
 /// Shared state for HTTP handlers
 pub type HttpState<S> = Arc<RwLock<S>>;
@@ -56,6 +68,18 @@ impl ApiError {
     /// 503 — reads refused while the fast-sync trust anchor is unverified.
     pub fn unavailable(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::SERVICE_UNAVAILABLE, message: msg.into() }
+    }
+    /// 401 — public-mode spend route with no admissible origin or bearer.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::UNAUTHORIZED, message: msg.into() }
+    }
+    /// 403 — public-mode spend route from a non-allowlisted origin.
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::FORBIDDEN, message: msg.into() }
+    }
+    /// 429 — the per-source limiter refused the request.
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::TOO_MANY_REQUESTS, message: msg.into() }
     }
 }
 
@@ -164,6 +188,12 @@ pub struct CheckpointView {
     pub id: String,
     pub block: u64,
     pub state_root: String,
+    /// The on-chain `checkpoint.v1` object's signed wire bytes (base64), when
+    /// the node retained them. A bootstrapping client re-verifies the signature
+    /// against its pinned keys; without it this entry is a bare hint and backs
+    /// nothing (audit 2026-11 D26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<String>,
 }
 
 /// Result of a successful DA submission. The write was validated against
@@ -253,81 +283,216 @@ pub trait RepoApi: Send + Sync + 'static {
     async fn submit(&self, repo: Option<&str>, data: Vec<u8>) -> Result<SubmitResultView, ApiError>;
 }
 
-/// Request to create a new auth request
-#[derive(Debug, Deserialize)]
-pub struct AuthRequestBody {
-    /// Origin of the requesting app (e.g., "https://sandmill.org")
-    pub app_origin: String,
-    /// Random challenge from the app
-    pub challenge: String,
-    /// Optional: specific email to authenticate as
-    pub email: Option<String>,
-    /// Optional: human-readable purpose
-    pub purpose: Option<String>,
+
+// ===========================================================================
+// Exposure mode, origin/bearer admission and the per-source limiter (Q15)
+// ===========================================================================
+
+/// How the HTTP surface is exposed (`[http] mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpMode {
+    /// Localhost convenience server: open CORS, private-network header, no limits.
+    Loopback,
+    /// Routable bind: origin allowlist, no private-network header, per-source
+    /// limits, submit gated on origin or bearer.
+    Public,
 }
 
-/// Response when creating an auth request
-#[derive(Debug, Serialize)]
-pub struct AuthRequestResponse {
-    pub request_id: String,
+/// Per-source request budgets for public mode (requests per minute, which is
+/// also the burst size; refilled continuously).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimits {
+    /// Reads: `/v1/object`, `/v1/list`, `/v1/state-root`, `/v1/sync-points`, `/v1/snapshot`.
+    pub reads_per_minute: u32,
+    /// Spends: `/v1/submit` (TurboDA credit + resolver budget).
+    pub spends_per_minute: u32,
 }
 
-/// Response when polling auth status
-#[derive(Debug, Serialize)]
-pub struct AuthStatusResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assertion_jwt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_binding_jwt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+impl Default for RateLimits {
+    fn default() -> Self {
+        Self { reads_per_minute: 600, spends_per_minute: 60 }
+    }
 }
 
-/// Query params for the auth popup page
-#[derive(Debug, Deserialize)]
-pub struct AuthPopupParams {
-    /// Origin of the requesting app
-    pub origin: String,
-    /// Challenge from the app
-    pub challenge: String,
-    /// Optional email
-    pub email: Option<String>,
+/// Everything the router needs to know about its exposure.
+#[derive(Debug, Clone)]
+pub struct HttpOptions {
+    pub mode: HttpMode,
+    /// Browser origins (scheme://host[:port]) that CORS reflects and that
+    /// may `POST /v1/submit`. Public mode only.
+    pub allowed_origins: Vec<String>,
+    /// Bearer tokens that admit a non-browser client to `/v1/submit`
+    /// (`Authorization: Bearer <token>`). Public mode only.
+    pub bearer_tokens: Vec<String>,
+    pub limits: RateLimits,
 }
 
-/// Trait for accessing sign requests from state
-pub trait SignRequestStore: Send + Sync + 'static {
-    fn create_sign_request(&mut self, request: SignRequest) -> String;
-    fn get_sign_request(&self, request_id: &str) -> Option<&SignRequest>;
+impl HttpOptions {
+    pub fn loopback() -> Self {
+        Self {
+            mode: HttpMode::Loopback,
+            allowed_origins: Vec::new(),
+            bearer_tokens: Vec::new(),
+            limits: RateLimits::default(),
+        }
+    }
+
+    pub fn public(allowed_origins: Vec<String>, bearer_tokens: Vec<String>) -> Self {
+        Self {
+            mode: HttpMode::Public,
+            allowed_origins,
+            bearer_tokens,
+            limits: RateLimits::default(),
+        }
+    }
+
+    /// `true` when `origin` (a request's `Origin` header value) is allowlisted.
+    /// Exact, case-insensitive match on the serialized origin.
+    fn origin_allowed(&self, origin: &str) -> bool {
+        self.allowed_origins.iter().any(|o| o.eq_ignore_ascii_case(origin))
+    }
+
+    /// `true` when `token` equals a configured bearer (constant-time per candidate).
+    fn bearer_allowed(&self, token: &str) -> bool {
+        self.bearer_tokens.iter().any(|t| ct_eq(t.as_bytes(), token.as_bytes()))
+    }
 }
 
-/// Create the HTTP router
-pub fn create_router<S: SignRequestStore + RepoApi>(state: HttpState<S>) -> Router {
-    // CORS: the daemon is a localhost convenience server with no credentialed
-    // requests, so reflect any origin — the browser client may be served from
-    // any dev origin or the Mingo site. Reads/submit carry no cookies.
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            HeaderName::from_static("access-control-request-private-network"),
-        ])
-        .expose_headers([
-            HeaderName::from_static("access-control-allow-private-network"),
-        ]);
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
-    // Private Network Access header - required for public sites to access localhost
-    let private_network = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("access-control-allow-private-network"),
-        HeaderValue::from_static("true"),
-    );
+/// Token-bucket limiter keyed on the source address. The key is the
+/// **connection** address (`ConnectInfo`), never `X-Forwarded-For`: dokku's
+/// nginx overwrites that header with the connection address, so it carries
+/// nothing the connection does not, and a direct caller could forge it. A
+/// request with no connection info (in-process tests) shares one bucket.
+struct Limiter {
+    limits: RateLimits,
+    buckets: Mutex<HashMap<(IpAddr, bool), Bucket>>,
+}
 
-    // Layer order matters: cors handles OPTIONS, then private_network adds header to all responses
-    Router::new()
-        .route("/auth", get(auth_popup_page::<S>))
-        .route("/auth/request", post(create_auth_request::<S>))
-        .route("/auth/status/:request_id", get(get_auth_status::<S>))
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+/// Idle-bucket sweep threshold: above this many entries, buckets that have
+/// been full for a minute are dropped before inserting.
+const LIMITER_SWEEP_AT: usize = 10_000;
+
+impl Limiter {
+    fn new(limits: RateLimits) -> Self {
+        Self { limits, buckets: Mutex::new(HashMap::new()) }
+    }
+
+    /// Take one token from `ip`'s bucket for the class; `false` ⇒ 429.
+    fn admit(&self, ip: IpAddr, spend: bool) -> bool {
+        let per_minute = if spend { self.limits.spends_per_minute } else { self.limits.reads_per_minute };
+        if per_minute == 0 {
+            return true;
+        }
+        let capacity = per_minute as f64;
+        let rate_per_sec = capacity / 60.0;
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if buckets.len() >= LIMITER_SWEEP_AT && !buckets.contains_key(&(ip, spend)) {
+            buckets.retain(|_, b| now.duration_since(b.last).as_secs() < 60);
+        }
+        let b = buckets.entry((ip, spend)).or_insert(Bucket { tokens: capacity, last: now });
+        let elapsed = now.duration_since(b.last).as_secs_f64();
+        b.tokens = (b.tokens + elapsed * rate_per_sec).min(capacity);
+        b.last = now;
+        if b.tokens >= 1.0 {
+            b.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Router-wide context shared by the admission middleware.
+struct Guard {
+    options: HttpOptions,
+    limiter: Limiter,
+}
+
+fn source_ip(req: &axum::extract::Request) -> IpAddr {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+}
+
+fn is_spend_route(method: &Method, path: &str) -> bool {
+    method == Method::POST && path == "/v1/submit"
+}
+
+/// Public-mode admission, in order: per-source limit (429), then for the
+/// spend route the origin/bearer gate (403 / 401). Reads are open to every
+/// principal but still limited. `/health` is exempt from the limiter so a
+/// platform healthcheck never flaps under load.
+async fn public_admission(
+    State(guard): State<Arc<Guard>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if path == "/health" || req.method() == Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let spend = is_spend_route(req.method(), &path);
+    if !guard.limiter.admit(source_ip(&req), spend) {
+        return ApiError::too_many_requests("rate limit exceeded for this source").into_response();
+    }
+    if spend {
+        if let Err(e) = admit_spend(&guard.options, req.headers()) {
+            return e.into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// The Q15 spend gate: a configured bearer admits any client; otherwise a
+/// browser `Origin` must be allowlisted (403 when it is not), and a request
+/// with no `Origin` at all needs the bearer (401).
+fn admit_spend(options: &HttpOptions, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        if options.bearer_allowed(token.trim()) {
+            return Ok(());
+        }
+        return Err(ApiError::unauthorized("bearer token not recognized"));
+    }
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        Some(origin) if options.origin_allowed(origin) => Ok(()),
+        Some(_) => Err(ApiError::forbidden("origin is not allowlisted for /v1/submit")),
+        None => Err(ApiError::unauthorized(
+            "/v1/submit needs an allowlisted Origin or `Authorization: Bearer <token>`",
+        )),
+    }
+}
+
+/// Create the HTTP router in loopback mode (today's localhost behaviour).
+pub fn create_router<S: RepoApi>(state: HttpState<S>) -> Router {
+    create_router_with(state, HttpOptions::loopback())
+}
+
+/// Create the HTTP router for the given exposure options.
+pub fn create_router_with<S: RepoApi>(state: HttpState<S>, options: HttpOptions) -> Router {
+    let routes = Router::new()
         .route("/health", get(health_check))
         .route("/v1/object", get(get_object_v1::<S>))
         .route("/v1/list", get(list_objects_v1::<S>))
@@ -335,12 +500,49 @@ pub fn create_router<S: SignRequestStore + RepoApi>(state: HttpState<S>) -> Rout
         .route("/v1/state-root", get(state_root_v1::<S>))
         .route("/v1/sync-points", get(sync_points_v1::<S>))
         .route("/v1/snapshot", get(snapshot_v1::<S>))
-        .route("/v1/dnssec", get(dnssec_v1::<S>))
-        .layer(cors)
-        .layer(private_network)  // Apply to all responses including CORS preflight
-        .with_state(state)
-}
+        .with_state(state);
 
+    match options.mode {
+        HttpMode::Loopback => {
+            // CORS: a localhost convenience server with no credentialed
+            // requests, so reflect any origin — the browser client may be
+            // served from any dev origin or the Mingo site.
+            let cors = CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    HeaderName::from_static("access-control-request-private-network"),
+                ])
+                .expose_headers([HeaderName::from_static("access-control-allow-private-network")]);
+
+            // Private Network Access header — lets a public page reach a
+            // LOOPBACK daemon. Never sent in public mode.
+            let private_network = SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("access-control-allow-private-network"),
+                HeaderValue::from_static("true"),
+            );
+            // Layer order matters: cors handles OPTIONS, then private_network
+            // adds the header to all responses including preflight.
+            routes.layer(cors).layer(private_network)
+        }
+        HttpMode::Public => {
+            let origins: Vec<HeaderValue> = options
+                .allowed_origins
+                .iter()
+                .filter_map(|o| HeaderValue::from_str(o).ok())
+                .collect();
+            let cors = CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+            let guard = Arc::new(Guard { limiter: Limiter::new(options.limits), options });
+            routes
+                .layer(axum::middleware::from_fn_with_state(guard, public_admission))
+                .layer(cors)
+        }
+    }
+}
 /// Query params for `GET /v1/object`.
 #[derive(Debug, Deserialize)]
 pub struct ObjectQuery {
@@ -417,8 +619,11 @@ async fn list_objects_v1<S: RepoApi>(
     Ok(Json(views))
 }
 
+
 /// `POST /v1/submit` — submit raw signed wire bytes to the DA layer. The body
-/// is the wire-format envelope(s); the daemon forwards it unchanged.
+/// is the wire-format envelope(s); the daemon forwards it unchanged. Refused
+/// while the fast-sync read gate is active: the write would be validated
+/// against a provisional, unverified state (W5-7).
 async fn submit_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
     Query(q): Query<StateRootParams>,
@@ -428,10 +633,10 @@ async fn submit_v1<S: RepoApi>(
         return Err(ApiError::bad_request("empty submit body"));
     }
     let state = state.read().await;
+    check_read_gate(&*state)?;
     let result = state.submit(q.repo.as_deref(), body.to_vec()).await?;
     Ok(Json(result))
 }
-
 /// Query params for `GET /v1/state-root`.
 #[derive(Debug, Deserialize)]
 pub struct StateRootParams {
@@ -450,14 +655,16 @@ async fn state_root_v1<S: RepoApi>(
 }
 
 /// `GET /v1/sync-points?repo=` — the fast-sync manifest (§Sync-Point Discovery).
+/// Gated like every other state read (W5-6): an unverified anchor must not be
+/// advertised as a sync point.
 async fn sync_points_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
     Query(q): Query<StateRootParams>,
 ) -> Result<Json<SyncPointsView>, ApiError> {
     let state = state.read().await;
+    check_read_gate(&*state)?;
     Ok(Json(state.sync_points(q.repo.as_deref())?))
 }
-
 #[derive(Debug, Deserialize)]
 pub struct SnapshotParams {
     /// Block height, or `latest`/absent for the newest snapshot.
@@ -467,14 +674,19 @@ pub struct SnapshotParams {
     pub repo: Option<String>,
 }
 
+
 /// `GET /v1/snapshot?block=<n|latest>&repo=` — stream the compressed snapshot at a
 /// checkpoint height (the newest if unspecified). Self-verifying: the client
 /// rebuilds the trie and matches the root against the checkpoint (§Snapshots).
+/// Gated like every other state read (W5-6).
 async fn snapshot_v1<S: RepoApi>(
     State(state): State<HttpState<S>>,
     Query(q): Query<SnapshotParams>,
 ) -> axum::response::Response {
     let state = state.read().await;
+    if let Err(e) = check_read_gate(&*state) {
+        return e.into_response();
+    }
     let repo = q.repo.as_deref();
     let block_opt = match q.block.as_deref() {
         None | Some("") | Some("latest") => None,
@@ -508,396 +720,36 @@ async fn snapshot_v1<S: RepoApi>(
     resp
 }
 
-/// Query params for `GET /v1/dnssec`.
-#[derive(Debug, Deserialize)]
-pub struct DnssecQuery {
-    /// The domain to check/capture a `_browserid.<domain>` proof for.
-    pub domain: String,
-    /// The time (UNIX seconds) the client needs the proof valid for. Defaults to
-    /// "now" (the daemon's wall clock) when omitted.
-    pub needed_by: Option<i64>,
-    /// Extra headroom (seconds) added to `needed_by` to absorb inclusion latency.
-    pub margin: Option<i64>,
-    /// Optional repo selector; defaults to the sole repo.
-    pub repo: Option<String>,
-}
-
-/// The on-chain proof's RRSig validity window (UNIX seconds).
-#[derive(Debug, Serialize)]
-pub struct DnssecWindow {
-    pub inception: i64,
-    pub expiration: i64,
-}
-
-/// Response for `GET /v1/dnssec`. `proof_b64` is present ONLY when a refresh is
-/// needed (the on-chain proof is absent or won't cover `needed_by + margin`),
-/// carrying a freshly-captured proof for the client to submit. On the fresh path
-/// it is omitted so the client can do a bare write with no extra bytes.
-#[derive(Debug, Serialize)]
-pub struct DnssecView {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub on_chain: Option<DnssecWindow>,
-    pub needs_refresh: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proof_b64: Option<String>,
-}
-
-/// `GET /v1/dnssec?domain=&needed_by=&margin=&repo=` — report the on-chain
-/// `/sys/dnssec/<domain>` proof window and, when it won't cover `needed_by +
-/// margin` (or is absent), capture a fresh RFC 9102 proof from live DNS and
-/// return it base64url-encoded. READ/capture only — never submits; the client
-/// bears the on-chain write cost.
-async fn dnssec_v1<S: RepoApi>(
-    State(state): State<HttpState<S>>,
-    Query(q): Query<DnssecQuery>,
-) -> Result<Json<DnssecView>, ApiError> {
-    use base64::Engine;
-
-    // Read the on-chain proof (if any) and parse its RRSig window. The object is
-    // /sys/dnssec/<domain> — container path + the domain as the id.
-    let raw = {
-        let state = state.read().await;
-        check_read_gate(&*state)?;
-        state.get_object_raw(q.repo.as_deref(), "/sys/dnssec/", &q.domain)?
-    };
-    let on_chain = raw.as_deref().and_then(|bytes| {
-        sbo_core::attribution::verify_dnssec_proof_for_domain(bytes, &q.domain)
-            .ok()
-            .map(|(inception, expiration)| DnssecWindow { inception, expiration })
-    });
-
-    // A refresh is needed if there is no valid on-chain proof, or it expires
-    // before the client needs it (plus margin for inclusion latency).
-    let needed_by = q.needed_by.unwrap_or_else(now_unix);
-    let deadline = needed_by.saturating_add(q.margin.unwrap_or(0).max(0));
-    let needs_refresh = on_chain
-        .as_ref()
-        .map(|w| w.expiration < deadline)
-        .unwrap_or(true);
-
-    // Only capture (a live DNS round-trip) when the client actually needs it.
-    let proof_b64 = if needs_refresh {
-        let resolver: std::net::SocketAddr = sbo_capture::DEFAULT_RESOLVER
-            .parse()
-            .map_err(|e| ApiError::internal(format!("bad default resolver: {e}")))?;
-        let proof = sbo_capture::capture_evidence(resolver, &q.domain)
-            .await
-            .map_err(|e| ApiError::internal(format!("DNSSEC capture failed for '{}': {e}", q.domain)))?;
-        Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof))
-    } else {
-        None
-    };
-
-    Ok(Json(DnssecView { on_chain, needs_refresh, proof_b64 }))
-}
-
-/// Current wall-clock UNIX seconds (for the default `needed_by`).
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// GET /auth - Serve the auth popup page
-async fn auth_popup_page<S: SignRequestStore>(
-    State(state): State<HttpState<S>>,
-    Query(params): Query<AuthPopupParams>,
-) -> impl IntoResponse {
-    // Create the auth request immediately
-    let request_id = generate_request_id();
-    let app_name = extract_app_name(&params.origin);
-
-    let request = SignRequest {
-        request_id: request_id.clone(),
-        app_name: app_name.clone(),
-        app_origin: Some(params.origin.clone()),
-        email: params.email.clone(),
-        challenge: params.challenge.clone(),
-        purpose: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        status: SignRequestStatus::Pending,
-        assertion_jwt: None,
-        session_binding_jwt: None,
-        rejection_reason: None,
-    };
-
-    {
-        let mut state = state.write().await;
-        state.create_sign_request(request);
-    }
-
-    tracing::info!("HTTP: Created auth popup request {} for {}", request_id, params.origin);
-
-    // Serve HTML page that polls and sends result back to opener
-    let html = format!(r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>SBO Auth</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            margin: 0;
-            background: #f5f5f5;
-        }}
-        .card {{
-            background: white;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            text-align: center;
-            max-width: 400px;
-        }}
-        h1 {{ margin: 0 0 10px 0; font-size: 24px; }}
-        .app {{ color: #2563eb; font-weight: 600; }}
-        .status {{ margin: 20px 0; color: #666; }}
-        .command {{
-            background: #1e293b;
-            color: #e2e8f0;
-            padding: 12px 16px;
-            border-radius: 8px;
-            font-family: monospace;
-            margin: 15px 0;
-        }}
-        .success {{ color: #059669; }}
-        .error {{ color: #dc2626; }}
-        .spinner {{
-            width: 24px;
-            height: 24px;
-            border: 3px solid #e2e8f0;
-            border-top-color: #2563eb;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }}
-        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>SBO Auth</h1>
-        <p><span class="app">{app_name}</span> wants to authenticate you</p>
-        <div id="status" class="status">
-            <div class="spinner"></div>
-            <p>Waiting for approval...</p>
-        </div>
-        <div class="command">sbo auth approve {request_id}</div>
-        <p style="font-size: 13px; color: #94a3b8;">Run this command in your terminal</p>
-    </div>
-    <script>
-        const REQUEST_ID = "{request_id}";
-        const ORIGIN = "{origin}";
-
-        async function poll() {{
-            try {{
-                const res = await fetch('/auth/status/' + REQUEST_ID);
-                const data = await res.json();
-
-                if (data.status === 'approved') {{
-                    document.getElementById('status').innerHTML =
-                        '<p class="success">✓ Approved!</p><p>Closing...</p>';
-
-                    if (window.opener) {{
-                        window.opener.postMessage({{
-                            type: 'sbo:response',
-                            payload: {{
-                                assertion: data.assertion_jwt,
-                                session: data.session_binding_jwt
-                            }}
-                        }}, ORIGIN);
-                    }}
-
-                    setTimeout(() => window.close(), 1000);
-                    return;
-                }}
-
-                if (data.status === 'rejected') {{
-                    document.getElementById('status').innerHTML =
-                        '<p class="error">✗ Rejected</p><p>' + (data.reason || '') + '</p>';
-
-                    if (window.opener) {{
-                        window.opener.postMessage({{
-                            type: 'sbo:error',
-                            error: {{ code: 'rejected', message: data.reason || 'Request rejected' }}
-                        }}, ORIGIN);
-                    }}
-
-                    setTimeout(() => window.close(), 2000);
-                    return;
-                }}
-
-                if (data.status === 'expired' || data.status === 'not_found') {{
-                    document.getElementById('status').innerHTML =
-                        '<p class="error">Request expired</p>';
-
-                    if (window.opener) {{
-                        window.opener.postMessage({{
-                            type: 'sbo:error',
-                            error: {{ code: 'expired', message: 'Request expired' }}
-                        }}, ORIGIN);
-                    }}
-
-                    setTimeout(() => window.close(), 2000);
-                    return;
-                }}
-
-                // Still pending, continue polling
-                setTimeout(poll, 2000);
-            }} catch (e) {{
-                console.error('Poll error:', e);
-                setTimeout(poll, 2000);
-            }}
-        }}
-
-        // Start polling
-        poll();
-
-        // Handle window close
-        window.addEventListener('beforeunload', () => {{
-            if (window.opener) {{
-                window.opener.postMessage({{
-                    type: 'sbo:error',
-                    error: {{ code: 'closed', message: 'User closed the window' }}
-                }}, ORIGIN);
-            }}
-        }});
-    </script>
-</body>
-</html>"#,
-        app_name = html_escape(&app_name),
-        request_id = html_escape(&request_id),
-        origin = html_escape(&params.origin),
-    );
-
-    Html(html)
-}
-
-/// Escape HTML special characters
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// POST /auth/request - Create a new auth request
-async fn create_auth_request<S: SignRequestStore>(
-    State(state): State<HttpState<S>>,
-    Json(body): Json<AuthRequestBody>,
-) -> impl IntoResponse {
-    let request_id = generate_request_id();
-
-    let app_origin = body.app_origin;
-    let app_name = extract_app_name(&app_origin);
-
-    let request = SignRequest {
-        request_id: request_id.clone(),
-        app_name,
-        app_origin: Some(app_origin.clone()),
-        email: body.email,
-        challenge: body.challenge,
-        purpose: body.purpose,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        status: SignRequestStatus::Pending,
-        assertion_jwt: None,
-        session_binding_jwt: None,
-        rejection_reason: None,
-    };
-
-    {
-        let mut state = state.write().await;
-        state.create_sign_request(request);
-    }
-
-    tracing::info!("HTTP: Created auth request {} for {}", request_id, app_origin);
-
-    (StatusCode::OK, Json(AuthRequestResponse { request_id }))
-}
-
-/// GET /auth/status/:request_id - Poll for auth status
-async fn get_auth_status<S: SignRequestStore>(
-    State(state): State<HttpState<S>>,
-    Path(request_id): Path<String>,
-) -> impl IntoResponse {
-    let state = state.read().await;
-
-    match state.get_sign_request(&request_id) {
-        Some(request) => {
-            let response = AuthStatusResponse {
-                status: match request.status {
-                    SignRequestStatus::Pending => "pending".to_string(),
-                    SignRequestStatus::Approved => "approved".to_string(),
-                    SignRequestStatus::Rejected => "rejected".to_string(),
-                    SignRequestStatus::Expired => "expired".to_string(),
-                },
-                assertion_jwt: request.assertion_jwt.clone(),
-                session_binding_jwt: request.session_binding_jwt.clone(),
-                reason: request.rejection_reason.clone(),
-            };
-            (StatusCode::OK, Json(response))
-        }
-        None => {
-            let response = AuthStatusResponse {
-                status: "not_found".to_string(),
-                assertion_jwt: None,
-                session_binding_jwt: None,
-                reason: Some("Request not found or expired".to_string()),
-            };
-            (StatusCode::NOT_FOUND, Json(response))
-        }
-    }
-}
-
 /// GET /health - Health check endpoint
 async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Generate a random request ID
-fn generate_request_id() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 8] = rng.gen();
-    hex::encode(bytes)
-}
-
-/// Extract app name from origin URL
-fn extract_app_name(origin: &str) -> String {
-    origin
-        .strip_prefix("https://")
-        .or_else(|| origin.strip_prefix("http://"))
-        .unwrap_or(origin)
-        .split('/')
-        .next()
-        .unwrap_or(origin)
-        .to_string()
-}
-
-/// Start the HTTP server. Binds `127.0.0.1:<port>` by default; override the full
-/// bind address with `SBO_HTTP_BIND` (e.g. `0.0.0.0:7890` to reach it over a
-/// LAN/tailnet — CORS is already permissive, so only do this on a trusted
-/// network).
-pub async fn run_server<S: SignRequestStore + RepoApi>(state: HttpState<S>, port: u16) -> anyhow::Result<()> {
-    let router = create_router(state);
-    let bind = std::env::var("SBO_HTTP_BIND").unwrap_or_else(|_| format!("127.0.0.1:{port}"));
-
-    tracing::info!("HTTP server listening on http://{}", bind);
-
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, router).await?;
-
+/// Start the HTTP server on `bind` with the given exposure options. The
+/// listener is served with connection info so the public-mode limiter keys
+/// on the peer address.
+pub async fn run_server<S: RepoApi>(
+    state: HttpState<S>,
+    bind: &str,
+    options: HttpOptions,
+) -> anyhow::Result<()> {
+    tracing::info!("HTTP server listening on http://{} ({:?} mode)", bind, options.mode);
+    if options.mode == HttpMode::Public {
+        if options.allowed_origins.is_empty() && options.bearer_tokens.is_empty() {
+            tracing::warn!(
+                "HTTP public mode with no allowed_origins and no bearer_tokens: /v1/submit is refused for every caller"
+            );
+        } else {
+            tracing::info!(
+                "HTTP public mode: {} allowed origin(s), {} bearer token(s)",
+                options.allowed_origins.len(),
+                options.bearer_tokens.len()
+            );
+        }
+    }
+    let router = create_router_with(state, options);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
@@ -914,27 +766,12 @@ mod tests {
         assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
     }
     use http_body_util::BodyExt;
-    use std::collections::HashMap;
     use tower::ServiceExt; // for `oneshot`
 
-    /// A mock state implementing both traits the router requires, so we can
+    /// A mock state implementing the trait the router requires, so we can
     /// exercise routing + (de)serialization of the `/v1/*` surface in isolation.
     #[derive(Default)]
-    struct MockState {
-        requests: HashMap<String, SignRequest>,
-    }
-
-    impl SignRequestStore for MockState {
-        fn create_sign_request(&mut self, request: SignRequest) -> String {
-            let id = request.request_id.clone();
-            self.requests.insert(id.clone(), request);
-            id
-        }
-        fn get_sign_request(&self, request_id: &str) -> Option<&SignRequest> {
-            self.requests.get(request_id)
-        }
-    }
-
+    struct MockState;
     fn sample_view() -> ObjectView {
         ObjectView {
             path: "/communities/cooks/".to_string(),

@@ -5,7 +5,7 @@ status: in-progress
 type: bug
 priority: high
 created_at: 2026-07-16T19:33:24Z
-updated_at: 2026-07-16T20:23:38Z
+updated_at: 2026-11-04T21:34:48Z
 ---
 
 ## Problem
@@ -49,3 +49,7 @@ Rejected: order-tolerant apply (non-monotonic bans/not_attested make block-as-a-
 - One-batch-in-flight scheduler: accumulate while a batch finalizes; on finality, submit the next accumulated batch.
 - turbo client: add submission-status polling (get_submission_info → on-chain) for the barrier.
 - No wire-format change (multi-message payload already supported); no validation/trie change.
+
+## Audit 2026-11
+
+Carried as D17 (WS4 §1, WS2 W2-2/W2-3). The overlay/reconcile and tip-policy halves are sbo-5fja (Q25); the on-chain ordering gap stays here.

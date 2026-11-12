@@ -52,45 +52,6 @@ fn is_zero_hash(h: &[u8; 32]) -> bool {
     h == &[0u8; 32]
 }
 
-// Custom serialization for Path and Id
-impl Serialize for Path {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for Path {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Path::parse(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for Id {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for Id {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Id::new(&s).map_err(serde::de::Error::custom)
-    }
-}
-
 impl Serialize for ContentHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

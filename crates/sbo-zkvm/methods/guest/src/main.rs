@@ -180,7 +180,7 @@ fn verify_header_chain(input: &BlockProofInput) {
         // Genesis block - no previous proof to verify
         assert!(input.prev_journal.is_none(), "Genesis has no previous proof");
         assert!(input.prev_receipt_bytes.is_none(), "Genesis has no previous receipt");
-        assert_eq!(input.prev_state_root, [0u8; 32], "Genesis starts with empty state");
+        assert_eq!(input.prev_state_root, sbo_crypto::trie::empty_root(), "Genesis starts with empty state");
     } else if input.is_first_proof {
         // Bootstrap mode: first proof in chain starting from arbitrary block
         // No previous proof required, but we accept the prev_state_root as trusted

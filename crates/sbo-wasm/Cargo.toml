@@ -20,6 +20,9 @@ thiserror.workspace = true
 hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# The identifier grammar (`Id` / `Path` / `Action`) the included message module
+# re-exports; no_std-clean.
+sbo-types = { path = "../sbo-types", features = ["serde"] }
 
 # Browser bindings (Phase 7.4). wasm-bindgen + serde-wasm-bindgen compile on
 # native too, so the pure kit stays unit-testable; JS glue is emitted only for

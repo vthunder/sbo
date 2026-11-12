@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "crates/sbo-zkvm/methods"]
+# `vendor/dnssec-prover` is reached only through `[patch.crates-io]` below; it is
+# excluded from the workspace so `cargo test --workspace` does not build its
+# (un-vendored) upstream test suite.
+exclude = ["vendor/dnssec-prover"]
 
 # `default-members` is what a bare `cargo build`/`cargo test` (no `-p`) operates
 # on. It excludes the RISC Zero crates (`sbo-zkvm` and its `methods` guest),
@@ -29,6 +33,12 @@ default-members = [
 [profile.release]
 incremental = true
 
+# The vendored DNSSEC validator does big-integer RSA/ECDSA math in software; at
+# opt-level 0 a single chain validation takes seconds, which the offline DNSSEC
+# tests multiply. Upstream ships `opt-level = 1` for the same reason.
+[profile.dev.package.dnssec-prover]
+opt-level = 2
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -36,6 +46,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/vthunder/sbo"
 
 [workspace.dependencies]
+# Git dependencies: pinned by rev so the lockfile is the only thing that moves
+# (audit 2026-11 W7-3/W7-4). Bump the rev here, then `cargo update -p <crate>`.
+avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", rev = "de07cce10fe8c5ae5f06c3eb09767f4432220ebc" }
+browserid-core = { git = "https://github.com/vthunder/browserid-ng", rev = "b83cce1" }
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
@@ -81,3 +95,9 @@ sbo-crypto = { path = "crates/sbo-crypto" }
 sbo-avail = { path = "crates/sbo-avail" }
 sbo-daemon = { path = "crates/sbo-daemon" }
 sbo-rpc = { path = "crates/sbo-rpc" }
+
+# dnssec-prover with trust-anchor injection (`verify_rr_stream_with_anchors`),
+# audit 2026-11 D6/S4 (Q3 (a)). See vendor/dnssec-prover/Cargo.toml for the
+# exact delta against the registry 0.6.10 release.
+[patch.crates-io]
+dnssec-prover = { path = "vendor/dnssec-prover" }

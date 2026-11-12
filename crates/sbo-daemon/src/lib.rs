@@ -10,6 +10,7 @@ pub mod rpc;
 pub mod turbo;
 pub mod submit_queue;
 pub mod sync;
+pub mod mirror;
 pub mod ipc;
 pub mod http;
 pub mod validate;

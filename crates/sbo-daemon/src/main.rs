@@ -2,17 +2,17 @@
 //!
 //! Manages local SBO repository replicas with data availability verification.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use sbo_daemon::config::Config;
-use sbo_daemon::http::{self, SignRequestStore};
-use sbo_daemon::ipc::{IpcServer, Request, Response, SignRequestStatus, SignRequest as IpcSignRequest};
+use sbo_daemon::http;
+use sbo_daemon::ipc::{IpcServer, Request, Response};
 use sbo_daemon::lc::LcManager;
 use sbo_daemon::prover::Prover;
 use sbo_daemon::repo::{RepoManager, SboRawUri};
@@ -72,6 +72,10 @@ enum Commands {
         /// State directory to load into (default: the configured repo's state dir).
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Adopt the serving node's own advertised root without any signed
+        /// checkpoint: trusts that node completely. Never the default.
+        #[arg(long)]
+        trust_serving_node: bool,
     },
 }
 
@@ -102,7 +106,7 @@ impl VerboseFlags {
 /// Debug flags for development/troubleshooting
 #[derive(Clone, Default)]
 pub struct DebugFlags {
-    /// Save raw block data (header, matrix, lookup) to /tmp/sbo-debug/
+    /// Save raw block data (header, matrix, lookup) to `<sbo dir>/debug/` (owner-only, W4-3)
     pub save_raw_block: bool,
 }
 
@@ -125,8 +129,6 @@ struct DaemonState {
     /// TurboDA credentials per DA target — consulted at submit time so a
     /// repo this node cannot submit for is refused up front.
     turbo_config: sbo_daemon::config::TurboDaConfig,
-    /// Pending sign requests from apps (keyed by request_id)
-    sign_requests: HashMap<String, IpcSignRequest>,
     /// Shared mempool overlay (validated-but-unconfirmed writes). Cloned into the
     /// sync task so confirmed writes reconcile (evict) their shadows.
     pending: SharedPending,
@@ -190,24 +192,11 @@ impl DaemonState {
             rpc,
             turbo,
             turbo_config,
-            sign_requests: HashMap::new(),
             pending: std::sync::Arc::new(std::sync::RwLock::new(PendingPool::new())),
             trust_gate,
             submit_queue: sbo_daemon::submit_queue::SubmitQueue::new(),
             status_checker: std::sync::Arc::new(sbo_daemon::status::StatusChecker::new()),
         })
-    }
-}
-
-impl SignRequestStore for DaemonState {
-    fn create_sign_request(&mut self, request: IpcSignRequest) -> String {
-        let id = request.request_id.clone();
-        self.sign_requests.insert(id.clone(), request);
-        id
-    }
-
-    fn get_sign_request(&self, request_id: &str) -> Option<&IpcSignRequest> {
-        self.sign_requests.get(request_id)
     }
 }
 
@@ -297,7 +286,7 @@ fn generate_sboq_text(
 ) -> Result<Option<String>, String> {
     match db.generate_trie_proof_auto(path, id) {
         Ok(Some((creator, trie_proof))) => {
-            let object_file_path = repo.path.join(path_str.trim_start_matches('/')).join(id_str);
+            let object_file_path = sbo_daemon::mirror::object_file(&repo.path, path, id.as_str());
             let object_bytes = std::fs::read(&object_file_path).ok();
             let sboq = sbo_core::proof::SboqMessage {
                 version: "0.2".to_string(),
@@ -506,7 +495,7 @@ impl RepoApi for DaemonState {
         let (block, root) = db
             .get_latest_state_root()
             .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?
-            .unwrap_or((repo.head, [0u8; 32]));
+            .unwrap_or((repo.head, sbo_core::empty_root()));
         Ok(StateRootView {
             block,
             state_root: hex::encode(root),
@@ -528,7 +517,7 @@ impl RepoApi for DaemonState {
         let (block, root) = db
             .get_latest_state_root()
             .map_err(|e| ApiError::internal(format!("State DB error: {e}")))?
-            .unwrap_or((repo.head, [0u8; 32]));
+            .unwrap_or((repo.head, sbo_core::empty_root()));
         // On-chain checkpoint objects (if any have been published).
         let checkpoints = db
             .list_objects_by_path_prefix("/sys/checkpoints/")
@@ -536,10 +525,14 @@ impl RepoApi for DaemonState {
             .into_iter()
             .filter_map(|o| {
                 let v: serde_json::Value = serde_json::from_slice(&o.payload).ok()?;
+                let id = o.id.as_str().to_string();
+                let wire = sbo_daemon::trust::load_checkpoint_wire(&repo.uri.to_string(), &id)
+                    .map(|w| base64::engine::general_purpose::STANDARD.encode(w));
                 Some(sbo_daemon::http::CheckpointView {
-                    id: o.id.as_str().to_string(),
+                    id,
                     block: v.get("block")?.as_u64()?,
                     state_root: v.get("state_root")?.as_str()?.to_string(),
+                    wire,
                 })
             })
             .collect();
@@ -615,8 +608,15 @@ impl RepoApi for DaemonState {
 
         // Parse the wire envelope(s). A malformed body is a hard 400 — far
         // better UX than today's silent DA-layer filtering.
-        let client_messages = sbo_core::wire::parse_batch(&data)
-            .map_err(|e| ApiError::bad_request(format!("wire parse failed: {e}")))?;
+        // Keep each message with the bytes it was parsed from: `object_hash`
+        // is sha256 of those bytes, the same bytes forwarded to the DA layer
+        // (Q32 (c), Q35 (a)).
+        let (client_messages, client_raws): (Vec<sbo_core::message::Message>, Vec<Vec<u8>>) =
+            sbo_core::wire::parse_batch_raw(&data)
+                .map_err(|e| ApiError::bad_request(format!("wire parse failed: {e}")))?
+                .into_iter()
+                .map(|(m, raw)| (m, raw.to_vec()))
+                .unzip();
         if client_messages.is_empty() {
             return Err(ApiError::bad_request("no SBO messages in submit body"));
         }
@@ -650,13 +650,30 @@ impl RepoApi for DaemonState {
         // objects AHEAD of the client's messages — they validate and stage
         // through the same pipeline, and the client's own attribution check
         // below then sees the fresh copy in the overlay.
+        //
+        // W5-9: issuers come from `capture_issuers`, which refuses a
+        // presentation that is not internally consistent (envelope key ==
+        // access-key, assertion/warrant signatures, audience/grantee joins)
+        // BEFORE any live capture, and the batch is capped at
+        // `MAX_ISSUERS_PER_SUBMIT` distinct issuers. Each capture runs inside
+        // this handler, so public mode's per-source spend limiter bounds
+        // them too.
         let mut issuers: Vec<String> = Vec::new();
         for m in &client_messages {
-            for d in sbo_daemon::evidence::required_issuers(m) {
+            let named = sbo_daemon::evidence::capture_issuers(m)
+                .map_err(|e| ApiError::bad_request(format!("Attribution: {e}")))?;
+            for d in named {
                 if !issuers.contains(&d) {
                     issuers.push(d);
                 }
             }
+        }
+        if issuers.len() > sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT {
+            return Err(ApiError::bad_request(format!(
+                "submit names {} issuers; at most {} per submit",
+                issuers.len(),
+                sbo_daemon::evidence::MAX_ISSUERS_PER_SUBMIT
+            )));
         }
         let deadline = now + sbo_daemon::evidence::DEFAULT_MARGIN_SECS;
         let stale = sbo_daemon::evidence::stale_issuers(&overlay, &issuers, deadline);
@@ -665,19 +682,24 @@ impl RepoApi for DaemonState {
             .map_err(|e| ApiError::internal(format!("issuer evidence: {e}")))?;
         let evidence_refreshed: Vec<String> = refreshes.iter().map(|(d, _)| d.clone()).collect();
         let mut messages: Vec<sbo_core::message::Message> = Vec::new();
+        let mut raws: Vec<Vec<u8>> = Vec::new();
         let mut refresh_wires: Vec<Vec<u8>> = Vec::new();
         for (domain, wire) in refreshes {
-            let mut parsed = sbo_core::wire::parse_batch(&wire)
+            let parsed = sbo_core::wire::parse_batch_raw(&wire)
                 .map_err(|e| ApiError::internal(format!("evidence refresh for {domain}: {e}")))?;
-            messages.append(&mut parsed);
+            for (m, raw) in parsed {
+                messages.push(m);
+                raws.push(raw.to_vec());
+            }
             refresh_wires.push(wire);
         }
         messages.extend(client_messages);
+        raws.extend(client_raws);
 
         // Fully validate every message and pre-build its overlay object before
         // mutating the pool, so a rejected message leaves the pool untouched.
         let mut staged: Vec<(StoredObject, [u8; 32])> = Vec::with_capacity(messages.len());
-        for msg in &messages {
+        for (msg, raw) in messages.iter().zip(raws.iter()) {
             let l2 = L2Context::for_block(Some(now), &overlay)
                 .with_db(repo.uri.clone(), repo.expected_genesis.clone());
             match validate_message(msg, &overlay, &repo.path, &l2) {
@@ -725,7 +747,7 @@ impl RepoApi for DaemonState {
                     return Err(ApiError::bad_request(format!("revocation: {reason}")));
                 }
             }
-            let object_hash = sbo_core::sha256(&sbo_core::wire::serialize(msg));
+            let object_hash = sbo_core::sha256(raw);
             // Only content-bearing writes (Post) produce an overlay object;
             // Deletes have no stored object and simply wait for confirmation.
             if let Some(obj) = message_to_stored_object(
@@ -898,7 +920,7 @@ async fn checkpoint_if_due(
                         let wire = build_checkpoint_wire(
                             key,
                             head,
-                            &hex::encode(root),
+                            &sbo_daemon::trust::format_state_root(&root),
                             prev_checkpoint.as_deref(),
                             now,
                         );
@@ -1013,14 +1035,17 @@ async fn attest_if_due(
         // attested. If we have no root at or before `block` (bootstrapped past it),
         // we cannot independently vouch → skip. Mismatch → divergence alarm.
         let our_root = match state_db.get_state_root_at_or_before(block) {
-            Ok(Some((_, r))) => hex::encode(r),
+            Ok(Some((_, r))) => r,
             Ok(None) => continue,
             Err(e) => {
                 tracing::warn!("attest: root lookup for block {block} failed: {e}");
                 continue;
             }
         };
-        if our_root != cp_root {
+        // Compare by value: the checkpoint may carry `sha256:<hex>` (spec) or
+        // bare hex (pre-Q34); an unparseable root never matches.
+        if sbo_daemon::trust::parse_state_root(cp_root) != Some(our_root) {
+            let our_root = sbo_daemon::trust::format_state_root(&our_root);
             tracing::error!(
                 "attest: DIVERGENCE at block {block}: checkpoint root {cp_root} != our root {our_root}; not attesting"
             );
@@ -1028,7 +1053,14 @@ async fn attest_if_due(
             continue;
         }
 
-        let wire = build_attestation_wire(key, attestor, block, &our_root, now);
+        // Emit the spec form (`sha256:<hex>`, Q34 a).
+        let wire = build_attestation_wire(
+            key,
+            attestor,
+            block,
+            &sbo_daemon::trust::format_state_root(&our_root),
+            now,
+        );
         // Route through the ordered finality-gated queue (bean sbo-hy4r).
         queue.enqueue(wire).await;
         tracing::info!("queued checkpoint-attestation.v1 for block {block}");
@@ -1081,7 +1113,7 @@ fn build_attestation_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)
@@ -1089,6 +1121,7 @@ fn build_attestation_wire(
 
 /// Load the checkpoint-authority signing key from a JSON file `{"secret_key":"<hex>"}`.
 fn load_checkpoint_key(path: &std::path::Path) -> anyhow::Result<sbo_core::crypto::SigningKey> {
+    Config::assert_private_key_file(path)?;
     let bytes = std::fs::read(path)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
     let hex_key = v
@@ -1142,7 +1175,7 @@ fn build_checkpoint_wire(
         prev: None,
         auth_cert: None,
         auth_evidence: None,
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     sbo_core::wire::serialize(&msg)
@@ -1214,7 +1247,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => {
             show_status(&config).await?;
         }
-        Commands::Bootstrap { node, state_dir } => {
+        Commands::Bootstrap { node, state_dir, trust_serving_node } => {
             // repos.json is only needed to derive the default state dir and to set
             // the head afterward; tolerate its absence when --state-dir is given.
             let repos = RepoManager::load(config.daemon.repos_index.clone()).ok();
@@ -1232,32 +1265,39 @@ async fn main() -> anyhow::Result<()> {
             };
             let db = sbo_daemon::shared_state_db(&dir)?;
             println!("Bootstrapping from {node} into {} …", dir.display());
-            // Under a key-pinned trust policy the snapshot root is UNTRUSTED until
-            // verified on chain: load provisionally, persist a pending anchor, and
-            // let `start`'s walk-forward promote it. With no `[trust]` config, keep
-            // the legacy trust-the-node bootstrap.
+            // The serving node is never a trust root (D26). A snapshot is trusted
+            // only through `checkpoint.v1` objects signed by the pinned keys of
+            // the `[trust]` policy — carried in the manifest and re-verified here,
+            // else observed on chain by `start`'s walk-forward (reads gated until
+            // then). `--trust-serving-node` is the explicit opt-in to adopt the
+            // node's own root.
             let policy = sbo_daemon::trust::TrustPolicy::from_config(
                 &config.trust.attestors,
                 config.trust.threshold,
             )?;
-            let result = if policy.is_enforcing() {
-                let min_att = config.trust.threshold.saturating_sub(1);
-                let r = sbo_daemon::bootstrap::bootstrap_provisional(&db, &node, min_att).await?;
-                let anchor = sbo_daemon::trust::PendingAnchor {
-                    block: r.block,
-                    state_root: hex::encode(r.state_root),
-                    attestors: config.trust.attestors.clone(),
-                    threshold: config.trust.threshold,
-                };
-                anchor.save(&dir)?;
-                println!(
-                    "⚠ provisional anchor at block {} — reads GATED until {} pinned attestors \
-                     verify the root on chain (walk-forward via `start`)",
-                    r.block, config.trust.threshold
-                );
-                r
+            let result = if trust_serving_node {
+                println!("⚠ --trust-serving-node: adopting {node}'s advertised root without a signed checkpoint");
+                sbo_daemon::bootstrap::bootstrap_trust_serving_node(&db, &node).await?
             } else {
-                sbo_daemon::bootstrap::bootstrap(&db, &node).await?
+                let r = sbo_daemon::bootstrap::bootstrap_with_policy(&db, &node, &policy).await?;
+                match r.trust {
+                    sbo_daemon::bootstrap::RootTrust::Provisional => {
+                        let anchor = sbo_daemon::trust::PendingAnchor {
+                            block: r.block,
+                            state_root: hex::encode(r.state_root),
+                            attestors: config.trust.attestors.clone(),
+                            threshold: config.trust.threshold,
+                        };
+                        anchor.save(&dir)?;
+                        println!(
+                            "⚠ provisional anchor at block {} — reads GATED until {} pinned attestors \
+                             verify the root on chain (walk-forward via `start`)",
+                            r.block, config.trust.threshold
+                        );
+                    }
+                    _ => sbo_daemon::trust::PendingAnchor::clear(&dir)?,
+                }
+                r
             };
             println!(
                 "✓ loaded snapshot at block {} ({} objects); trust={:?}; state_root={}",
@@ -1442,10 +1482,14 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
         })
     };
 
-    // Start HTTP server for web auth
+    // Start the HTTP read + submit API. The exposure mode is resolved up front
+    // so a misconfigured public bind (loopback mode on 0.0.0.0) fails the
+    // start instead of serving open CORS on a routable address (W5-1).
+    let http_options = config.http.resolve()?;
+    let http_bind = config.http.bind.clone();
     let state_for_http = Arc::clone(&state);
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = http::run_server(state_for_http, 7890).await {
+        if let Err(e) = http::run_server(state_for_http, &http_bind, http_options).await {
             tracing::error!("HTTP server error: {}", e);
         }
     });
@@ -1684,51 +1728,32 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                             {
                                 let gate = trust_gate_for_sync.read().ok();
                                 if let Some(g) = gate {
-                                    if g.is_gated() {
-                                        if let Some(anchor) = g.anchor() {
-                                            let timeout = config.trust.timeout_blocks;
-                                            if timeout > 0 && block_num > anchor.block + timeout {
-                                                tracing::error!(
-                                                    "fast-sync trust NOT established within {} blocks \
-                                                     of anchor {} ({}/{} attestors); stopping sync — \
-                                                     reads remain refused",
-                                                    timeout,
-                                                    anchor.block,
-                                                    g.backer_count(),
-                                                    g.threshold(),
-                                                );
-                                                return Ok::<(), anyhow::Error>(());
-                                            }
-                                        }
+                                    // Bounded wait exhausted: report "trust not
+                                    // established" and stop. No degrade fallback
+                                    // by design (see `TrustGate::wait_exhausted`).
+                                    let timeout = config.trust.timeout_blocks;
+                                    if g.wait_exhausted(block_num, timeout) {
+                                        let anchor_block = g.anchor().map(|a| a.block).unwrap_or_default();
+                                        tracing::error!(
+                                            "fast-sync trust NOT established within {} blocks \
+                                             of anchor {} ({}/{} attestors); stopping sync — \
+                                             reads remain refused (no degrade fallback: pick a \
+                                             new anchor or replay from genesis)",
+                                            timeout,
+                                            anchor_block,
+                                            g.backer_count(),
+                                            g.threshold(),
+                                        );
+                                        return Ok::<(), anyhow::Error>(());
                                     }
                                 }
                             }
 
-                            // Genesis verification: when this block is a repo's genesis
-                            // anchor and an expected hash was recorded, verify the
-                            // reconstructed genesis. Non-fatal — a mismatch is logged
-                            // loudly (operator-visible) rather than crashing sync.
-                            let to_verify: Vec<(String, Result<(), String>)> = state
-                                .repos
-                                .list()
-                                .filter(|r| {
-                                    r.expected_genesis.is_some()
-                                        && r.uri.first_block == Some(block_num)
-                                })
-                                .map(|r| (r.id.clone(), r.verify_genesis(&result.block_data)))
-                                .collect();
-                            for (id, outcome) in to_verify {
-                                match outcome {
-                                    Ok(()) => tracing::info!(
-                                        "Genesis verified for repo {} at block {}",
-                                        id, block_num
-                                    ),
-                                    Err(e) => tracing::error!(
-                                        "GENESIS VERIFICATION FAILED for repo {} at block {}: {}",
-                                        id, block_num, e
-                                    ),
-                                }
-                            }
+                            // Genesis verification (expected genesisHash, structural
+                            // validity, one genesis per anchor) is enforced inside
+                            // `process_block` (audit 2026-11 D5/D7/S19, Q7 (a)): a
+                            // mismatch or an invalid anchor is an `Err` that halts
+                            // sync below, never a logged-and-continued warning.
 
                             // Add block to prover if enabled and genesis has been processed
                             if let Some(ref mut p) = prover {
@@ -1750,7 +1775,7 @@ async fn run_daemon(config: Config, verbose: VerboseFlags, debug: DebugFlags) ->
                                     );
                                 } else {
                                     // Use real state roots and objects from process_block result
-                                    let pre_root = result.pre_state_root.unwrap_or([0u8; 32]);
+                                    let pre_root = result.pre_state_root.unwrap_or(sbo_core::empty_root());
                                     let post_root = result.post_state_root;
 
                                     p.add_block(
@@ -2135,7 +2160,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 Ok(Some((creator, trie_proof))) => {
                     // Read the object file from disk
                     // Object path is: repo_path / sbo_path (without leading /) / id
-                    let object_file_path = repo.path.join(path.trim_start_matches('/')).join(&id);
+                    let object_file_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_path, sbo_id.as_str());
                     let object_bytes = match std::fs::read(&object_file_path) {
                         Ok(bytes) => Some(bytes),
                         Err(e) => {
@@ -2224,12 +2249,19 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
 
                 // Scan /sys/names/ directory
                 // Structure: /sys/names/<name> (file) or /sys/names/<name>/<object_id> (directory)
-                let names_path = repo.path.join("sys").join("names");
+                let names_path = sbo_daemon::mirror::collection_dir(&repo.path, &sbo_core::message::Path::parse("/sys/names/").unwrap());
                 if names_path.exists() {
                     if let Ok(entries) = std::fs::read_dir(&names_path) {
                         for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                            let raw = entry.file_name().to_string_lossy().to_string();
                             let entry_path = entry.path();
+                            // Decode the mirror layout: object files vs `<seg>.d/` dirs.
+                            let decoded = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                sbo_daemon::mirror::object_id_from_file_name(&raw)
+                            } else {
+                                raw.strip_suffix(sbo_daemon::mirror::COLLECTION_SUFFIX).map(String::from)
+                            };
+                            let Some(name) = decoded else { continue };
 
                             // Try to find identity content - either direct file or file in directory
                             let content = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -2321,7 +2353,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Try to read the identity file
-                let identity_path = repo.path.join("sys").join("names").join(&name);
+                let identity_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_core::message::Path::parse("/sys/names/").unwrap(), &name);
                 if identity_path.exists() {
                     if let Ok(content) = std::fs::read(&identity_path) {
                         if let Ok(msg) = sbo_core::wire::parse(&content) {
@@ -2413,12 +2445,19 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Scan /sys/domains/ directory
-                let domains_path = repo.path.join("sys").join("domains");
+                let domains_path = sbo_daemon::mirror::collection_dir(&repo.path, &sbo_core::message::Path::parse("/sys/domains/").unwrap());
                 if domains_path.exists() {
                     if let Ok(entries) = std::fs::read_dir(&domains_path) {
                         for entry in entries.flatten() {
-                            let domain_name = entry.file_name().to_string_lossy().to_string();
+                            let raw = entry.file_name().to_string_lossy().to_string();
                             let entry_path = entry.path();
+                            // Decode the mirror layout: object files vs `<seg>.d/` dirs.
+                            let decoded = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                sbo_daemon::mirror::object_id_from_file_name(&raw)
+                            } else {
+                                raw.strip_suffix(sbo_daemon::mirror::COLLECTION_SUFFIX).map(String::from)
+                            };
+                            let Some(domain_name) = decoded else { continue };
 
                             // Try to read domain content
                             let content = if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -2489,7 +2528,7 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
 
                 // Try to read the domain file
-                let domain_path = repo.path.join("sys").join("domains").join(&domain_name);
+                let domain_path = sbo_daemon::mirror::object_file(&repo.path, &sbo_core::message::Path::parse("/sys/domains/").unwrap(), &domain_name);
                 if domain_path.exists() {
                     if let Ok(content) = std::fs::read(&domain_path) {
                         if let Ok(msg) = sbo_core::wire::parse(&content) {
@@ -2559,6 +2598,17 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
                 }
             };
 
+            // The genesis must be a structurally valid genesis submission
+            // (Genesis Spec §Genesis Validation) or no node will ever apply it.
+            match sbo_core::wire::parse_batch(&genesis_data) {
+                Ok(msgs) => {
+                    if let Err(e) = sbo_core::Genesis::validate(&msgs) {
+                        return Response::error(format!("Genesis batch is not a valid genesis: {e}"));
+                    }
+                }
+                Err(e) => return Response::error(format!("Genesis batch does not parse: {e}")),
+            }
+
             // Submit genesis via TurboDA
             match state_read.turbo.submit_raw(&genesis_data).await {
                 Ok(result) => {
@@ -2598,171 +2648,6 @@ async fn handle_request(req: Request, state: Arc<RwLock<DaemonState>>) -> Respon
             tracing::info!("Shutdown requested via IPC");
             // TODO: Graceful shutdown
             Response::ok(serde_json::json!({"status": "shutting down"}))
-        }
-
-        // ====================================================================
-        // Auth / Sign Request Flow
-        // ====================================================================
-
-        Request::SubmitSignRequest {
-            request_id,
-            app_name,
-            app_origin,
-            email,
-            challenge,
-            purpose,
-        } => {
-            let mut state_write = state.write().await;
-
-            // Check for duplicate request_id
-            if state_write.sign_requests.contains_key(&request_id) {
-                return Response::error(format!("Request ID '{}' already exists", request_id));
-            }
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let request = IpcSignRequest {
-                request_id: request_id.clone(),
-                app_name,
-                app_origin,
-                email,
-                challenge,
-                purpose,
-                status: SignRequestStatus::Pending,
-                created_at: now,
-                assertion_jwt: None,
-                session_binding_jwt: None,
-                rejection_reason: None,
-            };
-
-            state_write.sign_requests.insert(request_id.clone(), request);
-
-            tracing::info!("New sign request queued: {}", request_id);
-
-            Response::ok(serde_json::json!({
-                "status": "pending",
-                "request_id": request_id,
-            }))
-        }
-
-        Request::ListSignRequests => {
-            let state_read = state.read().await;
-
-            let requests: Vec<_> = state_read
-                .sign_requests
-                .values()
-                .filter(|r| r.status == SignRequestStatus::Pending)
-                .map(|r| serde_json::json!({
-                    "request_id": r.request_id,
-                    "app_name": r.app_name,
-                    "app_origin": r.app_origin,
-                    "email": r.email,
-                    "challenge": r.challenge,
-                    "purpose": r.purpose,
-                    "created_at": r.created_at,
-                }))
-                .collect();
-
-            Response::ok(serde_json::json!({ "requests": requests }))
-        }
-
-        Request::GetSignRequest { request_id } => {
-            let state_read = state.read().await;
-
-            match state_read.sign_requests.get(&request_id) {
-                Some(request) => Response::ok(serde_json::json!({
-                    "request_id": request.request_id,
-                    "app_name": request.app_name,
-                    "app_origin": request.app_origin,
-                    "email": request.email,
-                    "challenge": request.challenge,
-                    "purpose": request.purpose,
-                    "status": format!("{:?}", request.status),
-                    "created_at": request.created_at,
-                })),
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::ApproveSignRequest {
-            request_id,
-            assertion_jwt,
-            session_binding_jwt,
-        } => {
-            let mut state_write = state.write().await;
-
-            match state_write.sign_requests.get_mut(&request_id) {
-                Some(request) => {
-                    if request.status != SignRequestStatus::Pending {
-                        return Response::error(format!(
-                            "Request '{}' is not pending (status: {:?})",
-                            request_id, request.status
-                        ));
-                    }
-
-                    request.status = SignRequestStatus::Approved;
-                    request.assertion_jwt = Some(assertion_jwt);
-                    request.session_binding_jwt = Some(session_binding_jwt);
-
-                    tracing::info!("Sign request approved: {}", request_id);
-
-                    Response::ok(serde_json::json!({
-                        "status": "approved",
-                        "request_id": request_id,
-                    }))
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::RejectSignRequest { request_id, reason } => {
-            let mut state_write = state.write().await;
-
-            match state_write.sign_requests.get_mut(&request_id) {
-                Some(request) => {
-                    if request.status != SignRequestStatus::Pending {
-                        return Response::error(format!(
-                            "Request '{}' is not pending (status: {:?})",
-                            request_id, request.status
-                        ));
-                    }
-
-                    request.status = SignRequestStatus::Rejected;
-                    request.rejection_reason = reason;
-
-                    tracing::info!("Sign request rejected: {}", request_id);
-
-                    Response::ok(serde_json::json!({
-                        "status": "rejected",
-                        "request_id": request_id,
-                    }))
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
-        }
-
-        Request::GetSignRequestResult { request_id } => {
-            let state_read = state.read().await;
-
-            match state_read.sign_requests.get(&request_id) {
-                Some(request) => {
-                    let status = format!("{:?}", request.status).to_lowercase();
-
-                    // Return SignRequestResult format
-                    let result = serde_json::json!({
-                        "status": status,
-                        "assertion_jwt": request.assertion_jwt,
-                        "session_binding_jwt": request.session_binding_jwt,
-                        "rejection_reason": request.rejection_reason,
-                    });
-
-                    Response::ok(result)
-                }
-                None => Response::error(format!("Sign request '{}' not found", request_id)),
-            }
         }
     }
 }

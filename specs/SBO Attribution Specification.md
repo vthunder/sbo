@@ -11,6 +11,10 @@ license: CC-BY-4.0
 ## Status
 Draft
 
+## Changelog
+
+- **v0.5 (2026-11, audit)**: §3/§4/§4a rewritten around the four-object device presentation in `Auth-Cert` (Q1); `Auth-Warrant` gone. New §3a: the `/sys/trust/dns-root` history read at inclusion time is the trust root for every proof (Q3). §5 gains the normative monotonic-freshness rule for `/sys/dnssec/<domain>` refreshes (Q16). No bare-key owners (Q6).
+
 ## Abstract
 
 This specification defines how an SBO ledger attributes a **browserid-ng email
@@ -26,7 +30,7 @@ the **browserid-ng Protocol Specification, §6.3 (Offline verification with
 detached DNSSEC proofs)**. This document specifies only how the ledger *uses*
 that capability.
 
-Reference implementation: `sbo-core/src/attribution.rs`,
+Reference implementation: `sbo-core/src/device_attribution.rs`, `sbo-core/src/authorize.rs`,
 `sbo-daemon/src/validate.rs`.
 
 ## 1. Motivation
@@ -51,78 +55,99 @@ An object's owner reference resolves to a controller:
   email (`Controller::Email`). Each write MUST carry attribution (§3) proving
   the signing key spoke for that email at inclusion time.
 
-An email-rooted owner may itself be a browserid **agent identity** (one a human
-delegated headlessly). Its certificate is *typed* and inert on its own; writes
-by an agent additionally carry a delegator-signed **warrant** (§3a) confining
-the agent to this database. See the [Authorization
-Specification](./SBO%20Authorization%20Specification.md#the-agent-warrant-auth-warrant)
-for the normative rules; §3a and §4a below record how the reference
-implementation adds it.
+An email-rooted owner may itself be a browserid **agent identity** (a `+tag`
+sub-address a human delegated headlessly). In the device model there is no
+separate agent credential: every presentation carries a warrant, and an agent
+write is simply one whose warrant `grantor` (the human) differs from its
+`grantee` (the agent). See the [Authorization
+Specification](./SBO%20Authorization%20Specification.md#the-device-presentation-auth-cert)
+for the normative rules; §3 and §4a below record how the reference
+implementation applies them.
+
+A bare key is **not** an owner (Identity Specification, Q6): every write names
+a name or an email, and the only key-only objects are the genesis mode objects.
 
 ## 3. The attribution proof
 
 A write attributing signer key `K` to email `e` carries:
 
-- **`Auth-Cert`** — a browserid-ng certificate with `principal.email = e`,
-  `public-key = K`, issued by `iss`.
-- **`Auth-Evidence`** — a detached DNSSEC proof (browserid-ng §6.3) for `iss`'s
-  `_browserid` record. It MAY be supplied as:
+- **`Auth-Cert`** — a browserid-ng **device presentation**
+  `access_cert~assertion~warrant~config_cert`
+  (`browserid_core::device::AccessPresentation`). The access cert binds `K`
+  (`public-key = K`) to the grantee identity under issuer `iss_a`; the config
+  cert, under issuer `iss_c`, binds the device key that signed the warrant to
+  the grantor; the warrant grants grantor → grantee for this database's
+  audience with scopes; the assertion, signed by `K`, proves possession for
+  that audience. The attributed email `e` is the warrant's **grantor** when the
+  scopes carry `as:<grantor>`, else the **grantee**.
+- **`Auth-Evidence`** — a detached DNSSEC proof (browserid-ng §6.3) for an
+  issuer's `_browserid` record. One proof is needed per **distinct** issuer in
+  the presentation (`iss_a`, and `iss_c` when it differs). Each MAY be supplied
+  as:
   - `inline:<base64url>` — the proof bytes in the envelope;
   - `ref:<sbo-path>` — a reference to an on-chain object holding them; or
   - **absent** — resolved from the conventional **`/sys/dnssec/<iss>`** object.
 
 `/sys/dnssec/<domain>` objects (`dnssec.v1`) hold the RFC 9102 proof bytes for a
 domain and are **self-authorizing**: policy grants create/update on
-`/sys/dnssec/**` to any signer, because the proof attests its own domain — it
-needs no prior identity to post. This is what lets a fresh proof be published
-permissionlessly for *any* domain.
+`/sys/dnssec/**` to any signer under a `dnssec_proof` restriction (see the
+[Policy Specification](./SBO%20Policy%20Specification.md#self-authorizing-dnssec-objects-dnssec_proof)),
+because the proof attests its own domain — it needs no prior identity to post.
+This is what lets a fresh proof be published permissionlessly for *any* domain,
+subject to the monotonic-freshness rule of §5.
 
-## 3a. Agent writes — the warrant
+There is no `Auth-Warrant` header and no single-certificate `Auth-Cert`; a
+value that does not parse as a four-object presentation attributes nothing.
 
-When `Auth-Cert` is a browserid **agent** certificate (`typ =
-"browserid-agent-cert-v1"`, carrying an `agent.parent` claim), the attribution
-proof gains one more artifact:
+## 3a. Trust root for the DNSSEC proofs
 
-- **`Auth-Warrant`** — a `browserid-agent-warrant-v1` JWS signed by the
-  delegator's identity key, embedding that delegator's own certificate
-  (`parent-cert`). It names the one audience the agent may act at and the
-  scopes granted there.
-
-A typed agent certificate **without** a warrant attributes nothing (fail-closed;
-mirrors browserid-ng §5.3). The warrant's `parent-cert` (the delegator) is
-DNSSEC-verified and fully attributed exactly like the `Auth-Cert` — key/window/
-signature **and** issuer authority. The delegator's issuer **need not equal the
-agent's**: a user certified by their own IdP may warrant a third-party service
-agent certified by a different IdP (cross-issuer delegation). When both share an
-issuer, the single `Auth-Evidence` covers both certificates; when they differ,
-the delegator issuer's proof is supplied separately (a second inline evidence,
-or resolved on chain from `/sys/dnssec/<delegator-issuer>`). The audience MUST be the canonical `sbo+raw://` identity of
-*this* database (never an `sbo://` DNS name — the `_sbo` record is not a trust
-root); scopes are the `<dimension>:<value>` grammar the validator enforces. All
-rules are normative in the Authorization Specification; this section only names
-the artifact and its place in the proof.
+Every proof in §3 validates against the **pinned DNS root KSK history** in
+`/sys/trust/dns-root` (`dns-root.v1`, Authorization Specification): the
+verifier takes the root key whose `[valid_from, valid_until]` contains the
+write's **inclusion time** and validates the chain's root `DNSKEY` RRset
+against it. This on-chain history is the anchor used at inclusion time; a
+validator MUST NOT substitute a root key compiled into its DNSSEC library, and
+MUST be able to validate evidence created under an earlier root after an IANA
+rollover (the history is append-only, governed by the root policy). A proof
+whose chain roots in a key outside the history, or outside its window at the
+inclusion time, attributes nothing.
 
 ## 4. Verification algorithm
 
-`verify_attribution(public_key, auth_cert, auth_evidence, inclusion_time, anchors)`
-(`sbo-core/src/attribution.rs`):
+`verify_device_attribution(public_key, presentation, get_evidence, audience,
+inclusion_time, authored_at, anchors)` (`sbo-core/src/device_attribution.rs`):
 
-1. **Parse** the certificate; read its issuer `iss`.
-2. **Extract** the provider key and validity window from the DNSSEC proof for
-   `iss` (the `_browserid` published key; the RRSIG inception/expiration).
-3. **Key match** — the certified `public-key` MUST equal the signer `K`.
-4. **Window** — `inclusion_time` MUST lie within both the proof window and the
-   certificate's `iat…exp`.
-5. **Signature** — the certificate MUST verify against the DNSSEC-proven
-   provider key.
-6. **Authority** — either `domain(e) == iss` (the email's own domain is a
-   primary IdP), OR `iss` is a pinned broker (`anchors.is_broker(iss)`, from
-   `/sys/trust/brokers`). This is what lets a broker-certified email
-   (`iss = browserid.me`, unrelated to the email's domain) attribute.
+1. **Parse** the presentation; read the access cert issuer `iss_a` and the
+   config cert issuer `iss_c`.
+2. **Extract**, for each distinct issuer, the provider key and validity window
+   from its DNSSEC proof (the `_browserid` published key; the RRSIG
+   inception/expiration), validated against the `/sys/trust/dns-root` key in
+   force at `inclusion_time` (§3a).
+3. **Window** — `inclusion_time` MUST lie within every proof window.
+4. **Authority** — for the grantee: `domain(grantee) == iss_a` or `iss_a` is a
+   pinned broker; for the grantor: `domain(grantor) == iss_c` or `iss_c` is a
+   pinned broker (`anchors.is_broker`, from `/sys/trust/brokers`). Domains are
+   compared under the Identity Specification's comparison rule. This is what
+   lets a broker-certified email (`iss = browserid.me`, unrelated to the email's
+   domain) attribute, and what makes a cross-issuer delegation safe: an issuer
+   can only vouch for identities in its own domain.
+5. **Join** — the presentation verifies (`AccessPresentation::verify_at`): the
+   access and config certs under their DNSSEC-proven issuer keys, the warrant
+   under the config cert's key, the assertion under the access key; the
+   warrant's holder matcher covers the access cert's holder; the config cert's
+   identities cover the grantor; the assertion and warrant audiences equal the
+   expected `sbo+raw://` audience; managed-identity constraints hold. Access
+   cert, config cert and warrant windows are judged at `inclusion_time`; the
+   **assertion** window is judged at `authored_at` (the HLC-derived authoring
+   instant, bounded by the collection's `W`), else at `inclusion_time`.
+6. **Key match** — the access cert's certified `public-key` MUST equal the
+   signer `K`.
 
-On success the signer is attributed to `e` for the intersection of the
-certificate and proof windows. The daemon uses this as its L2 authorization gate
-for email-rooted writes (`sbo-daemon/src/validate.rs`).
+On success the signer is attributed to `e` (grantee, or grantor under `as:`)
+for the intersection of the access cert and proof windows, and the warrant's
+scopes are returned for the authorization layer to enforce (§4a). The daemon
+uses this as its L2 authorization gate for email-rooted writes
+(`sbo-daemon/src/validate.rs::device_effective_email`).
 
 > **Host certificates (browserid-ng Protocol §4.2, forthcoming).** Once
 > DNSSEC-signed host certificates land, step 5 generalizes from a single
@@ -130,45 +155,32 @@ for email-rooted writes (`sbo-daemon/src/validate.rs`).
 > `K_dns` (directly, or via a host cert also signed by `K_dns`). To be specified
 > here when host certs are implemented (browserid-ng bean `browserid-ng-dff5`).
 
-## 4a. Agent-write verification (extends §4)
+## 4a. Authorization of the write (extends §4)
 
-For an agent certificate, after §4 succeeds for the agent certificate itself:
+After §4 succeeds, the authorization layer (`sbo-core/src/authorize.rs`,
+`authorized_write_email`) enforces the SBO-side rules on the verified
+presentation:
 
-7. **Warrant present** — `Auth-Warrant` MUST be present; else UNAUTHORIZED.
-8. **Binding** — the warrant's `agent` equals the certificate's
-   `principal.email`; its `iss` equals the certificate's `agent.parent` and the
-   embedded `parent-cert`'s `principal.email`.
-9. **Delegator proof** — `parent-cert` verifies against its own
-   DNSSEC-proven provider key (§4 steps 2–6 applied to `parent-cert`, **except
-   step 4's inclusion-time cert-window check — the `parent-cert` window is
-   governed by step 10's signing-time rule, not by `inclusion_time`; the
-   delegator's freshness at `inclusion_time` is supplied by the DNSSEC-proof
-   window, step 3**), and the warrant JWS verifies against `parent-cert`'s
-   certified key.
-10. **Windows** — `inclusion_time` within the warrant's `[iat, exp]`, and the
-    warrant's `iat` within `parent-cert`'s `[iat, exp]` (signing-time
-    semantics — a warrant outlives the short-lived identity cert it was signed
-    under, up to the warrant's own `exp`).
-11. **Audience** — `aud` identifies this database (authority match; `@firstBlock`
-    / `?genesis` match if present).
-12. **Scopes** — the write's `Action` / `Path` / `Content-Schema` satisfy the
-    warrant scopes (AND across dimensions, OR within; unknown dimension ⇒
-    UNAUTHORIZED).
+7. **Audience** — the warrant's `audience` identifies this database
+   (`audience_identifies_db`: authority match; `@firstBlock` / `?genesis` match
+   if present).
+8. **Scopes** — the write's `Action` / `Path` / `Content-Schema` satisfy the
+   warrant scopes (`scopes_authorize`: AND across dimensions, OR within;
+   `sign:sbo:<action>` and `action:<action>` both constrain the action; an
+   **empty scope list authorizes nothing**; an unknown dimension or an unknown
+   `sign:` kind ⇒ UNAUTHORIZED; `path:` scopes are subject to the wildcard
+   cap).
+9. **Effective author** — the write authorizes as the **grantee** by default;
+   if the warrant carries `as:<grantor>` (combined with a `path:` scope), the
+   effective author is the **grantor**, so owner/`Creator`/name-claim/policy
+   checks evaluate against the grantor (an on-behalf write — see the
+   Authorization Specification). An on-behalf write can never exceed what the
+   grantor's own policy permits.
 
-13. **Effective author** — the write authorizes as the **agent** address by
-    default (device model: the warrant `grantee`); if the warrant carries
-    `as:<delegator>` (== `iss` — device model: == the warrant `grantor` — and
-    combined with a `path:` scope), the effective author is the **delegator**, so
-    owner/`Creator`/name-claim checks evaluate against the delegator (an
-    on-behalf write — see the Authorization Specification). An on-behalf write
-    can never exceed what the delegator's own policy permits.
-
-The reference implementation adds this as a branch in
-`verify_attribution`/`authorize` (`sbo-core/src/attribution.rs`,
-`sbo-core/src/authorize.rs`) and a new `Auth-Warrant` header in the signed block
-(`sbo-core/src/wire`). The attributed email on success is the **effective**
-author (agent, or delegator under `as:`); indexers additionally record the agent
-identity and `agent.parent` as provenance.
+The attributed email on success is the **effective** author; indexers
+additionally record the grantee, the grantor and both issuers as provenance.
+Revocation status refs carried by the presentation are checked only at the
+daemon's submit gate (`presentation_status_refs`), never on replay.
 
 ## 5. Evidence freshness
 
@@ -201,11 +213,37 @@ freshness (and correct IdP key rotation) is operationally load-bearing.
 > permissionlessly (as the daemon's freshness path already does) rather than shadowed by a
 > competing fork.
 
+### Monotonic freshness (normative)
+
+Permissionless refresh must not become permissionless **rollback**. A refresh
+of an occupied `/sys/dnssec/<domain>` slot is valid only if, in addition to
+validating for `<domain>` at its inclusion time:
+
+1. the new proof's **RRSIG expiration** for the `_browserid.<domain>` RRset is
+   **≥** the current occupant's (a refresh never lowers the freshness horizon);
+   and
+2. the new proof's **DNSKEY set** for `<domain>` is the same as, or newer than,
+   the occupant's: it MUST NOT reintroduce a key the occupant's set has rotated
+   out (a pre-rotation key still inside its own RRSIG window is a valid chain
+   but an older one).
+
+A refresh that fails either comparison is invalid and leaves the occupant in
+place. This is the `dnssec_proof` restriction's occupied-slot rule
+([Policy Specification](./SBO%20Policy%20Specification.md#self-authorizing-dnssec-objects-dnssec_proof));
+it is one comparison against the stored occupant, deterministic on replay,
+and closes the attack where an attacker replaces a fresh proof with an older
+valid chain to pin a rotated-out provider key (or to shorten the window so
+attribution lapses).
+
 ## 6. Trust anchors
 
+- **`/sys/trust/dns-root`** — the pinned DNS root KSK history (§3a); the key
+  in force at the write's inclusion time anchors every RFC 9102 proof chain.
+  It is the protocol's only a-priori trust, and it is read from the chain, not
+  from the validator's library.
 - **`/sys/trust/brokers`** — the pinned set of broker issuers whose
-  broker-certified emails are honored (§4 step 6). `browserid.me` is the default.
-- The **IANA DNSSEC root** anchors the RFC 9102 proof chains.
+  broker-certified emails are honored (§4 step 4). `browserid.me` is the
+  default. Payload is the object form `{ "brokers": [...] }`.
 
 ## 7. Security considerations
 
@@ -215,7 +253,7 @@ freshness (and correct IdP key rotation) is operationally load-bearing.
 - Evidence is self-authorizing but *not* trust-granting: posting a
   `/sys/dnssec/<domain>` object proves nothing about identity — it merely makes
   a domain's already-DNSSEC-signed key available on-chain. Attribution still
-  requires steps 3–6.
-- Windows are intersected (step 6 result), so attribution is bounded by the
+  requires §4 steps 3–6.
+- Windows are intersected (§4 result), so attribution is bounded by the
   shorter of the certificate and proof lifetimes; expiry is enforced against
   `inclusion_time`, not wall-clock, for deterministic replay.

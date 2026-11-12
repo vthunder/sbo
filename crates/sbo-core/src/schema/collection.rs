@@ -57,8 +57,10 @@ pub fn parse_collection(payload: &[u8]) -> SchemaResult<Collection> {
 }
 
 /// Validate a `collection.v1` message's payload. All fields are optional; the
-/// only constraints are types (enforced by serde — an unknown `durability` value
-/// is rejected) and that numeric fields, when present, are non-negative.
+/// constraints are types (enforced by serde — an unknown `durability` value
+/// is rejected), that numeric fields, when present, are non-negative, and that
+/// `max_authoring_lag_s` does not exceed the protocol maximum
+/// [`crate::hlc::MAX_AUTHORING_LAG_S`] (24 h; D22 / Q9 (a)).
 pub fn validate_collection(msg: &Message) -> SchemaResult<()> {
     let payload = msg.payload.as_ref().ok_or(SchemaError::EmptyPayload)?;
     let collection = parse_collection(payload)?;
@@ -73,6 +75,17 @@ pub fn validate_collection(msg: &Message) -> SchemaResult<()> {
                     reason: format!("{field} ({v}) must be non-negative"),
                 });
             }
+        }
+    }
+    if let Some(lag) = collection.max_authoring_lag_s {
+        if lag > crate::hlc::MAX_AUTHORING_LAG_S {
+            return Err(SchemaError::InvalidField {
+                field: "max_authoring_lag_s".into(),
+                reason: format!(
+                    "max_authoring_lag_s ({lag}) exceeds the protocol maximum of {} s",
+                    crate::hlc::MAX_AUTHORING_LAG_S
+                ),
+            });
         }
     }
     Ok(())

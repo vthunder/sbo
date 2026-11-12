@@ -1,16 +1,16 @@
 //! Path type for SBO objects (no_std compatible)
 
 #[cfg(feature = "alloc")]
-use alloc::{string::String, vec::Vec, format};
+use alloc::{format, string::String, vec::Vec};
 
-use crate::error::{ParseError, InvalidPathReason};
+use crate::error::{InvalidPathReason, ParseError};
 use crate::id::Id;
 
 #[cfg(feature = "serde")]
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Path (e.g., "/alice/nfts/")
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path(Vec<Id>);
 
 impl Path {
@@ -29,15 +29,16 @@ impl Path {
             return Ok(Self(Vec::new()));
         }
 
-        let segments: Result<Vec<Id>, _> = s
-            .trim_matches('/')
-            .split('/')
-            .map(Id::new)
-            .collect();
-
-        segments
-            .map(Self)
-            .map_err(|_| ParseError::InvalidPath(InvalidPathReason::InvalidSegment))
+        let mut segments = Vec::new();
+        for seg in s[1..s.len() - 1].split('/') {
+            // Every segment is an id: `//` (empty), `.` and `..` all fail here.
+            let id = Id::new(seg).map_err(|e| match e {
+                ParseError::InvalidIdentifier(r) => ParseError::InvalidPath(InvalidPathReason::InvalidSegment(r)),
+                other => other,
+            })?;
+            segments.push(id);
+        }
+        Ok(Self(segments))
     }
 
     /// Get the root path
@@ -64,7 +65,13 @@ impl Path {
         }
     }
 
+    /// Iterate over ancestor paths (including self, down to and including root)
+    pub fn ancestors(&self) -> impl Iterator<Item = Path> + '_ {
+        (0..=self.0.len()).rev().map(|i| Path(self.0[..i].to_vec()))
+    }
+
     /// Format as string
+    #[allow(clippy::inherent_to_string_shadow_display)]
     pub fn to_string(&self) -> String {
         if self.0.is_empty() {
             String::from("/")
@@ -119,6 +126,7 @@ mod tests {
         assert!(!path.is_root());
         assert_eq!(path.segments().len(), 2);
         assert_eq!(path.to_string(), "/alice/nfts/");
+        assert!(Path::parse("/u/alice@example.com/").is_ok());
     }
 
     #[test]
@@ -132,5 +140,9 @@ mod tests {
     fn test_invalid_paths() {
         assert!(Path::parse("no-leading-slash/").is_err());
         assert!(Path::parse("/no-trailing-slash").is_err());
+        assert!(Path::parse("//").is_err());
+        assert!(Path::parse("/a//b/").is_err());
+        assert!(Path::parse("/./").is_err());
+        assert!(Path::parse("/a/../").is_err());
     }
 }

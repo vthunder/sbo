@@ -1,0 +1,13 @@
+SBOQ-Version: 0.2
+Path: /a/
+Id: b
+Creator: c
+Block: 1
+State-Root: 8cc6a5728964ee155179323f54616bae6359a180ad622a705d6766d05657aeb8
+Object-Hash: 0707070707070707070707070707070707070707070707070707070707070707
+Proof-Format: trie
+Proof-Length: 2
+Object-Length: 3
+
+[{"segment":"a","siblings":{}},{"segment":"b","siblings":{}}]
+obj

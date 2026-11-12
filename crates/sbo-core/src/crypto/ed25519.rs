@@ -59,15 +59,15 @@ impl SigningKey {
 
 /// Verify a signature
 pub fn verify(public_key: &PublicKey, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
-    use ed25519_dalek::Verifier;
-
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key.bytes)
         .map_err(|_| CryptoError::InvalidPublicKey)?;
 
     let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
 
+    // `verify_strict`: rejects small-order public keys and R, under which one
+    // signature verifies every message (audit 2026-11 W6-1).
     verifying_key
-        .verify(message, &sig)
+        .verify_strict(message, &sig)
         .map_err(|_| CryptoError::InvalidSignature)
 }
 

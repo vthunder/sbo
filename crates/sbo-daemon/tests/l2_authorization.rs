@@ -47,7 +47,7 @@ fn signed_post(
         prev: None,
         auth_cert: auth_cert.map(|s| s.to_string()),
         auth_evidence: auth_evidence.map(|s| s.to_string()),
-        auth_warrant: None,
+        auth_warrant: None, extra_headers: Vec::new(),
     };
     msg.sign(key);
     msg
@@ -76,15 +76,46 @@ fn put_key_rooted_name(db: &StateDb, name: &str, key: &SigningKey) {
     db.put_object(&obj).unwrap();
 }
 
+/// An open root policy (anyone may create/update anywhere) plus the root
+/// object itself. Tests that used to run "in genesis mode" (no root policy,
+/// everything accepted) install this instead: there is no genesis mode any
+/// more (audit 2026-11 Q7 (a), sbo-3q6x), nothing is valid without a root.
+fn put_open_root(db: &StateDb) {
+    let policy: sbo_core::policy::Policy = serde_json::from_value(serde_json::json!({
+        "grants": [{"to": "*", "can": ["create", "update"], "on": "/**"}]
+    }))
+    .unwrap();
+    db.put_policy(&Path::parse("/sys/policies/").unwrap(), &policy).unwrap();
+    db.put_object(&StoredObject {
+        path: Path::parse("/sys/policies/").unwrap(),
+        id: Id::new("root").unwrap(),
+        creator: Id::new("sys").unwrap(),
+        owner: Id::new("sys").unwrap(),
+        content_type: "application/json".to_string(),
+        content_hash: ContentHash::sha256(b"{}"),
+        payload: b"{}".to_vec(),
+        policy_ref: None, related: None,
+        content_schema: Some("policy.v2".to_string()),
+        owner_ref: Some("sys".to_string()),
+        block_number: 1,
+        object_hash: [0u8; 32],
+        hlc: None,
+        prev: None,
+    }).unwrap();
+}
+
 fn ctx(db: &StateDb) -> L2Context {
-    // No block timestamp in tests; email-rooted owners fail closed accordingly.
-    L2Context::for_block(None, db)
+    // A fixed block inclusion time: attestations and HLC bounds are judged at
+    // it (audit 2026-11 D28: an unknown inclusion time fails closed, so a
+    // context without one no longer admits attested or HLC-bearing writes).
+    L2Context::for_block(Some(1_700_000_000), db)
 }
 
 #[test]
 fn key_rooted_owner_authorized_by_direct_signature() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
     put_key_rooted_name(&db, "alice", &key);
 
@@ -153,18 +184,20 @@ fn email_rooted_owner_with_malformed_attribution_is_filtered() {
 fn same_key_owner_can_update_own_object_via_controller_check() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
     // Create then persist an object the way the daemon would (owner_ref records
     // the signer-key effective owner).
-    let create = signed_post(&key, "/space/", "post1", None, None, None);
+    let create = signed_post(&key, "/space/", "post1", Some("alice"), None, None);
     let stored = sbo_daemon::validate::message_to_stored_object(&create, 1, Some(&db), [0u8; 32], &ctx(&db))
         .expect("create should produce a stored object");
     db.put_object(&stored).unwrap();
 
     // The same key updates it — reaches the update branch (same resolved
     // creator) and authorizes against the stored key controller.
-    let update = signed_post(&key, "/space/", "post1", None, None, None);
+    let update = signed_post(&key, "/space/", "post1", Some("alice"), None, None);
     let result = validate_message(&update, &db, dir.path(), &ctx(&db));
     assert!(
         matches!(result, ValidationResult::Valid { .. }),
@@ -240,27 +273,26 @@ fn evidence_ref_resolves_to_inline_payload() {
 }
 
 #[test]
-fn resolve_creator_prefers_explicit_creator_then_key_hex() {
+fn resolve_creator_prefers_explicit_creator_and_has_no_key_hex_fallback() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     let key = SigningKey::generate();
 
     // Explicit Creator header wins outright.
-    let mut with_creator = signed_post(&key, "/space/", "p1", None, None, None);
+    let mut with_creator = signed_post(&key, "/space/", "p1", Some("alice"), None, None);
     with_creator.creator = Some(Id::new("alice").unwrap());
     with_creator.sign(&key);
     assert_eq!(
-        resolve_creator(&with_creator, Some(&db), &ctx(&db)).as_str(),
+        resolve_creator(&with_creator, Some(&db), &ctx(&db)).unwrap().as_str(),
         "alice"
     );
 
-    // No Creator, no valid attribution → key-hex fallback (the attributed-email
-    // tier is skipped because the signer carries no cert). The email tier is
-    // exercised only on the live DNSSEC path.
+    // No Creator, no attribution, no name record, no Owner: there is no creator
+    // (audit 2026-11 Q6 / D16: the `e_<hex>` key-hex fallback is gone).
     let bare = signed_post(&key, "/space/", "p1", None, None, None);
     assert!(
-        resolve_creator(&bare, Some(&db), &ctx(&db)).as_str().starts_with("e_"),
-        "nameless keyed author should fall back to key-hex"
+        resolve_creator(&bare, Some(&db), &ctx(&db)).is_err(),
+        "a nameless, unattributed, owner-less author has no creator"
     );
 }
 
@@ -268,12 +300,14 @@ fn resolve_creator_prefers_explicit_creator_then_key_hex() {
 fn attestation_schema_gated_in_validate_message() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
-    // A well-formed attestation issued by the signing key (no Owner → effective
-    // owner is the signer, a key controller) passes schema + L2 in genesis mode.
+    // A well-formed attestation issued by the signing key (owner `alice`, the
+    // key-rooted name of the signer) passes schema + L2 + an open root policy.
     let good = br#"{"subject":"bob","type":"vouch","value":true,"issued_at":100}"#.to_vec();
-    let mut msg = signed_post(&key, "/alice/attestations/bob/", "vouch", None, None, None);
+    let mut msg = signed_post(&key, "/alice/attestations/bob/", "vouch", Some("alice"), None, None);
     msg.content_schema = Some("attestation.v1".to_string());
     msg.payload = Some(good.clone());
     msg.content_hash = Some(ContentHash::sha256(&good));
@@ -311,6 +345,7 @@ fn attestation_defined_role_gates_policy() {
     let issuer = SigningKey::generate();
     let moderator = SigningKey::generate();
     let stranger = SigningKey::generate();
+    put_key_rooted_name(&db, "stranger", &stranger);
     // Issuer and subject are registered key-rooted names (raw keys aren't valid
     // path segments; real subjects/issuers are names or emails).
     put_key_rooted_name(&db, "mods", &issuer);
@@ -369,14 +404,14 @@ fn attestation_defined_role_gates_policy() {
     }).unwrap();
 
     // The attested moderator may create under /space/**.
-    let post = signed_post(&moderator, "/space/posts/", "p1", None, None, None);
+    let post = signed_post(&moderator, "/space/posts/", "p1", Some("alice"), None, None);
     assert!(
         matches!(validate_message(&post, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
         "attested moderator should be granted create"
     );
 
     // A stranger (no attestation) is denied at the policy stage.
-    let denied = signed_post(&stranger, "/space/posts/", "p2", None, None, None);
+    let denied = signed_post(&stranger, "/space/posts/", "p2", Some("stranger"), None, None);
     assert!(
         matches!(
             validate_message(&denied, &db, dir.path(), &ctx(&db)),
@@ -458,7 +493,9 @@ fn email_rooted_name_update_routes_through_l2() {
 fn filtered_write_does_not_mutate_canonical_state() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
     // Helper: apply a message exactly as the sync loop does — store only on Valid.
     let apply = |db: &StateDb, msg: &Message| -> bool {
@@ -475,9 +512,9 @@ fn filtered_write_does_not_mutate_canonical_state() {
 
     let root_empty = db.compute_trie_state_root().unwrap();
 
-    // A valid (ownerless, key-controller) write is applied and changes the root.
-    let valid = signed_post(&key, "/space/", "p1", None, None, None);
-    assert!(apply(&db, &valid), "ownerless key write should be valid");
+    // A valid (named key-rooted owner) write is applied and changes the root.
+    let valid = signed_post(&key, "/space/", "p1", Some("alice"), None, None);
+    assert!(apply(&db, &valid), "named key write should be valid");
     let root_after_valid = db.compute_trie_state_root().unwrap();
     assert_ne!(root_after_valid, root_empty, "valid write must change the state root");
 
@@ -571,6 +608,7 @@ fn message_to_stored_object_persists_owner_ref_and_schema() {
 fn key_rooted_name_registered_via_real_path_authorizes() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
 
     // Register /sys/names/alice (identity.v1) the way the daemon actually would.
@@ -589,20 +627,24 @@ fn key_rooted_name_registered_via_real_path_authorizes() {
 }
 
 #[test]
-fn ownerless_write_authorized_via_signer_key_controller() {
+fn ownerless_write_is_rejected_there_is_no_signer_key_fallback() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
-    // No Owner/Creator header → effective owner is the signing key, which
-    // resolves to a key controller and is authorized by the L1 signature. The
-    // gate runs (not bypassed) but passes; genesis-allowed downstream.
+    // No Owner/Creator header → the write names no owner and is refused at the
+    // attribution gate (audit 2026-11 Q6 / sbo-yd72): the signing key is not an
+    // identity, even when it has a name record. Naming the owner makes it valid.
     let msg = signed_post(&key, "/space/", "post1", None, None, None);
     let result = validate_message(&msg, &db, dir.path(), &ctx(&db));
     assert!(
-        matches!(result, ValidationResult::Valid { .. }),
-        "ownerless write should authorize via the signer-key controller, got {result:?}"
+        matches!(result, ValidationResult::Invalid { stage: ValidationStage::Attribution, .. }),
+        "ownerless write must be rejected, got {result:?}"
     );
+    let named = signed_post(&key, "/space/", "post1", Some("alice"), None, None);
+    assert!(matches!(validate_message(&named, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }));
 }
 
 // HLC ordering-integrity gate (Content Spec §Validity bound). A write carrying
@@ -613,7 +655,9 @@ fn ownerless_write_authorized_via_signer_key_controller() {
 fn hlc_bound_gates_writes() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
     // Block inclusion time 1_000_000s → 1_000_000_000ms. W = ε = 5min = 300_000ms.
     let t_b_secs = 1_000_000i64;
@@ -621,7 +665,7 @@ fn hlc_bound_gates_writes() {
     let t_b_ms = t_b_secs * 1000;
 
     let with_hlc = |hlc: &str| {
-        let mut m = signed_post(&key, "/spaces/general/", "p1", None, None, None);
+        let mut m = signed_post(&key, "/spaces/general/", "p1", Some("alice"), None, None);
         m.hlc = Some(hlc.to_string());
         m.sign(&key);
         m
@@ -652,10 +696,14 @@ fn hlc_bound_gates_writes() {
         ValidationResult::Invalid { stage: ValidationStage::Ordering, .. }
     ));
 
-    // No timestamp → bound cannot be evaluated; a well-formed HLC still passes.
+    // No timestamp → the bound cannot be evaluated and an HLC-bearing write is
+    // rejected at Ordering (audit 2026-11 D28: never skipped).
     let no_ts = L2Context::for_block(None, &db);
     let ok2 = with_hlc(&format!("{}.0", t_b_ms + 300_001));
-    assert!(matches!(validate_message(&ok2, &db, dir.path(), &no_ts), ValidationResult::Valid { .. }));
+    assert!(matches!(
+        validate_message(&ok2, &db, dir.path(), &no_ts),
+        ValidationResult::Invalid { stage: ValidationStage::Ordering, .. }
+    ));
     // ...but a malformed HLC is rejected even without a timestamp.
     let bad2 = with_hlc("1.2.3");
     assert!(matches!(
@@ -691,7 +739,7 @@ fn lww_admits_only_higher_hlc() {
         prev: None,
     };
     let with_hlc = |hlc: &str| {
-        let mut m = signed_post(&key, "/spaces/general/", "note", None, None, None);
+        let mut m = signed_post(&key, "/spaces/general/", "note", Some("alice"), None, None);
         m.hlc = Some(hlc.to_string());
         m.sign(&key);
         m
@@ -709,7 +757,7 @@ fn lww_admits_only_higher_hlc() {
 
     // An incoming write without an HLC keeps base semantics → admitted even over
     // an HLC-bearing value.
-    let no_hlc = signed_post(&key, "/spaces/general/", "note", None, None, None);
+    let no_hlc = signed_post(&key, "/spaces/general/", "note", Some("alice"), None, None);
     assert!(lww_admits(&no_hlc, Some(&existing), &oh));
 }
 
@@ -719,7 +767,9 @@ fn lww_admits_only_higher_hlc() {
 fn collection_descriptor_widens_authoring_lag() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
     let t_b_secs = 1_000_000i64;
     let l2 = L2Context::for_block(Some(t_b_secs), &db);
@@ -727,7 +777,7 @@ fn collection_descriptor_widens_authoring_lag() {
 
     // Back-dated 1 hour — beyond the default W (5 min) but within a 2h descriptor W.
     let back_dated_ms = t_b_ms - 3600 * 1000;
-    let mut write = signed_post(&key, "/spaces/general/", "p1", None, None, None);
+    let mut write = signed_post(&key, "/spaces/general/", "p1", Some("alice"), None, None);
     write.hlc = Some(format!("{back_dated_ms}.0"));
     write.sign(&key);
 
@@ -771,10 +821,12 @@ fn collection_descriptor_widens_authoring_lag() {
 fn prev_format_gated() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
     let key = SigningKey::generate();
+    put_key_rooted_name(&db, "alice", &key);
 
     let with_prev = |prev: Option<&str>| {
-        let mut m = signed_post(&key, "/spaces/general/", "p1", None, None, None);
+        let mut m = signed_post(&key, "/spaces/general/", "p1", Some("alice"), None, None);
         m.prev = prev.map(|s| s.to_string());
         m.sign(&key);
         m
@@ -839,11 +891,13 @@ fn put_attestation(db: &StateDb, issuer: &str, subject: &str, type_: &str) {
 fn open_community_membership_post_and_ban_end_to_end() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
+    put_open_root(&db);
 
     let issuer = SigningKey::generate(); // the community's authoritative issuer
     let alice = SigningKey::generate(); // a joining member
     let carol = SigningKey::generate(); // a member who gets banned
     let stranger = SigningKey::generate(); // never joined
+    put_key_rooted_name(&db, "stranger", &stranger);
     put_key_rooted_name(&db, "cooks", &issuer);
     put_key_rooted_name(&db, "alice", &alice);
     put_key_rooted_name(&db, "carol", &carol);
@@ -858,13 +912,13 @@ fn open_community_membership_post_and_ban_end_to_end() {
         "open": true
     }))
     .unwrap();
-    let mut desc_msg = signed_post(&issuer, "/sys/", "community", None, None, None);
+    let mut desc_msg = signed_post(&issuer, "/sys/", "community", Some("cooks"), None, None);
     desc_msg.content_schema = Some("community.v1".to_string());
     desc_msg.payload = Some(descriptor.clone());
     desc_msg.content_hash = Some(ContentHash::sha256(&descriptor));
     desc_msg.sign(&issuer);
-    // Validated in genesis mode (before the root policy exists), as it is when a
-    // community is bootstrapped: schema + L2 attribution pass.
+    // Validated under an open root policy (there is no genesis mode): schema +
+    // L2 attribution pass.
     assert!(
         matches!(
             validate_message(&desc_msg, &db, dir.path(), &ctx(&db)),
@@ -905,14 +959,14 @@ fn open_community_membership_post_and_ban_end_to_end() {
     // Join: alice self-issues membership in her own namespace (open mode).
     put_attestation(&db, "alice", "alice", "membership");
     // She may now post in spaces (post grant ⇒ create).
-    let post = signed_post(&alice, "/spaces/general/", "p1", None, None, None);
+    let post = signed_post(&alice, "/spaces/general/", "p1", Some("alice"), None, None);
     assert!(
         matches!(validate_message(&post, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
         "joined member should be allowed to post (post⇒create)"
     );
 
     // A stranger who never joined has no membership → no grant → denied.
-    let denied = signed_post(&stranger, "/spaces/general/", "p2", None, None, None);
+    let denied = signed_post(&stranger, "/spaces/general/", "p2", Some("stranger"), None, None);
     assert!(
         matches!(
             validate_message(&denied, &db, dir.path(), &ctx(&db)),
@@ -924,13 +978,13 @@ fn open_community_membership_post_and_ban_end_to_end() {
     // Carol joins, then the community bans her. The ban (in the issuer's
     // namespace) overrides her membership via the not_attested restriction.
     put_attestation(&db, "carol", "carol", "membership");
-    let carol_post = signed_post(&carol, "/spaces/general/", "p3", None, None, None);
+    let carol_post = signed_post(&carol, "/spaces/general/", "p3", Some("carol"), None, None);
     assert!(
         matches!(validate_message(&carol_post, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
         "carol should be able to post before the ban"
     );
     put_attestation(&db, issuer_ref, "carol", "ban");
-    let carol_banned = signed_post(&carol, "/spaces/general/", "p4", None, None, None);
+    let carol_banned = signed_post(&carol, "/spaces/general/", "p4", Some("carol"), None, None);
     assert!(
         matches!(
             validate_message(&carol_banned, &db, dir.path(), &ctx(&db)),
@@ -992,14 +1046,14 @@ fn community_scoped_membership_does_not_cross_communities() {
     put_attestation(&db, "alice", "alice", "membership:cooks");
 
     // She may post in cooks…
-    let in_cooks = signed_post(&alice, "/communities/cooks/spaces/general/", "p1", None, None, None);
+    let in_cooks = signed_post(&alice, "/communities/cooks/spaces/general/", "p1", Some("alice"), None, None);
     assert!(
         matches!(validate_message(&in_cooks, &db, dir.path(), &ctx(&db)), ValidationResult::Valid { .. }),
         "a cooks member should be allowed to post in cooks"
     );
 
     // …but NOT in books, where she holds no membership:books.
-    let in_books = signed_post(&alice, "/communities/books/spaces/general/", "p2", None, None, None);
+    let in_books = signed_post(&alice, "/communities/books/spaces/general/", "p2", Some("alice"), None, None);
     assert!(
         matches!(
             validate_message(&in_books, &db, dir.path(), &ctx(&db)),
@@ -1018,7 +1072,7 @@ fn creator_email_fallback_without_attribution_is_filtered() {
     // No Owner, but a Creator that grounds to an email controller. The effective
     // owner falls back to Creator (Owner → else Creator → else signer), so the
     // signer must be attributed to that email; absent attribution, filtered.
-    let mut msg = signed_post(&key, "/space/", "post1", None, None, None);
+    let mut msg = signed_post(&key, "/space/", "post1", Some("alice"), None, None);
     msg.creator = Some(Id::new("alice@example.com").unwrap());
     msg.sign(&key);
     let result = validate_message(&msg, &db, dir.path(), &ctx(&db));

@@ -49,7 +49,7 @@
 
 use browserid_core::device::{AccessPresentation, Holder, VerifiedAccess};
 
-use crate::attribution::{extract_provider_key, AttributionError, TrustAnchors};
+use crate::attribution::{extract_provider_key_with_anchors, AttributionError, TrustAnchors};
 
 /// A successful device-model attribution: the SBO `key` speaks for `email`
 /// (via the opaque `holder`), the warrant grants `scopes` for the write's audience, valid
@@ -173,7 +173,8 @@ pub fn verify_device_attribution(
         }
         let evidence = get_evidence(iss)
             .ok_or_else(|| AttributionError::MissingIssuerEvidence(iss.to_string()))?;
-        let (key, inception, expiration) = extract_provider_key(&evidence, iss)?;
+        let (key, inception, expiration) =
+            extract_provider_key_with_anchors(&evidence, iss, anchors, Some(inclusion_time))?;
         proven.push((iss.to_string(), key, inception, expiration));
     }
 
@@ -257,9 +258,12 @@ pub fn verify_device_attribution_with_provider_keys(
     // (grantee) by the access cert's issuer — or that issuer is a pinned broker.
     // The grantor check is what makes the cross-issuer split safe: issuer X can
     // only attribute to an identity in a domain it is authoritative for.
+    // Domain membership follows the one identity rule (Q5 / D54): a malformed
+    // reference (`a@x@evil`, no `@`) is in no domain, and the domain compares
+    // as a lowercase A-label.
     let check_authority = |identity: &str, iss: &str| -> Result<(), AttributionError> {
-        let domain = identity.split('@').nth(1).unwrap_or("");
-        if domain != iss && !anchors.is_broker(iss) {
+        let domain = crate::identity::domain_of(identity).unwrap_or_default();
+        if !crate::identity::in_domain(identity, iss) && !anchors.is_broker(iss) {
             return Err(AttributionError::IssuerNotAuthorized {
                 iss: iss.to_string(),
                 domain: domain.to_string(),
@@ -273,9 +277,23 @@ pub fn verify_device_attribution_with_provider_keys(
     // Crypto + structural join, resolving each cert's issuer key from the
     // DNSSEC-proven set (access under its iss, config under ITS iss). Only proven
     // issuers resolve, so a rogue-IdP cert cannot be verified.
-    // Replay-deterministic clock (module docs): expiries as of the write's
-    // authoring instant, else its inclusion — never the wall clock.
+    // Replay-deterministic clock (module docs): never the wall clock. The
+    // ASSERTION is the one object judged at the write's authoring instant (it
+    // lives five minutes and cannot survive batching latency); `verify_at`
+    // takes a single instant, so it runs at `authored_at` and the longer-lived
+    // certs and warrant are additionally held to the block's INCLUSION time
+    // below (Q9 (a) / D22: a back-dated authoring instant, however far `W`
+    // reaches, cannot resurrect an expired cert or warrant).
     let at = authored_at.unwrap_or(inclusion_time);
+    if pres.access_cert.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("access cert expired at inclusion time".into()));
+    }
+    if pres.config_cert.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("config cert expired at inclusion time".into()));
+    }
+    if pres.warrant.is_expired_at(inclusion_time) {
+        return Err(AttributionError::DevicePresentation("warrant expired at inclusion time".into()));
+    }
     let verified = pres
         .verify_at(expected_audience, at, |q_iss| {
             proven

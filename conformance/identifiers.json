@@ -1,0 +1,62 @@
+{
+  "suite": "sbo conformance 2026-11 / identifiers",
+  "description": "One identifier grammar (Core spec §Identifier Syntax, amended by threat-model I5 and decision Q5): id_char = ALPHA / DIGIT / - _ . ~ @ + :, 1-256 chars, no Unicode; `.` and `..` are not ids; exactly one `@` in an identity reference; the on-chain form of an email domain is lowercase. Every implementation of the grammar (sbo-types `Id`, sbo-core `message::Id` = sbo-wasm, `Path::parse`) must agree.",
+  "ids": [
+    {"id": "ID-OK-01", "value": "alice", "valid": true},
+    {"id": "ID-OK-02", "value": "Bob-123_x.v1~", "valid": true},
+    {"id": "ID-OK-03", "value": "alice@example.com", "valid": true, "note": "email-rooted identity reference"},
+    {"id": "ID-OK-04", "value": "alice+bot@example.com", "valid": true, "note": "subaddressed agent identity"},
+    {"id": "ID-OK-05", "value": "role:moderator", "valid": true, "note": "namespaced attestation type"},
+    {"id": "ID-OK-06", "value": "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "valid": true},
+    {"id": "ID-OK-07", "value": "a", "valid": true},
+    {"id": "ID-OK-08", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true, "note": "256 chars"},
+    {"id": "ID-OK-09", "value": "a.b", "valid": true},
+    {"id": "ID-OK-10", "value": "...x", "valid": true, "note": "dots inside an id are fine; only the bare `.` / `..` segments are reserved"},
+    {"id": "ID-REJ-01", "value": "", "valid": false, "reason": "empty"},
+    {"id": "ID-REJ-02", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false, "reason": "257 chars"},
+    {"id": "ID-REJ-03", "value": "has space", "valid": false},
+    {"id": "ID-REJ-04", "value": "has/slash", "valid": false},
+    {"id": "ID-REJ-05", "value": "café", "valid": false, "reason": "Unicode not allowed directly"},
+    {"id": "ID-REJ-06", "value": "caf%C3%A9", "valid": false, "reason": "the spec says to percent-encode non-ASCII but `%` is not an id_char (spec contradiction S23); until resolved the grammar as written rejects it"},
+    {"id": "ID-REJ-07", "value": ".", "valid": false, "reason": "I5: `.` is not an id (filesystem mirror / path semantics)"},
+    {"id": "ID-REJ-08", "value": "..", "valid": false, "reason": "I5 / D21: `..` is not an id"},
+    {"id": "ID-REJ-09", "value": "a@b@c", "valid": false, "reason": "Q5: exactly one `@` in an identity reference"},
+    {"id": "ID-REJ-10", "value": "@example.com", "valid": false, "reason": "Q5: empty local part"},
+    {"id": "ID-REJ-11", "value": "alice@", "valid": false, "reason": "Q5: empty domain"},
+    {"id": "ID-REJ-12", "value": "alice@Example.COM", "valid": false, "reason": "Q5: the on-chain form of an email domain is lowercase; an uppercase domain in a header is invalid so paths cannot alias"},
+    {"id": "ID-REJ-13", "value": "a\tb", "valid": false},
+    {"id": "ID-REJ-14", "value": "a\u001fb", "valid": false, "reason": "state-key delimiter"},
+    {"id": "ID-REJ-15", "value": "a#b", "valid": false},
+    {"id": "ID-REJ-16", "value": "a?b", "valid": false}
+  ],
+  "paths": [
+    {"id": "PATH-OK-01", "value": "/", "valid": true},
+    {"id": "PATH-OK-02", "value": "/alice/nfts/", "valid": true},
+    {"id": "PATH-OK-03", "value": "/u/alice@example.com/", "valid": true},
+    {"id": "PATH-REJ-01", "value": "alice/", "valid": false, "reason": "must start with /"},
+    {"id": "PATH-REJ-02", "value": "/alice", "valid": false, "reason": "must end with /"},
+    {"id": "PATH-REJ-03", "value": "/a//b/", "valid": false, "reason": "empty segment"},
+    {"id": "PATH-REJ-04", "value": "/a/../", "valid": false, "reason": "I5 / D21: `..` segment"},
+    {"id": "PATH-REJ-05", "value": "/./", "valid": false, "reason": "I5 / D21: `.` segment"},
+    {"id": "PATH-REJ-06", "value": "//", "valid": false, "reason": "empty segment"},
+    {"id": "PATH-REJ-07", "value": "/a b/", "valid": false}
+  ],
+  "actions": [
+    {"id": "ACT-OK-01", "value": "post", "valid": true},
+    {"id": "ACT-OK-02", "value": "delete", "valid": true},
+    {"id": "ACT-OK-03", "value": "transfer", "valid": true},
+    {"id": "ACT-OK-04", "value": "import", "valid": true, "note": "declared by the Wire spec; Bridge spec is aspirational (Q10)"},
+    {"id": "ACT-REJ-01", "value": "POST", "valid": false, "reason": "Wire spec: `Action` is one of the lowercase names; no case folding"},
+    {"id": "ACT-REJ-02", "value": "Post", "valid": false},
+    {"id": "ACT-REJ-03", "value": "create", "valid": false, "reason": "not a wire action (post creates)"},
+    {"id": "ACT-REJ-04", "value": "update", "valid": false, "reason": "not a wire action (post updates)"},
+    {"id": "ACT-REJ-05", "value": "", "valid": false},
+    {"id": "ACT-REJ-06", "value": "post ", "valid": false}
+  ],
+  "types": [
+    {"id": "TYPE-OK-01", "value": "object", "valid": true},
+    {"id": "TYPE-OK-02", "value": "collection", "valid": true},
+    {"id": "TYPE-REJ-01", "value": "Object", "valid": false},
+    {"id": "TYPE-REJ-02", "value": "file", "valid": false}
+  ]
+}

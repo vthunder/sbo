@@ -50,6 +50,9 @@ fn is_key_reference(reference: &str) -> bool {
 /// - A reference containing `'@'` is a bare email and resolves to
 ///   [`Controller::Email`] (per spec, `@` always denotes a
 ///   browserid-attributable identity).
+/// - A bare key (`ed25519:<hex>`, `bls12-381:<hex>`) is not an identity
+///   reference and resolves to [`Controller::Unresolved`] (Q6: no bare-key
+///   owners; the genesis `sys` record is validated structurally instead).
 /// - A reference containing `':'` or `'/'` (and not matching the above) is a
 ///   cross-repo reference, which is out of scope for this single-repo version
 ///   and resolves to [`Controller::Unresolved`].
@@ -85,30 +88,46 @@ where
         // **wins over browserid** (the sovereignty upgrade): resolve through it.
         // Outside the primary domain (or with no record) the email stays
         // browserid-rooted, exactly as before.
+        //
+        // The one identity rule (Q5 / D13 / D54, `sbo_types::identity`):
+        // exactly one `@`, both parts non-empty, domain compared as a lowercase
+        // A-label, local part byte-exact. A malformed reference (`a@b@c`,
+        // `@x`, `a@`) is no identity at all and resolves to nothing; the
+        // controller we return carries the canonical (lowercase-domain) form
+        // so two spellings of one identity compare equal.
         if current.contains('@') {
-            if let (Some(pd), Some((local, domain))) =
-                (primary_domain, current.split_once('@'))
-            {
-                if domain == pd && !local.is_empty() {
-                    match lookup(local) {
+            let canonical = match crate::identity::canonical(&current) {
+                Some(c) => c,
+                None => return Controller::Unresolved,
+            };
+            current = canonical;
+            let local: Option<String> = match primary_domain {
+                Some(pd) if crate::identity::in_domain(&current, pd) => {
+                    crate::identity::split(&current).ok().map(|(l, _)| l.to_string())
+                }
+                _ => None,
+            };
+            if let Some(local) = local {
+                {
+                    match lookup(&local) {
                         // A key-rooted record is the identity's on-chain control
                         // policy and wins over browserid (the sovereignty upgrade):
                         // resolve through it to the pinned key.
                         Some(NameRecord::KeyRooted(_)) => {
-                            current = local.to_string();
+                            current = local;
                             continue;
                         }
                         // Email-rooted back to this SAME canonical email: the record
                         // merely affirms browserid auth for `<local>@<domain>`. Follow-
                         // ing it would loop email→local→email forever (→ Unresolved),
                         // so terminate here at the browserid email controller.
-                        Some(NameRecord::EmailRooted(ref o)) if o == &current => {
+                        Some(NameRecord::EmailRooted(ref o)) if crate::identity::identity_eq(o, &current) => {
                             return Controller::Email(current);
                         }
                         // Email-rooted to a DIFFERENT owner (e.g. an external parent
                         // email): follow the indirection.
                         Some(NameRecord::EmailRooted(_)) => {
-                            current = local.to_string();
+                            current = local;
                             continue;
                         }
                         // No record: a plain browserid-attributable email.
@@ -119,14 +138,15 @@ where
             return Controller::Email(current);
         }
 
-        // Bare public key (algorithm-prefixed): a key controller, authorized by
-        // direct signature. This is the reference `effective_owner` produces
-        // when it falls back to the signing key (Authorization Spec
-        // §Verification Algorithm: `Owner → else Creator → else signer`). It is
-        // checked before the cross-repo `:`/`/` rule because a key string such
-        // as `ed25519:<hex>` also contains a colon.
+        // Bare public key (algorithm-prefixed): NOT an identity reference
+        // (Identity Spec §Owner References, audit 2026-11 Q6 / sbo-yd72). A
+        // key-only owner has no record to rotate, recover, transfer or govern,
+        // so an explicit `Owner`/`Creator`/`New-Owner` carrying one resolves
+        // to nothing. Key-rooted *names* still resolve to their key below.
+        // Checked before the cross-repo rule only to give the dedicated
+        // outcome a clear home; both are `Unresolved`.
         if is_key_reference(&current) {
-            return Controller::Key(current);
+            return Controller::Unresolved;
         }
 
         // Cross-repo references are out of scope for this single-repo version.
@@ -175,7 +195,7 @@ pub fn is_authorized(
 ) -> bool {
     match controller {
         Controller::Key(k) => signer_key == k,
-        Controller::Email(e) => attributed_email == Some(e.as_str()),
+        Controller::Email(e) => attributed_email.is_some_and(|a| crate::identity::identity_eq(a, e)),
         Controller::None | Controller::Unresolved => false,
     }
 }
@@ -389,18 +409,17 @@ mod tests {
     }
 
     #[test]
-    fn bare_key_resolves_to_key_controller() {
+    fn bare_key_is_not_a_reference() {
+        // Q6 / sbo-yd72: a raw key is not an identity reference. It resolves to
+        // nothing, so a message naming one as its owner is unauthorized.
         let lookup = lookup_from(HashMap::new());
-        // The signer-fallback effective owner: a raw algorithm-prefixed key
-        // resolves to a key controller (despite containing a colon), authorized
-        // by direct signature.
         assert_eq!(
             resolve_controller("ed25519:deadbeef", &lookup, DEFAULT_HOP_LIMIT, None),
-            Controller::Key("ed25519:deadbeef".to_string())
+            Controller::Unresolved
         );
         assert_eq!(
             resolve_controller("bls12-381:abc", &lookup, DEFAULT_HOP_LIMIT, None),
-            Controller::Key("bls12-381:abc".to_string())
+            Controller::Unresolved
         );
     }
 

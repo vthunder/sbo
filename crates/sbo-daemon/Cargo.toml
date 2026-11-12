@@ -31,7 +31,7 @@ sha2.workspace = true
 flate2.workspace = true
 
 # Avail SDK for RPC queries
-avail-rust = { package = "avail-rust-client", git = "https://github.com/availproject/avail-rust", branch = "main" }
+avail-rust.workspace = true
 
 # SCALE codec for proper extrinsic decoding
 parity-scale-codec = "3"
@@ -64,7 +64,10 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+# Offline DNSSEC fixtures for the audit tests (synthetic chains + pinned root).
+sbo-core = { workspace = true, features = ["dnssec-fixtures"] }
 chrono = "0.4"
 tempfile = "3"
+proptest = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

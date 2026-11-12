@@ -1,13 +1,27 @@
-//! Sparse Path-Segment Trie for SBO State Commitment
+//! Sparse Path-Segment Trie for SBO State Commitment (`state-commitment/v2`)
 //!
 //! Implements a hierarchical trie where tree structure mirrors path structure.
-//! Each node has children keyed by segment name, with values being either
-//! child node hashes or object hashes (for leaves).
+//! Each node has children keyed by segment name; an object may sit at any
+//! node, including one that also has children (the object-versus-container
+//! rule, State Commitment spec §Object Versus Container).
 //!
-//! Node serialization format (canonical JSON):
+//! Domain separation (State Commitment spec §Domain Separation):
+//!
+//! ```text
+//! leaf_hash(object_hash) = sha256(0x00 ‖ object_hash_bytes)
+//! node_hash(node)        = sha256(0x01 ‖ canonical_json(node))
+//! ```
+//!
+//! Node serialization format (canonical JSON, keys `children` then `object`):
 //! ```json
 //! {"children":{"segment1":"sha256:...","segment2":"sha256:..."}}
+//! {"children":{"b":"sha256:..."},"object":"sha256:..."}
 //! ```
+//!
+//! A node whose `children` is empty and which carries an object is a leaf and
+//! commits as `leaf_hash`; a node that has children commits as `node_hash`,
+//! with its own object (if any) in the `object` member. The two forms never
+//! share a preimage, and the root is a function of the object set alone.
 
 extern crate alloc;
 
@@ -16,6 +30,25 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 use crate::sha256;
+
+/// Domain byte prefixed to a leaf preimage.
+pub const LEAF_DOMAIN: u8 = 0x00;
+/// Domain byte prefixed to an internal-node preimage.
+pub const NODE_DOMAIN: u8 = 0x01;
+
+/// `leaf_hash(object_hash) = sha256(0x00 ‖ object_hash)` (33-byte preimage).
+pub fn leaf_hash(object_hash: &[u8; 32]) -> [u8; 32] {
+    let mut preimage = [0u8; 33];
+    preimage[0] = LEAF_DOMAIN;
+    preimage[1..].copy_from_slice(object_hash);
+    sha256(&preimage)
+}
+
+/// The root of an empty state: `node_hash({"children":{}})` (State Commitment
+/// spec §State Root). There is no zero sentinel.
+pub fn empty_root() -> [u8; 32] {
+    TrieNode::new().hash()
+}
 
 /// Error type for trie operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,25 +72,27 @@ impl core::fmt::Display for TrieError {
     }
 }
 
-/// A node in the sparse path-segment trie
+/// A node in the sparse path-segment trie, in its hashed (serialized) form.
 ///
-/// Each node contains a map of segment names to hashes.
-/// The hash can be either:
-/// - Another node's hash (for internal nodes)
-/// - An object_hash (for leaf nodes - the final segment)
+/// `children` maps a segment name to the **commitment** of the child (a leaf
+/// hash or a node hash). `object` is the object hash of the object sitting
+/// exactly at this node, present only when the node also has children; a
+/// node with no children and an object is a leaf and is never serialized.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrieNode {
-    /// Map of segment name to hash
+    /// Map of segment name to child commitment
     pub children: BTreeMap<String, [u8; 32]>,
+    /// Object hash of the object at this node (object-versus-container)
+    pub object: Option<[u8; 32]>,
 }
 
 impl TrieNode {
     pub fn new() -> Self {
-        Self { children: BTreeMap::new() }
+        Self { children: BTreeMap::new(), object: None }
     }
 
     /// Serialize to deterministic JSON for hashing
-    /// Format: {"children":{"a":"sha256:...","b":"sha256:..."}}
+    /// Format: {"children":{"a":"sha256:...","b":"sha256:..."}[,"object":"sha256:..."]}
     /// Keys are sorted lexicographically (BTreeMap guarantees this)
     /// No whitespace
     pub fn to_canonical_json(&self) -> Vec<u8> {
@@ -74,28 +109,67 @@ impl TrieNode {
             json.push_str(&hex_encode(hash));
             json.push('"');
         }
-        json.push_str("}}");
+        json.push('}');
+        if let Some(object) = &self.object {
+            json.push_str(r#","object":"sha256:"#);
+            json.push_str(&hex_encode(object));
+            json.push('"');
+        }
+        json.push('}');
         json.into_bytes()
     }
 
-    /// Compute node hash = sha256(canonical_json)
+    /// Internal-node hash = sha256(0x01 ‖ canonical_json)
     pub fn hash(&self) -> [u8; 32] {
-        sha256(&self.to_canonical_json())
+        let json = self.to_canonical_json();
+        let mut preimage = Vec::with_capacity(json.len() + 1);
+        preimage.push(NODE_DOMAIN);
+        preimage.extend_from_slice(&json);
+        sha256(&preimage)
+    }
+
+    /// The commitment this node contributes to its parent: a leaf hash when
+    /// the node has an object and no children (the collapsed-leaf rule), the
+    /// internal-node hash otherwise.
+    pub fn commitment(&self) -> [u8; 32] {
+        match (&self.object, self.children.is_empty()) {
+            (Some(object), true) => leaf_hash(object),
+            _ => self.hash(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.children.is_empty()
+        self.children.is_empty() && self.object.is_none()
     }
 }
 
-/// A single step in a trie proof
+/// A single step in a trie proof.
+///
+/// Step `i` describes the node at depth `i` (the root for `i == 0`): its
+/// other children (`siblings`), the object sitting at that node if any
+/// (`object`), and — on the final step of an inclusion proof whose target is
+/// also a container — the target node's own children (`children`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrieProofStep {
     /// The segment taken at this level (None for non-existence proof at this level)
     pub segment: Option<String>,
-    /// Sibling hashes at this level (other children of the parent node)
+    /// Sibling commitments at this level (other children of the node)
     pub siblings: BTreeMap<String, [u8; 32]>,
+    /// Object hash of the object sitting at this level's node, if any
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub object: Option<[u8; 32]>,
+    /// Final step only: the target node's children when the proven object is
+    /// also a container
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub children: Option<BTreeMap<String, [u8; 32]>>,
+}
+
+impl TrieProofStep {
+    /// A plain step (no object at this level, no target children).
+    pub fn new(segment: Option<String>, siblings: BTreeMap<String, [u8; 32]>) -> Self {
+        Self { segment, siblings, object: None, children: None }
+    }
 }
 
 /// Complete trie proof for object inclusion/non-existence
@@ -193,7 +267,7 @@ pub struct StateTransitionWitness {
 impl Default for StateTransitionWitness {
     fn default() -> Self {
         Self {
-            prev_state_root: [0u8; 32],
+            prev_state_root: empty_root(),
             witnesses: Vec::new(),
             sibling_hints: Vec::new(),
         }
@@ -214,30 +288,42 @@ pub struct PartialTrie {
 /// Node in a partial trie
 #[derive(Debug, Clone)]
 enum PartialNode {
-    /// A node with all children known
-    #[allow(dead_code)]
-    Complete {
-        children: BTreeMap<String, PartialNode>,
-    },
-    /// A node with some children known and others as hash stubs
+    /// A node with some children expanded and the others known by commitment
     Partial {
         known_children: BTreeMap<String, PartialNode>,
         sibling_hashes: BTreeMap<String, [u8; 32]>,
+        /// Object sitting at this node, if any
+        object: Option<[u8; 32]>,
     },
-    /// A leaf node containing an object hash
-    Leaf {
-        object_hash: [u8; 32],
-    },
-    /// An unexpanded subtree represented only by its hash
+    /// An unexpanded subtree represented only by its commitment
     Stub {
         hash: [u8; 32],
     },
 }
 
+impl PartialNode {
+    fn partial(object: Option<[u8; 32]>) -> Self {
+        PartialNode::Partial {
+            known_children: BTreeMap::new(),
+            sibling_hashes: BTreeMap::new(),
+            object,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            PartialNode::Partial { known_children, sibling_hashes, object } => {
+                known_children.is_empty() && sibling_hashes.is_empty() && object.is_none()
+            }
+            PartialNode::Stub { .. } => false,
+        }
+    }
+}
+
 impl PartialTrie {
     /// Create an empty partial trie
     pub fn new(known_root_hash: [u8; 32]) -> Self {
-        if known_root_hash == [0u8; 32] {
+        if known_root_hash == empty_root() {
             Self {
                 root: None,
                 known_root_hash,
@@ -262,12 +348,7 @@ impl PartialTrie {
         }
 
         // Build the path structure from the proof
-        let new_path = Self::build_path_from_proof(
-            &proof.proof,
-            &proof.path_segments,
-            proof.object_hash,
-            0,
-        )?;
+        let new_path = Self::build_path_from_proof(&proof.proof, proof.object_hash, 0)?;
 
         // Merge into existing structure instead of replacing
         match &mut self.root {
@@ -285,30 +366,30 @@ impl PartialTrie {
     /// Merge two partial nodes, combining their children
     fn merge_nodes(existing: &mut PartialNode, new_node: PartialNode) {
         match (existing, new_node) {
-            // Both are Partial - merge children and siblings
             (
                 PartialNode::Partial {
                     known_children: existing_children,
                     sibling_hashes: existing_siblings,
+                    object: existing_object,
                 },
                 PartialNode::Partial {
                     known_children: new_children,
                     sibling_hashes: new_siblings,
+                    object: new_object,
                 },
             ) => {
-                // Merge sibling hashes (new ones take precedence if different)
+                if existing_object.is_none() {
+                    *existing_object = new_object;
+                }
+                // Merge sibling hashes, but never shadow an expanded child
                 for (seg, hash) in new_siblings {
-                    // Only add if not already a known child
                     if !existing_children.contains_key(&seg) {
                         existing_siblings.insert(seg, hash);
                     }
                 }
-
                 // Merge known children recursively
                 for (seg, new_child) in new_children {
-                    // Remove from siblings if it was there
                     existing_siblings.remove(&seg);
-
                     if let Some(existing_child) = existing_children.get_mut(&seg) {
                         Self::merge_nodes(existing_child, new_child);
                     } else {
@@ -321,119 +402,45 @@ impl PartialTrie {
                 *existing = new_node;
             }
             // New is a Stub but existing has detail - keep existing
-            (_, PartialNode::Stub { .. }) => {
-                // Keep existing, it has more detail
-            }
-            // Both are Leaves - they should have same hash
-            (PartialNode::Leaf { .. }, PartialNode::Leaf { .. }) => {
-                // Keep existing
-            }
-            // Mixed cases - prefer the Partial node
-            (existing @ PartialNode::Leaf { .. }, new_node @ PartialNode::Partial { .. }) => {
-                *existing = new_node;
-            }
-            (PartialNode::Partial { .. }, PartialNode::Leaf { .. }) => {
-                // Keep existing Partial
-            }
-            // Complete nodes - merge children
-            (
-                PartialNode::Complete { children: existing_children },
-                PartialNode::Complete { children: new_children },
-            ) => {
-                for (seg, new_child) in new_children {
-                    if let Some(existing_child) = existing_children.get_mut(&seg) {
-                        Self::merge_nodes(existing_child, new_child);
-                    } else {
-                        existing_children.insert(seg, new_child);
-                    }
-                }
-            }
-            // Complete + Partial - convert to Partial and merge
-            (
-                existing @ PartialNode::Complete { .. },
-                PartialNode::Partial { known_children: new_children, sibling_hashes: new_siblings },
-            ) => {
-                if let PartialNode::Complete { children } = core::mem::replace(existing, PartialNode::Partial {
-                    known_children: BTreeMap::new(),
-                    sibling_hashes: BTreeMap::new(),
-                }) {
-                    if let PartialNode::Partial { known_children, sibling_hashes } = existing {
-                        *known_children = children;
-                        *sibling_hashes = new_siblings;
-                        for (seg, new_child) in new_children {
-                            if let Some(existing_child) = known_children.get_mut(&seg) {
-                                Self::merge_nodes(existing_child, new_child);
-                            } else {
-                                known_children.insert(seg, new_child);
-                            }
-                        }
-                    }
-                }
-            }
-            (
-                PartialNode::Partial { known_children, sibling_hashes: _ },
-                PartialNode::Complete { children: new_children },
-            ) => {
-                for (seg, new_child) in new_children {
-                    if let Some(existing_child) = known_children.get_mut(&seg) {
-                        Self::merge_nodes(existing_child, new_child);
-                    } else {
-                        known_children.insert(seg, new_child);
-                    }
-                }
-            }
-            // Complete + Leaf: keep existing (invalid combination, shouldn't happen)
-            (PartialNode::Complete { .. }, PartialNode::Leaf { .. }) => {
-                // Keep existing - a path with children can't also be a leaf
-            }
-            // Leaf + Complete: keep existing (invalid combination, shouldn't happen)
-            (PartialNode::Leaf { .. }, PartialNode::Complete { .. }) => {
-                // Keep existing - a leaf can't have children
-            }
+            (_, PartialNode::Stub { .. }) => {}
         }
     }
 
-    /// Build a partial path from proof steps
+    /// Build a partial path from proof steps. Step `depth` describes the node
+    /// at that depth; a `segment: None` step is the last one and describes
+    /// the node where the path stops.
     fn build_path_from_proof(
         steps: &[TrieProofStep],
-        segments: &[String],
         object_hash: Option<[u8; 32]>,
         depth: usize,
     ) -> Result<PartialNode, TrieError> {
-        if depth >= steps.len() {
-            // Reached the end of the proof
-            return match object_hash {
-                Some(hash) => Ok(PartialNode::Leaf { object_hash: hash }),
-                None => Ok(PartialNode::Partial {
-                    known_children: BTreeMap::new(),
-                    sibling_hashes: BTreeMap::new(),
-                }),
-            };
-        }
-
-        let step = &steps[depth];
-
-        // At the last step and we have an object hash, the next level is a leaf
-        if depth == steps.len() - 1 && object_hash.is_some() {
-            let segment = step.segment.as_ref().ok_or(TrieError::InvalidProof)?;
-            let mut known_children = BTreeMap::new();
-            known_children.insert(
-                segment.clone(),
-                PartialNode::Leaf {
-                    object_hash: object_hash.unwrap(),
-                },
-            );
-
-            return Ok(PartialNode::Partial {
-                known_children,
-                sibling_hashes: step.siblings.clone(),
-            });
-        }
+        let step = steps.get(depth).ok_or(TrieError::InvalidProof)?;
+        let last = depth + 1 == steps.len();
 
         match &step.segment {
+            None => {
+                if !last {
+                    return Err(TrieError::InvalidProof);
+                }
+                Ok(PartialNode::Partial {
+                    known_children: BTreeMap::new(),
+                    sibling_hashes: step.siblings.clone(),
+                    object: step.object,
+                })
+            }
             Some(segment) => {
-                // Continue down the path
-                let child = Self::build_path_from_proof(steps, segments, object_hash, depth + 1)?;
+                let child = if last {
+                    // The target node itself: the proven object plus any
+                    // children it has as a container.
+                    let hash = object_hash.ok_or(TrieError::InvalidProof)?;
+                    PartialNode::Partial {
+                        known_children: BTreeMap::new(),
+                        sibling_hashes: step.children.clone().unwrap_or_default(),
+                        object: Some(hash),
+                    }
+                } else {
+                    Self::build_path_from_proof(steps, object_hash, depth + 1)?
+                };
 
                 let mut known_children = BTreeMap::new();
                 known_children.insert(segment.clone(), child);
@@ -441,13 +448,7 @@ impl PartialTrie {
                 Ok(PartialNode::Partial {
                     known_children,
                     sibling_hashes: step.siblings.clone(),
-                })
-            }
-            None => {
-                // Non-existence proof divergence point
-                Ok(PartialNode::Partial {
-                    known_children: BTreeMap::new(),
-                    sibling_hashes: step.siblings.clone(),
+                    object: step.object,
                 })
             }
         }
@@ -461,8 +462,9 @@ impl PartialTrie {
 
         match &mut self.root {
             None => {
-                // Build new path
-                self.root = Some(Self::build_new_path(segments, object_hash));
+                let mut root = PartialNode::partial(None);
+                Self::insert_into_node(&mut root, segments, object_hash);
+                self.root = Some(root);
             }
             Some(node) => {
                 Self::insert_into_node(node, segments, object_hash);
@@ -470,69 +472,29 @@ impl PartialTrie {
         }
     }
 
-    /// Build a new path ending in a leaf
-    fn build_new_path(segments: &[String], object_hash: [u8; 32]) -> PartialNode {
-        if segments.len() == 1 {
-            let mut known_children = BTreeMap::new();
-            known_children.insert(
-                segments[0].clone(),
-                PartialNode::Leaf { object_hash },
-            );
-            PartialNode::Partial {
-                known_children,
-                sibling_hashes: BTreeMap::new(),
-            }
-        } else {
-            let child = Self::build_new_path(&segments[1..], object_hash);
-            let mut known_children = BTreeMap::new();
-            known_children.insert(segments[0].clone(), child);
-            PartialNode::Partial {
-                known_children,
-                sibling_hashes: BTreeMap::new(),
-            }
-        }
-    }
-
     /// Insert into an existing node
     fn insert_into_node(node: &mut PartialNode, segments: &[String], object_hash: [u8; 32]) {
-        if segments.is_empty() {
+        if let PartialNode::Stub { .. } = node {
+            // Unexpanded subtree: the witness did not open it, so all we can
+            // do is start a fresh node here (proofs for valid witnesses
+            // always expand the path they touch).
+            *node = PartialNode::partial(None);
+        }
+        let PartialNode::Partial { known_children, sibling_hashes, object } = node else {
+            unreachable!()
+        };
+
+        let Some((segment, rest)) = segments.split_first() else {
+            *object = Some(object_hash);
             return;
-        }
+        };
 
-        match node {
-            PartialNode::Leaf { .. } | PartialNode::Stub { .. } => {
-                // Replace with a new path
-                *node = Self::build_new_path(segments, object_hash);
-            }
-            PartialNode::Complete { children } => {
-                let segment = &segments[0];
-                if segments.len() == 1 {
-                    children.insert(segment.clone(), PartialNode::Leaf { object_hash });
-                } else if let Some(child) = children.get_mut(segment) {
-                    Self::insert_into_node(child, &segments[1..], object_hash);
-                } else {
-                    let child = Self::build_new_path(&segments[1..], object_hash);
-                    children.insert(segment.clone(), child);
-                }
-            }
-            PartialNode::Partial {
-                known_children,
-                sibling_hashes,
-            } => {
-                let segment = &segments[0];
-                // Remove from sibling_hashes if it was there (it's now being expanded)
-                sibling_hashes.remove(segment);
-
-                if segments.len() == 1 {
-                    known_children.insert(segment.clone(), PartialNode::Leaf { object_hash });
-                } else if let Some(child) = known_children.get_mut(segment) {
-                    Self::insert_into_node(child, &segments[1..], object_hash);
-                } else {
-                    let child = Self::build_new_path(&segments[1..], object_hash);
-                    known_children.insert(segment.clone(), child);
-                }
-            }
-        }
+        // The segment is now expanded, so it is no longer a bare sibling
+        sibling_hashes.remove(segment);
+        let child = known_children
+            .entry(segment.clone())
+            .or_insert_with(|| PartialNode::partial(None));
+        Self::insert_into_node(child, rest, object_hash);
     }
 
     /// Delete an object at the given path
@@ -545,115 +507,60 @@ impl PartialTrie {
             None => false,
             Some(node) => {
                 let deleted = Self::delete_from_node(node, segments);
-                // Check if root is now empty
-                if let PartialNode::Partial {
-                    known_children,
-                    sibling_hashes,
-                } = node
-                {
-                    if known_children.is_empty() && sibling_hashes.is_empty() {
-                        self.root = None;
-                    }
+                if node.is_empty() {
+                    self.root = None;
                 }
                 deleted
             }
         }
     }
 
-    /// Delete from a node
+    /// Delete from a node; prunes nodes left with nothing in them
     fn delete_from_node(node: &mut PartialNode, segments: &[String]) -> bool {
-        if segments.is_empty() {
+        let PartialNode::Partial { known_children, object, .. } = node else {
             return false;
+        };
+        let Some((segment, rest)) = segments.split_first() else {
+            return object.take().is_some();
+        };
+        let Some(child) = known_children.get_mut(segment) else {
+            return false;
+        };
+        let deleted = Self::delete_from_node(child, rest);
+        if child.is_empty() {
+            known_children.remove(segment);
         }
-
-        match node {
-            PartialNode::Leaf { .. } | PartialNode::Stub { .. } => false,
-            PartialNode::Complete { children } => {
-                let segment = &segments[0];
-                if segments.len() == 1 {
-                    children.remove(segment).is_some()
-                } else if let Some(child) = children.get_mut(segment) {
-                    let deleted = Self::delete_from_node(child, &segments[1..]);
-                    // Clean up empty children
-                    if let PartialNode::Partial {
-                        known_children,
-                        sibling_hashes,
-                    } = child
-                    {
-                        if known_children.is_empty() && sibling_hashes.is_empty() {
-                            children.remove(segment);
-                        }
-                    }
-                    deleted
-                } else {
-                    false
-                }
-            }
-            PartialNode::Partial {
-                known_children,
-                sibling_hashes: _,
-            } => {
-                let segment = &segments[0];
-                if segments.len() == 1 {
-                    known_children.remove(segment).is_some()
-                } else if let Some(child) = known_children.get_mut(segment) {
-                    let deleted = Self::delete_from_node(child, &segments[1..]);
-                    // Clean up empty children
-                    if let PartialNode::Partial {
-                        known_children: child_known,
-                        sibling_hashes: child_sibs,
-                    } = child
-                    {
-                        if child_known.is_empty() && child_sibs.is_empty() {
-                            known_children.remove(segment);
-                        }
-                    }
-                    deleted
-                } else {
-                    false
-                }
-            }
-        }
+        deleted
     }
 
     /// Compute the root hash of the partial trie
     pub fn root_hash(&self) -> [u8; 32] {
         match &self.root {
-            None => [0u8; 32],
+            None => empty_root(),
             Some(node) => Self::compute_node_hash(node),
         }
     }
 
-    /// Compute hash for a partial node
+    /// Compute the commitment of a partial node
     fn compute_node_hash(node: &PartialNode) -> [u8; 32] {
         match node {
-            PartialNode::Leaf { object_hash } => *object_hash,
             PartialNode::Stub { hash } => *hash,
-            PartialNode::Complete { children } => {
-                let mut trie_node = TrieNode::new();
-                for (segment, child) in children {
-                    trie_node
-                        .children
-                        .insert(segment.clone(), Self::compute_node_hash(child));
-                }
-                trie_node.hash()
-            }
             PartialNode::Partial {
                 known_children,
                 sibling_hashes,
+                object,
             } => {
                 let mut trie_node = TrieNode::new();
-                // Add sibling hashes (these are already computed)
                 for (segment, hash) in sibling_hashes {
                     trie_node.children.insert(segment.clone(), *hash);
                 }
-                // Add known children (need to compute their hashes)
                 for (segment, child) in known_children {
                     trie_node
                         .children
                         .insert(segment.clone(), Self::compute_node_hash(child));
                 }
-                trie_node.hash()
+                trie_node.object = *object;
+                trie_node.commitment()
             }
         }
     }
@@ -708,20 +615,8 @@ fn verify_object_witness(witness: &ObjectWitness, expected_root: [u8; 32]) -> Re
             old_object_hash,
             inclusion_proof,
             ..
-        } => {
-            // Verify old object was present
-            if inclusion_proof.state_root != expected_root {
-                return Err(TrieError::RootMismatch);
-            }
-            if inclusion_proof.object_hash != Some(*old_object_hash) {
-                return Err(TrieError::InvalidProof);
-            }
-            let valid = verify_trie_proof(inclusion_proof)?;
-            if !valid {
-                return Err(TrieError::InvalidProof);
-            }
         }
-        ObjectWitness::Delete {
+        | ObjectWitness::Delete {
             old_object_hash,
             inclusion_proof,
             ..
@@ -762,14 +657,9 @@ fn apply_witness_changes(witness: &StateTransitionWitness) -> Result<[u8; 32], T
         partial_trie.expand_from_proof(proof)?;
     }
 
-    // Add sibling hints
-    for hint in &witness.sibling_hints {
-        // These help when multiple witnesses share path prefixes
-        // The partial trie needs to know about siblings that weren't in the proofs
-        // This is handled during proof expansion, but hints can override
-        // For now, we trust the proof expansion handles this correctly
-        let _ = hint; // Reserved for future use
-    }
+    // Sibling hints are reserved: proof expansion carries every sibling a
+    // valid witness needs.
+    let _ = &witness.sibling_hints;
 
     // Then, apply all changes
     for obj_witness in &witness.witnesses {
@@ -778,10 +668,8 @@ fn apply_witness_changes(witness: &StateTransitionWitness) -> Result<[u8; 32], T
                 path_segments,
                 new_object_hash,
                 ..
-            } => {
-                partial_trie.insert(path_segments, *new_object_hash);
             }
-            ObjectWitness::Update {
+            | ObjectWitness::Update {
                 path_segments,
                 new_object_hash,
                 ..
@@ -800,19 +688,81 @@ fn apply_witness_changes(witness: &StateTransitionWitness) -> Result<[u8; 32], T
 /// In-memory sparse trie for building and proof generation
 #[derive(Debug, Clone, Default)]
 pub struct SparseTrie {
-    root: Option<InternalNode>,
+    root: Option<Node>,
 }
 
-#[derive(Debug, Clone)]
-enum InternalNode {
-    /// Internal node with children
-    Branch {
-        children: BTreeMap<String, InternalNode>,
-    },
-    /// Leaf node containing object hash
-    Leaf {
-        object_hash: [u8; 32],
-    },
+/// A fully known trie node: children by segment plus the object sitting here,
+/// if any. A node with an object and no children is a leaf; a node with
+/// neither is never kept (it is pruned on delete).
+#[derive(Debug, Clone, Default)]
+struct Node {
+    children: BTreeMap<String, Node>,
+    object: Option<[u8; 32]>,
+}
+
+impl Node {
+    fn is_empty(&self) -> bool {
+        self.children.is_empty() && self.object.is_none()
+    }
+
+    /// Commitment of this node (leaf hash or node hash)
+    fn commitment(&self) -> [u8; 32] {
+        let mut trie_node = TrieNode::new();
+        for (segment, child) in &self.children {
+            trie_node.children.insert(segment.clone(), child.commitment());
+        }
+        trie_node.object = self.object;
+        trie_node.commitment()
+    }
+
+    /// Commitments of every child
+    fn child_hashes(&self) -> BTreeMap<String, [u8; 32]> {
+        self.children
+            .iter()
+            .map(|(segment, child)| (segment.clone(), child.commitment()))
+            .collect()
+    }
+
+    /// Commitments of every child except `except`
+    fn siblings_of(&self, except: &str) -> BTreeMap<String, [u8; 32]> {
+        self.children
+            .iter()
+            .filter(|(segment, _)| segment.as_str() != except)
+            .map(|(segment, child)| (segment.clone(), child.commitment()))
+            .collect()
+    }
+
+    fn get(&self, segments: &[String]) -> Option<&Node> {
+        let mut node = self;
+        for segment in segments {
+            node = node.children.get(segment)?;
+        }
+        Some(node)
+    }
+
+    fn insert(&mut self, segments: &[String], object_hash: [u8; 32]) {
+        let mut node = self;
+        for segment in segments {
+            node = node.children.entry(segment.clone()).or_default();
+        }
+        node.object = Some(object_hash);
+    }
+
+    /// Remove the object at `segments`; prunes emptied nodes. Returns whether
+    /// an object was there.
+    fn delete(&mut self, segments: &[String]) -> bool {
+        let Some((segment, rest)) = segments.split_first() else {
+            return self.object.take().is_some();
+        };
+        let Some(child) = self.children.get_mut(segment) else {
+            return false;
+        };
+        let deleted = child.delete(rest);
+        if child.is_empty() {
+            self.children.remove(segment);
+        }
+        deleted
+    }
 }
 
 impl SparseTrie {
@@ -825,64 +775,9 @@ impl SparseTrie {
         if segments.is_empty() {
             return;
         }
-
-        match &mut self.root {
-            None => {
-                // Create new trie from scratch
-                self.root = Some(Self::build_path(&segments, object_hash));
-            }
-            Some(node) => {
-                Self::insert_into(node, &segments, object_hash);
-            }
-        }
-    }
-
-    /// Build a path from segments ending in a leaf
-    fn build_path(segments: &[String], object_hash: [u8; 32]) -> InternalNode {
-        if segments.len() == 1 {
-            // Last segment - create branch with leaf child
-            let mut children = BTreeMap::new();
-            children.insert(segments[0].clone(), InternalNode::Leaf { object_hash });
-            InternalNode::Branch { children }
-        } else {
-            // More segments - create branch with nested child
-            let mut children = BTreeMap::new();
-            let child = Self::build_path(&segments[1..], object_hash);
-            children.insert(segments[0].clone(), child);
-            InternalNode::Branch { children }
-        }
-    }
-
-    /// Insert into existing node
-    fn insert_into(node: &mut InternalNode, segments: &[String], object_hash: [u8; 32]) {
-        if segments.is_empty() {
-            return;
-        }
-
-        match node {
-            InternalNode::Leaf { .. } => {
-                // Replace leaf with branch containing the new path
-                // This shouldn't normally happen if paths are properly constructed
-                *node = Self::build_path(segments, object_hash);
-            }
-            InternalNode::Branch { children } => {
-                let segment = &segments[0];
-                if segments.len() == 1 {
-                    // This is the final segment - insert/update leaf
-                    children.insert(segment.clone(), InternalNode::Leaf { object_hash });
-                } else {
-                    // More segments to go
-                    if let Some(child) = children.get_mut(segment) {
-                        // Child exists - recurse
-                        Self::insert_into(child, &segments[1..], object_hash);
-                    } else {
-                        // Child doesn't exist - create path
-                        let child = Self::build_path(&segments[1..], object_hash);
-                        children.insert(segment.clone(), child);
-                    }
-                }
-            }
-        }
+        self.root
+            .get_or_insert_with(Node::default)
+            .insert(&segments, object_hash);
     }
 
     /// Delete an object at the given path segments
@@ -891,75 +786,22 @@ impl SparseTrie {
         if segments.is_empty() {
             return false;
         }
-
-        match &mut self.root {
-            None => false,
-            Some(node) => {
-                let deleted = Self::delete_from(node, segments);
-                // Clean up empty root
-                if let InternalNode::Branch { children } = node {
-                    if children.is_empty() {
-                        self.root = None;
-                    }
-                }
-                deleted
-            }
-        }
-    }
-
-    /// Delete from a node, returns true if deleted
-    fn delete_from(node: &mut InternalNode, segments: &[String]) -> bool {
-        if segments.is_empty() {
+        let Some(root) = &mut self.root else {
             return false;
+        };
+        let deleted = root.delete(segments);
+        if root.is_empty() {
+            self.root = None;
         }
-
-        match node {
-            InternalNode::Leaf { .. } => false,
-            InternalNode::Branch { children } => {
-                let segment = &segments[0];
-                if segments.len() == 1 {
-                    // Remove this segment
-                    children.remove(segment).is_some()
-                } else {
-                    // Recurse
-                    if let Some(child) = children.get_mut(segment) {
-                        let deleted = Self::delete_from(child, &segments[1..]);
-                        // Clean up empty branches
-                        if let InternalNode::Branch { children: child_children } = child {
-                            if child_children.is_empty() {
-                                children.remove(segment);
-                            }
-                        }
-                        deleted
-                    } else {
-                        false
-                    }
-                }
-            }
-        }
+        deleted
     }
 
     /// Compute the root hash of the trie
-    /// Returns [0u8; 32] for empty trie
+    /// Returns `empty_root()` for an empty trie
     pub fn root_hash(&self) -> [u8; 32] {
         match &self.root {
-            None => [0u8; 32],
-            Some(node) => Self::compute_hash(node),
-        }
-    }
-
-    /// Compute hash for a node
-    fn compute_hash(node: &InternalNode) -> [u8; 32] {
-        match node {
-            InternalNode::Leaf { object_hash } => *object_hash,
-            InternalNode::Branch { children } => {
-                let mut trie_node = TrieNode::new();
-                for (segment, child) in children {
-                    let child_hash = Self::compute_hash(child);
-                    trie_node.children.insert(segment.clone(), child_hash);
-                }
-                trie_node.hash()
-            }
+            None => empty_root(),
+            Some(node) => node.commitment(),
         }
     }
 
@@ -972,8 +814,26 @@ impl SparseTrie {
         let root = self.root.as_ref().ok_or(TrieError::PathNotFound)?;
         let state_root = self.root_hash();
 
-        let mut proof_steps = Vec::new();
-        let object_hash = Self::collect_proof(root, segments, &mut proof_steps)?;
+        let mut proof_steps = Vec::with_capacity(segments.len());
+        let mut node = root;
+        for segment in segments {
+            let child = node.children.get(segment).ok_or(TrieError::PathNotFound)?;
+            proof_steps.push(TrieProofStep {
+                segment: Some(segment.clone()),
+                siblings: node.siblings_of(segment),
+                object: node.object,
+                children: None,
+            });
+            node = child;
+        }
+        let object_hash = node.object.ok_or(TrieError::PathNotFound)?;
+        if !node.children.is_empty() {
+            // The object is also a container: the final step carries its
+            // children so the verifier can rebuild the internal node.
+            if let Some(last) = proof_steps.last_mut() {
+                last.children = Some(node.child_hashes());
+            }
+        }
 
         Ok(TrieProof {
             state_root,
@@ -981,55 +841,6 @@ impl SparseTrie {
             object_hash: Some(object_hash),
             proof: proof_steps,
         })
-    }
-
-    /// Collect proof steps while traversing to the target
-    fn collect_proof(
-        node: &InternalNode,
-        segments: &[String],
-        proof_steps: &mut Vec<TrieProofStep>,
-    ) -> Result<[u8; 32], TrieError> {
-        if segments.is_empty() {
-            return Err(TrieError::EmptyPath);
-        }
-
-        match node {
-            InternalNode::Leaf { object_hash: _ } => {
-                // Shouldn't reach a leaf before exhausting segments
-                Err(TrieError::PathNotFound)
-            }
-            InternalNode::Branch { children } => {
-                let segment = &segments[0];
-
-                // Collect siblings (all children except the one we're following)
-                let mut siblings = BTreeMap::new();
-                for (child_seg, child_node) in children {
-                    if child_seg != segment {
-                        siblings.insert(child_seg.clone(), Self::compute_hash(child_node));
-                    }
-                }
-
-                // Add this step
-                proof_steps.push(TrieProofStep {
-                    segment: Some(segment.clone()),
-                    siblings,
-                });
-
-                // Get the child we're following
-                let child = children.get(segment).ok_or(TrieError::PathNotFound)?;
-
-                if segments.len() == 1 {
-                    // This should be a leaf
-                    match child {
-                        InternalNode::Leaf { object_hash } => Ok(*object_hash),
-                        InternalNode::Branch { .. } => Err(TrieError::PathNotFound),
-                    }
-                } else {
-                    // Continue traversing
-                    Self::collect_proof(child, &segments[1..], proof_steps)
-                }
-            }
-        }
     }
 
     /// Generate a non-existence proof
@@ -1044,13 +855,48 @@ impl SparseTrie {
         match &self.root {
             None => {
                 // Empty trie - path trivially doesn't exist
-                proof_steps.push(TrieProofStep {
-                    segment: None,
-                    siblings: BTreeMap::new(),
-                });
+                proof_steps.push(TrieProofStep::new(None, BTreeMap::new()));
             }
-            Some(node) => {
-                Self::collect_nonexistence_proof(node, segments, &mut proof_steps)?;
+            Some(root) => {
+                let mut node = root;
+                let mut diverged = false;
+                for segment in segments {
+                    match node.children.get(segment) {
+                        Some(child) => {
+                            proof_steps.push(TrieProofStep {
+                                segment: Some(segment.clone()),
+                                siblings: node.siblings_of(segment),
+                                object: node.object,
+                                children: None,
+                            });
+                            node = child;
+                        }
+                        None => {
+                            // Path diverges here: this node (possibly a leaf)
+                            // has no such child.
+                            proof_steps.push(TrieProofStep {
+                                segment: None,
+                                siblings: node.child_hashes(),
+                                object: node.object,
+                                children: None,
+                            });
+                            diverged = true;
+                            break;
+                        }
+                    }
+                }
+                if !diverged {
+                    // The node exists; it must carry no object.
+                    if node.object.is_some() {
+                        return Err(TrieError::InvalidProof);
+                    }
+                    proof_steps.push(TrieProofStep {
+                        segment: None,
+                        siblings: node.child_hashes(),
+                        object: None,
+                        children: None,
+                    });
+                }
             }
         }
 
@@ -1062,107 +908,16 @@ impl SparseTrie {
         })
     }
 
-    /// Collect non-existence proof steps
-    fn collect_nonexistence_proof(
-        node: &InternalNode,
-        segments: &[String],
-        proof_steps: &mut Vec<TrieProofStep>,
-    ) -> Result<(), TrieError> {
-        if segments.is_empty() {
-            return Err(TrieError::EmptyPath);
-        }
-
-        match node {
-            InternalNode::Leaf { .. } => {
-                // Hit a leaf before exhausting path - path doesn't exist
-                proof_steps.push(TrieProofStep {
-                    segment: None,
-                    siblings: BTreeMap::new(),
-                });
-                Ok(())
-            }
-            InternalNode::Branch { children } => {
-                let segment = &segments[0];
-
-                if !children.contains_key(segment) {
-                    // Path diverges here - this is where non-existence is proven
-                    let mut siblings = BTreeMap::new();
-                    for (child_seg, child_node) in children {
-                        siblings.insert(child_seg.clone(), Self::compute_hash(child_node));
-                    }
-                    proof_steps.push(TrieProofStep {
-                        segment: None,
-                        siblings,
-                    });
-                    Ok(())
-                } else {
-                    // Segment exists - collect siblings and continue
-                    let mut siblings = BTreeMap::new();
-                    for (child_seg, child_node) in children {
-                        if child_seg != segment {
-                            siblings.insert(child_seg.clone(), Self::compute_hash(child_node));
-                        }
-                    }
-                    proof_steps.push(TrieProofStep {
-                        segment: Some(segment.clone()),
-                        siblings,
-                    });
-
-                    let child = children.get(segment).unwrap();
-                    if segments.len() == 1 {
-                        // Expected more path but this is a branch not pointing to our target
-                        // Or it's a leaf (which means the path exists as something else)
-                        match child {
-                            InternalNode::Leaf { .. } => {
-                                // Path exists! This shouldn't be called for existing paths
-                                Err(TrieError::InvalidProof)
-                            }
-                            InternalNode::Branch { .. } => {
-                                // Path continues but we expected a leaf here
-                                Err(TrieError::InvalidProof)
-                            }
-                        }
-                    } else {
-                        Self::collect_nonexistence_proof(child, &segments[1..], proof_steps)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Check if a path exists in the trie
+    /// Check if an object exists at the path in the trie
     pub fn contains(&self, segments: &[String]) -> bool {
         if segments.is_empty() {
             return false;
         }
-
-        match &self.root {
-            None => false,
-            Some(node) => Self::contains_path(node, segments),
-        }
-    }
-
-    fn contains_path(node: &InternalNode, segments: &[String]) -> bool {
-        if segments.is_empty() {
-            return false;
-        }
-
-        match node {
-            InternalNode::Leaf { .. } => false,
-            InternalNode::Branch { children } => {
-                let segment = &segments[0];
-                match children.get(segment) {
-                    None => false,
-                    Some(child) => {
-                        if segments.len() == 1 {
-                            matches!(child, InternalNode::Leaf { .. })
-                        } else {
-                            Self::contains_path(child, &segments[1..])
-                        }
-                    }
-                }
-            }
-        }
+        self.root
+            .as_ref()
+            .and_then(|root| root.get(segments))
+            .map(|node| node.object.is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -1178,13 +933,17 @@ pub fn compute_trie_root(objects: &[(Vec<String>, [u8; 32])]) -> [u8; 32] {
 
 /// Verify a trie proof
 pub fn verify_trie_proof(proof: &TrieProof) -> Result<bool, TrieError> {
-    // Special case: empty proof against empty state
-    // If state_root is all zeros (empty state), any path trivially doesn't exist
+    // Special case: empty proof against the empty state, where any path
+    // trivially doesn't exist
     if proof.proof.is_empty() {
-        if proof.state_root == [0u8; 32] && proof.object_hash.is_none() {
+        if proof.state_root == empty_root() && proof.object_hash.is_none() {
             // Valid non-existence proof for empty state
             return Ok(true);
         }
+        return Err(TrieError::InvalidProof);
+    }
+
+    if proof.path_segments.is_empty() {
         return Err(TrieError::InvalidProof);
     }
 
@@ -1194,14 +953,35 @@ pub fn verify_trie_proof(proof: &TrieProof) -> Result<bool, TrieError> {
     }
 }
 
+/// Rebuild the node a step describes, with `current` as the followed child
+/// (or none at a divergence), and return its commitment.
+fn step_commitment(step: &TrieProofStep, followed: Option<(&str, [u8; 32])>) -> [u8; 32] {
+    let mut node = TrieNode::new();
+    for (sib_seg, sib_hash) in &step.siblings {
+        node.children.insert(sib_seg.clone(), *sib_hash);
+    }
+    if let Some((segment, hash)) = followed {
+        node.children.insert(String::from(segment), hash);
+    }
+    node.object = step.object;
+    node.commitment()
+}
+
 /// Verify an inclusion proof
 fn verify_inclusion_proof(proof: &TrieProof, object_hash: [u8; 32]) -> Result<bool, TrieError> {
     if proof.proof.len() != proof.path_segments.len() {
         return Err(TrieError::InvalidProof);
     }
+    let last = proof.proof.len() - 1;
 
-    // Start from the leaf (object_hash) and work up to the root
-    let mut current_hash = object_hash;
+    // Start at the target node: a leaf, or a container carrying the object
+    let mut current_hash = match &proof.proof[last].children {
+        None => leaf_hash(&object_hash),
+        Some(children) => {
+            let node = TrieNode { children: children.clone(), object: Some(object_hash) };
+            node.commitment()
+        }
+    };
 
     // Process proof steps from bottom to top (reverse order)
     for (i, step) in proof.proof.iter().enumerate().rev() {
@@ -1211,16 +991,16 @@ fn verify_inclusion_proof(proof: &TrieProof, object_hash: [u8; 32]) -> Result<bo
         if segment != &proof.path_segments[i] {
             return Err(TrieError::InvalidProof);
         }
-
-        // Reconstruct the node: siblings + {segment: current_hash}
-        let mut node = TrieNode::new();
-        for (sib_seg, sib_hash) in &step.siblings {
-            node.children.insert(sib_seg.clone(), *sib_hash);
+        // Only the final step may describe the target's children
+        if i != last && step.children.is_some() {
+            return Err(TrieError::InvalidProof);
         }
-        node.children.insert(segment.clone(), current_hash);
+        // The followed child is not also a sibling
+        if step.siblings.contains_key(segment) {
+            return Err(TrieError::InvalidProof);
+        }
 
-        // Compute this node's hash
-        current_hash = node.hash();
+        current_hash = step_commitment(step, Some((segment, current_hash)));
     }
 
     // Final hash must match state root
@@ -1229,62 +1009,55 @@ fn verify_inclusion_proof(proof: &TrieProof, object_hash: [u8; 32]) -> Result<bo
 
 /// Verify a non-existence proof
 fn verify_nonexistence_proof(proof: &TrieProof) -> Result<bool, TrieError> {
-    if proof.proof.is_empty() {
+    // The first `segment: null` step is the divergence point and must be the
+    // last step. (W3-8: every index below is bounds-checked; an indexer's
+    // proof for a missing top-level object arrives with an empty segment
+    // list and is rejected above.)
+    let idx = proof
+        .proof
+        .iter()
+        .position(|s| s.segment.is_none())
+        .ok_or(TrieError::InvalidProof)?;
+    if idx + 1 != proof.proof.len() || idx > proof.path_segments.len() {
+        return Err(TrieError::InvalidProof);
+    }
+    let diverge_step = &proof.proof[idx];
+    if proof.proof.iter().any(|s| s.children.is_some()) {
         return Err(TrieError::InvalidProof);
     }
 
-    // Find where the path diverges (segment is None)
-    let diverge_idx = proof.proof.iter().position(|s| s.segment.is_none());
-
-    match diverge_idx {
-        None => {
-            // No divergence point found - invalid non-existence proof
-            Err(TrieError::InvalidProof)
+    let mut current_hash = if idx == proof.path_segments.len() {
+        // The target node exists as a container but carries no object
+        if diverge_step.object.is_some() || diverge_step.siblings.is_empty() {
+            return Err(TrieError::InvalidProof);
         }
-        Some(idx) => {
-            // Verify the target segment is NOT in siblings at divergence point
-            let expected_segment = &proof.path_segments[idx];
-            let diverge_step = &proof.proof[idx];
-
-            if diverge_step.siblings.contains_key(expected_segment) {
-                // The segment exists! Invalid non-existence proof
-                return Err(TrieError::InvalidProof);
-            }
-
-            // Build node from siblings at divergence
-            let mut node = TrieNode::new();
-            for (sib_seg, sib_hash) in &diverge_step.siblings {
-                node.children.insert(sib_seg.clone(), *sib_hash);
-            }
-            let mut current_hash = if node.is_empty() {
-                // Empty node at divergence - this is valid for completely missing subtree
-                // But we need to handle the special case of empty trie
-                if idx == 0 && proof.proof.len() == 1 {
-                    // Empty trie case
-                    return Ok(proof.state_root == [0u8; 32]);
-                }
-                node.hash()
-            } else {
-                node.hash()
-            };
-
-            // Now verify from divergence point up to root
-            for i in (0..idx).rev() {
-                let step = &proof.proof[i];
-                let segment = step.segment.as_ref().ok_or(TrieError::InvalidProof)?;
-
-                // Reconstruct the node
-                let mut node = TrieNode::new();
-                for (sib_seg, sib_hash) in &step.siblings {
-                    node.children.insert(sib_seg.clone(), *sib_hash);
-                }
-                node.children.insert(segment.clone(), current_hash);
-                current_hash = node.hash();
-            }
-
-            Ok(current_hash == proof.state_root)
+        step_commitment(diverge_step, None)
+    } else {
+        // The node at this depth lacks the target segment
+        if diverge_step.siblings.contains_key(&proof.path_segments[idx]) {
+            return Err(TrieError::InvalidProof);
         }
+        if diverge_step.siblings.is_empty() && diverge_step.object.is_none() {
+            // Nothing here at all: only the empty trie looks like this
+            if idx == 0 {
+                return Ok(proof.state_root == empty_root());
+            }
+            return Err(TrieError::InvalidProof);
+        }
+        step_commitment(diverge_step, None)
+    };
+
+    // Now verify from divergence point up to root
+    for i in (0..idx).rev() {
+        let step = &proof.proof[i];
+        let segment = step.segment.as_ref().ok_or(TrieError::InvalidProof)?;
+        if segment != &proof.path_segments[i] || step.siblings.contains_key(segment) {
+            return Err(TrieError::InvalidProof);
+        }
+        current_hash = step_commitment(step, Some((segment, current_hash)));
     }
+
+    Ok(current_hash == proof.state_root)
 }
 
 /// Escape special characters for JSON string
@@ -1321,6 +1094,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn seg(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn test_trie_node_canonical_json() {
         let mut node = TrieNode::new();
@@ -1338,6 +1115,30 @@ mod tests {
         // Proper format
         assert!(json_str.starts_with(r#"{"children":{"#));
         assert!(json_str.ends_with("}}"));
+
+        node.object = Some([0x33; 32]);
+        let json = node.to_canonical_json();
+        let json_str = core::str::from_utf8(&json).unwrap();
+        assert!(json_str.ends_with(&format!(r#"}},"object":"sha256:{}"}}"#, "33".repeat(32))));
+    }
+
+    #[test]
+    fn test_domain_separation() {
+        let h = [5u8; 32];
+        // leaf = sha256(0x00 || h)
+        let mut pre = alloc::vec![0u8];
+        pre.extend_from_slice(&h);
+        assert_eq!(leaf_hash(&h), sha256(&pre));
+        // node = sha256(0x01 || json)
+        let mut node = TrieNode::new();
+        node.children.insert("a".into(), h);
+        let mut pre = alloc::vec![1u8];
+        pre.extend_from_slice(&node.to_canonical_json());
+        assert_eq!(node.hash(), sha256(&pre));
+        assert_eq!(node.commitment(), node.hash());
+        // object-only node collapses to a leaf
+        let only = TrieNode { children: BTreeMap::new(), object: Some(h) };
+        assert_eq!(only.commitment(), leaf_hash(&h));
     }
 
     #[test]
@@ -1359,15 +1160,16 @@ mod tests {
         let mut trie = SparseTrie::new();
 
         // Empty trie
-        assert_eq!(trie.root_hash(), [0u8; 32]);
+        assert_eq!(trie.root_hash(), empty_root());
+        assert_eq!(empty_root(), sha256(b"\x01{\"children\":{}}"));
 
         // Insert one object
-        trie.insert(vec!["sys".to_string(), "names".to_string(), "user1".to_string(), "alice".to_string()], [1; 32]);
+        trie.insert(seg(&["sys", "names", "user1", "alice"]), [1; 32]);
         let root1 = trie.root_hash();
-        assert_ne!(root1, [0u8; 32]);
+        assert_ne!(root1, empty_root());
 
         // Insert another object
-        trie.insert(vec!["sys".to_string(), "names".to_string(), "user2".to_string(), "bob".to_string()], [2; 32]);
+        trie.insert(seg(&["sys", "names", "user2", "bob"]), [2; 32]);
         let root2 = trie.root_hash();
         assert_ne!(root2, root1);
     }
@@ -1375,11 +1177,11 @@ mod tests {
     #[test]
     fn test_inclusion_proof_roundtrip() {
         let mut trie = SparseTrie::new();
-        trie.insert(vec!["sys".to_string(), "names".to_string(), "user1".to_string(), "alice".to_string()], [1; 32]);
-        trie.insert(vec!["sys".to_string(), "names".to_string(), "user2".to_string(), "bob".to_string()], [2; 32]);
+        trie.insert(seg(&["sys", "names", "user1", "alice"]), [1; 32]);
+        trie.insert(seg(&["sys", "names", "user2", "bob"]), [2; 32]);
 
         // Generate proof for alice
-        let proof = trie.generate_proof(&["sys".to_string(), "names".to_string(), "user1".to_string(), "alice".to_string()]).unwrap();
+        let proof = trie.generate_proof(&seg(&["sys", "names", "user1", "alice"])).unwrap();
 
         assert_eq!(proof.object_hash, Some([1; 32]));
         assert!(verify_trie_proof(&proof).unwrap());
@@ -1387,18 +1189,18 @@ mod tests {
 
     #[test]
     fn test_compute_trie_root() {
-        let objects = vec![
-            (vec!["a".to_string(), "b".to_string()], [1; 32]),
-            (vec!["a".to_string(), "c".to_string()], [2; 32]),
+        let objects = alloc::vec![
+            (seg(&["a", "b"]), [1; 32]),
+            (seg(&["a", "c"]), [2; 32]),
         ];
 
         let root = compute_trie_root(&objects);
-        assert_ne!(root, [0u8; 32]);
+        assert_ne!(root, empty_root());
 
         // Same objects in different order should produce same root
-        let objects2 = vec![
-            (vec!["a".to_string(), "c".to_string()], [2; 32]),
-            (vec!["a".to_string(), "b".to_string()], [1; 32]),
+        let objects2 = alloc::vec![
+            (seg(&["a", "c"]), [2; 32]),
+            (seg(&["a", "b"]), [1; 32]),
         ];
         let root2 = compute_trie_root(&objects2);
         assert_eq!(root, root2);
@@ -1407,15 +1209,110 @@ mod tests {
     #[test]
     fn test_delete() {
         let mut trie = SparseTrie::new();
-        trie.insert(vec!["a".to_string(), "b".to_string()], [1; 32]);
-        trie.insert(vec!["a".to_string(), "c".to_string()], [2; 32]);
+        trie.insert(seg(&["a", "b"]), [1; 32]);
+        trie.insert(seg(&["a", "c"]), [2; 32]);
 
-        assert!(trie.contains(&["a".to_string(), "b".to_string()]));
+        assert!(trie.contains(&seg(&["a", "b"])));
 
-        trie.delete(&["a".to_string(), "b".to_string()]);
+        trie.delete(&seg(&["a", "b"]));
 
-        assert!(!trie.contains(&["a".to_string(), "b".to_string()]));
-        assert!(trie.contains(&["a".to_string(), "c".to_string()]));
+        assert!(!trie.contains(&seg(&["a", "b"])));
+        assert!(trie.contains(&seg(&["a", "c"])));
+        trie.delete(&seg(&["a", "c"]));
+        assert_eq!(trie.root_hash(), empty_root());
+    }
+
+    /// Object-versus-container: `a` at /x/ and `b` at /x/a/ coexist, the root
+    /// is order-independent, both have proofs, and deleting `b` collapses the
+    /// node for `a` back to a leaf.
+    #[test]
+    fn test_object_and_container_coexist() {
+        let a = seg(&["x", "a"]);
+        let ab = seg(&["x", "a", "b"]);
+        let mut t = SparseTrie::new();
+        t.insert(ab.clone(), [2; 32]);
+        t.insert(a.clone(), [1; 32]);
+        let mut u = SparseTrie::new();
+        u.insert(a.clone(), [1; 32]);
+        u.insert(ab.clone(), [2; 32]);
+        assert!(t.contains(&a) && t.contains(&ab));
+        assert_eq!(t.root_hash(), u.root_hash());
+
+        // Node for a = node_hash({"children":{"b":leaf(2)},"object":1})
+        let mut node_a = TrieNode::new();
+        node_a.children.insert("b".into(), leaf_hash(&[2; 32]));
+        node_a.object = Some([1; 32]);
+        let mut root = TrieNode::new();
+        let mut x = TrieNode::new();
+        x.children.insert("a".into(), node_a.hash());
+        root.children.insert("x".into(), x.hash());
+        assert_eq!(t.root_hash(), root.hash());
+
+        let pa = t.generate_proof(&a).unwrap();
+        assert!(pa.proof.last().unwrap().children.is_some());
+        assert_eq!(verify_trie_proof(&pa), Ok(true));
+        let pab = t.generate_proof(&ab).unwrap();
+        assert_eq!(pab.proof.last().unwrap().object, Some([1; 32]));
+        assert_eq!(verify_trie_proof(&pab), Ok(true));
+
+        // Non-existence under a leaf, and of a container without an object.
+        let np = t.generate_nonexistence_proof(&seg(&["x", "a", "b", "c"])).unwrap();
+        assert_eq!(verify_trie_proof(&np), Ok(true));
+        let np = t.generate_nonexistence_proof(&seg(&["x"])).unwrap();
+        assert_eq!(verify_trie_proof(&np), Ok(true));
+        assert!(t.generate_nonexistence_proof(&a).is_err());
+
+        // Delete b: a collapses to a leaf.
+        assert!(t.delete(&ab));
+        let mut only_a = SparseTrie::new();
+        only_a.insert(a.clone(), [1; 32]);
+        assert_eq!(t.root_hash(), only_a.root_hash());
+        // Delete a: node vanishes.
+        let mut v = u.clone();
+        assert!(v.delete(&a));
+        let mut only_ab = SparseTrie::new();
+        only_ab.insert(ab.clone(), [2; 32]);
+        assert_eq!(v.root_hash(), only_ab.root_hash());
+    }
+
+    /// Witnesses over object-and-container shapes reproduce the rebuilt root.
+    #[test]
+    fn test_witness_with_container_objects() {
+        let a = seg(&["x", "a"]);
+        let ab = seg(&["x", "a", "b"]);
+        let ac = seg(&["x", "a", "c"]);
+        let mut t = SparseTrie::new();
+        t.insert(a.clone(), [1; 32]);
+        t.insert(ab.clone(), [2; 32]);
+        let prev = t.root_hash();
+
+        let witness = StateTransitionWitness {
+            prev_state_root: prev,
+            witnesses: alloc::vec![
+                ObjectWitness::Update {
+                    path_segments: a.clone(),
+                    old_object_hash: [1; 32],
+                    new_object_hash: [11; 32],
+                    inclusion_proof: t.generate_proof(&a).unwrap(),
+                },
+                ObjectWitness::Delete {
+                    path_segments: ab.clone(),
+                    old_object_hash: [2; 32],
+                    inclusion_proof: t.generate_proof(&ab).unwrap(),
+                },
+                ObjectWitness::Create {
+                    path_segments: ac.clone(),
+                    new_object_hash: [3; 32],
+                    nonexistence_proof: t.generate_nonexistence_proof(&ac).unwrap(),
+                },
+            ],
+            sibling_hints: alloc::vec![],
+        };
+        let got = verify_state_transition(&witness).unwrap();
+        let mut after = SparseTrie::new();
+        after.insert(a.clone(), [11; 32]);
+        after.insert(ac.clone(), [3; 32]);
+        assert_eq!(got, after.root_hash());
     }
 
     #[test]
@@ -1437,11 +1334,11 @@ mod tests {
         // with shared path prefixes (like /sys/names and /sys/policies)
 
         // Start with empty state
-        let empty_root = [0u8; 32];
+        let empty_root = empty_root();
 
         // Create paths that share the "sys" prefix
-        let path1 = vec!["sys".to_string(), "names".to_string(), "sys".to_string()];
-        let path2 = vec!["sys".to_string(), "policies".to_string(), "root".to_string()];
+        let path1 = seg(&["sys", "names", "sys"]);
+        let path2 = seg(&["sys", "policies", "root"]);
         let hash1 = [1u8; 32];
         let hash2 = [2u8; 32];
 
@@ -1457,19 +1354,19 @@ mod tests {
             state_root: empty_root,
             path_segments: path1.clone(),
             object_hash: None,
-            proof: vec![],
+            proof: alloc::vec![],
         };
         let proof2 = TrieProof {
             state_root: empty_root,
             path_segments: path2.clone(),
             object_hash: None,
-            proof: vec![],
+            proof: alloc::vec![],
         };
 
         // Build witness with two creates that share "sys" prefix
         let witness = StateTransitionWitness {
             prev_state_root: empty_root,
-            witnesses: vec![
+            witnesses: alloc::vec![
                 ObjectWitness::Create {
                     path_segments: path1,
                     new_object_hash: hash1,
@@ -1481,7 +1378,7 @@ mod tests {
                     nonexistence_proof: proof2,
                 },
             ],
-            sibling_hints: vec![],
+            sibling_hints: alloc::vec![],
         };
 
         // Verify that witness produces the same root as full trie
@@ -1498,8 +1395,8 @@ mod tests {
         // with shared path prefixes
 
         // Build initial state with objects sharing "sys" prefix
-        let path1 = vec!["sys".to_string(), "names".to_string(), "sys".to_string()];
-        let path2 = vec!["sys".to_string(), "policies".to_string(), "root".to_string()];
+        let path1 = seg(&["sys", "names", "sys"]);
+        let path2 = seg(&["sys", "policies", "root"]);
         let old_hash1 = [1u8; 32];
         let old_hash2 = [2u8; 32];
         let new_hash1 = [11u8; 32];
@@ -1523,7 +1420,7 @@ mod tests {
         // Build witness with two updates
         let witness = StateTransitionWitness {
             prev_state_root: prev_root,
-            witnesses: vec![
+            witnesses: alloc::vec![
                 ObjectWitness::Update {
                     path_segments: path1,
                     old_object_hash: old_hash1,
@@ -1537,7 +1434,7 @@ mod tests {
                     inclusion_proof: proof2,
                 },
             ],
-            sibling_hints: vec![],
+            sibling_hints: alloc::vec![],
         };
 
         // Verify that witness produces the same root as full trie

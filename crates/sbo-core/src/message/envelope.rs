@@ -44,14 +44,11 @@ impl Related {
     }
 }
 
-/// Validated identifier (1-256 chars, RFC 3986 unreserved plus `@`
-/// for email-rooted identity references, e.g. `alice@gmail.com`)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Id(String);
-
-/// Path (e.g., "/alice/nfts/")
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Path(Vec<Id>);
+/// Validated identifier and path: THE identifier grammar lives in `sbo-types`
+/// (Core spec §Identifier Syntax; audit 2026-11 Q36) and is re-exported here
+/// so the wire parser, sbo-wasm (which `#[path]`-includes this module) and the
+/// zkVM guest share one definition by construction.
+pub use sbo_types::{Id, Path};
 
 /// Full SBO message
 #[derive(Debug, Clone)]
@@ -84,199 +81,21 @@ pub struct Message {
     /// when `auth_cert` is a typed agent certificate. See the SBO
     /// Authorization Specification (Agent Warrant).
     pub auth_warrant: Option<String>,
-}
-
-impl Id {
-    /// Create a new validated identifier
-    pub fn new(s: impl AsRef<str>) -> Result<Self, crate::error::ParseError> {
-        let s = s.as_ref();
-
-        // Length check
-        if s.is_empty() || s.len() > 256 {
-            return Err(crate::error::ParseError::InvalidIdentifier(
-                format!("Length must be 1-256, got {}", s.len())
-            ));
-        }
-
-        // Character check: RFC 3986 unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
-        // plus "@" for email-rooted identity references (e.g. alice@gmail.com),
-        // "+" for their RFC-subaddressed forms (agent identities like
-        // alice+bot@gmail.com — first-class owners under the browserid holder
-        // model), and ":" for namespaced identifiers — attestation type IDs
-        // (`role:moderator`) and algorithm-prefixed key references
-        // (`ed25519:…`). All are safe since the state-key delimiter is the
-        // Unit Separator (0x1F).
-        for c in s.chars() {
-            if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | '@' | ':' | '+') {
-                return Err(crate::error::ParseError::InvalidIdentifier(
-                    format!("Invalid character: {}", c)
-                ));
-            }
-        }
-
-        Ok(Self(s.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Path {
-    /// Parse a path string like "/alice/nfts/"
-    pub fn parse(s: &str) -> Result<Self, crate::error::ParseError> {
-        if !s.starts_with('/') {
-            return Err(crate::error::ParseError::InvalidPath(
-                "Path must start with /".to_string()
-            ));
-        }
-
-        if !s.ends_with('/') {
-            return Err(crate::error::ParseError::InvalidPath(
-                "Path must end with /".to_string()
-            ));
-        }
-
-        // Root path
-        if s == "/" {
-            return Ok(Self(vec![]));
-        }
-
-        let segments: Result<Vec<Id>, _> = s
-            .trim_matches('/')
-            .split('/')
-            .map(Id::new)
-            .collect();
-
-        Ok(Self(segments?))
-    }
-
-    /// Get the root path
-    pub fn root() -> Self {
-        Self(vec![])
-    }
-
-    /// Format as string
-    pub fn to_string(&self) -> String {
-        if self.0.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}/", self.0.iter().map(|id| id.as_str()).collect::<Vec<_>>().join("/"))
-        }
-    }
-
-    /// Get parent path (or None if root)
-    pub fn parent(&self) -> Option<Self> {
-        if self.0.is_empty() {
-            None
-        } else {
-            Some(Self(self.0[..self.0.len() - 1].to_vec()))
-        }
-    }
-
-    /// Iterate over ancestor paths (including self, excluding root)
-    pub fn ancestors(&self) -> impl Iterator<Item = Path> + '_ {
-        (0..=self.0.len()).rev().map(|i| Path(self.0[..i].to_vec()))
-    }
-
-    /// Get path segments
-    pub fn segments(&self) -> &[Id] {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for Id {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::fmt::Display for Path {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
-    }
+    /// Headers this implementation does not model, verbatim and in received
+    /// order (decision Q32 (c)): listed-but-unmodelled ones (`Attestation`,
+    /// `Origin`, …), `Critical`, and `X-` experimental headers. They are inside
+    /// the signed block and reserialize to their received position, so the
+    /// message hashes and verifies as the signer produced it.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl Message {
-    /// Build canonical signing content (headers without Signature + blank line)
+    /// The signing content a producer signs: every header in canonical order
+    /// except `Signature`, then the blank line. A consumer verifies the
+    /// received bytes instead (`wire::signing_content`); for a parsed message
+    /// the two are byte-equal because the parser admits only canonical input.
     pub fn canonical_signing_content(&self) -> Vec<u8> {
-        // Header order must match serializer for consistency
-        let order: &[&str] = &[
-            "SBO-Version", "Action", "Path", "ID", "Type",
-            "Content-Type", "Content-Encoding", "Content-Length", "Content-Hash",
-            "Attestation", "Content-Schema", "Creator", "HLC", "New-ID", "New-Owner",
-            "New-Path", "Object-Path", "Origin", "Owner", "Policy-Ref", "Prev",
-            "Proof", "Proof-Type", "Registry-Path", "Related", "Auth-Cert",
-            "Auth-Evidence", "Auth-Warrant", "Public-Key",
-            // NOTE: Signature is NOT included in signing content
-        ];
-
-        let mut headers: Vec<(String, String)> = Vec::new();
-
-        headers.push(("SBO-Version".to_string(), "0.5".to_string()));
-        headers.push(("Action".to_string(), self.action.name().to_string()));
-        if let crate::message::Action::Transfer { new_owner, new_path, new_id } = &self.action {
-            if let Some(v) = new_id { headers.push(("New-ID".to_string(), v.as_str().to_string())); }
-            if let Some(v) = new_owner { headers.push(("New-Owner".to_string(), v.as_str().to_string())); }
-            if let Some(v) = new_path { headers.push(("New-Path".to_string(), v.to_string())); }
-        }
-        headers.push(("Path".to_string(), self.path.to_string()));
-        headers.push(("ID".to_string(), self.id.as_str().to_string()));
-        headers.push(("Type".to_string(), match self.object_type {
-            ObjectType::Object => "object",
-            ObjectType::Collection => "collection",
-        }.to_string()));
-
-        if let Some(ref ct) = self.content_type {
-            headers.push(("Content-Type".to_string(), ct.clone()));
-        }
-        if let Some(ref ce) = self.content_encoding {
-            headers.push(("Content-Encoding".to_string(), ce.clone()));
-        }
-        if let Some(ref payload) = self.payload {
-            headers.push(("Content-Length".to_string(), payload.len().to_string()));
-        }
-        if let Some(ref ch) = self.content_hash {
-            headers.push(("Content-Hash".to_string(), ch.to_string()));
-        }
-        if let Some(ref cs) = self.content_schema {
-            headers.push(("Content-Schema".to_string(), cs.clone()));
-        }
-        if let Some(ref creator) = self.creator {
-            headers.push(("Creator".to_string(), creator.as_str().to_string()));
-        }
-        if let Some(ref owner) = self.owner {
-            headers.push(("Owner".to_string(), owner.as_str().to_string()));
-        }
-        if let Some(ref pr) = self.policy_ref {
-            headers.push(("Policy-Ref".to_string(), pr.clone()));
-        }
-        if let Some(ref v) = self.related {
-            if let Some(h) = Related::header_value(v) { headers.push(("Related".to_string(), h)); }
-        }
-        if let Some(ref v) = self.hlc { headers.push(("HLC".to_string(), v.clone())); }
-        if let Some(ref v) = self.prev { headers.push(("Prev".to_string(), v.clone())); }
-        if let Some(ref v) = self.auth_cert { headers.push(("Auth-Cert".to_string(), v.clone())); }
-        if let Some(ref v) = self.auth_evidence { headers.push(("Auth-Evidence".to_string(), v.clone())); }
-        if let Some(ref v) = self.auth_warrant { headers.push(("Auth-Warrant".to_string(), v.clone())); }
-        headers.push(("Public-Key".to_string(), self.signing_key.to_string()));
-        // NOTE: Signature is NOT included
-
-        // Sort by canonical order
-        headers.sort_by_key(|(name, _)| {
-            order.iter().position(|&h| h == name).unwrap_or(999)
-        });
-
-        let mut output = Vec::new();
-        for (name, value) in headers {
-            output.extend_from_slice(name.as_bytes());
-            output.extend_from_slice(b": ");
-            output.extend_from_slice(value.as_bytes());
-            output.push(b'\n');
-        }
-        output.push(b'\n');
-
-        output
+        crate::wire::signing_content_of(self)
     }
 
     /// Sign this message
@@ -286,29 +105,3 @@ impl Message {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn id_accepts_subaddressed_email_owners() {
-        // Agent identities are +tag sub-addresses and first-class owners.
-        assert!(super::Id::new("alice+bot@gmail.com").is_ok());
-        assert!(super::Id::new("danmills+mingo@sandmill.org").is_ok());
-        // Still-invalid characters stay invalid.
-        assert!(super::Id::new("a b").is_err());
-        assert!(super::Id::new("a/b").is_err());
-    }
-
-    use super::*;
-
-    #[test]
-    fn id_allows_email_and_namespaced_ids() {
-        assert!(Id::new("alice@gmail.com").is_ok());
-        assert!(Id::new("alice").is_ok());
-        // ':' is allowed for attestation type IDs and key references.
-        assert!(Id::new("role:moderator").is_ok());
-        assert!(Id::new("ed25519:abc").is_ok());
-        // '/' and whitespace remain disallowed.
-        assert!(Id::new("a/b").is_err());
-        assert!(Id::new("a b").is_err());
-    }
-}

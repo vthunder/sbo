@@ -1,0 +1,9 @@
+SBO-Version: 0.5
+Action: post
+Path: /u/
+ID: x
+Type: object
+Content-Length: 18446744073709551615
+Public-Key: ed25519:3f07ddec98f77249108b514a3dd4a095a9987df8437a7c82e6e80bbba0aee11f
+Signature: 02c82265c3084cfd5c1004f35e78427e479f7bf654aa00e5141de98bed11893a592fc4e81afc9e849663c55b59663e39aaceeb60ab231dd73efa70a11595d507
+

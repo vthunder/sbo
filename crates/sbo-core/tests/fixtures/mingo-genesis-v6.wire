@@ -1,0 +1,167 @@
+SBO-Version: 0.5
+Action: post
+Path: /sys/names/
+ID: sys
+Type: object
+Content-Type: application/jwt
+Content-Length: 310
+Content-Hash: sha256:12a0372398a6053660e6fc42178d7f3609256609cc40eed4a32db8565d511175
+Content-Schema: identity.v1
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: e54e0d1ac07817645aa832a46f0f6a42672b0f0d90222bc92d44edf1798ab4a2843b0ad1b692e7909b35a60ceeef04d16bf7227e987f0d204e6c445aaa64dd0a
+
+eyJhbGciOiJFZERTQSIsInR5cCI6ImlkZW50aXR5LnYxIn0.eyJpc3MiOiJzZWxmIiwic3ViIjoic3lzIiwicHVibGljX2tleSI6ImVkMjU1MTk6YzA1MGM1NjM3YTQ0ZmE4NjI5ZmZmM2NjY2NlMjMwMGNiMzYyYTYzZDk5ZDk1ZmM1NDE0NTI2NmY0MzMyNDQ1YSIsImlhdCI6MTc5Mzg3Nzg2NX0.N3psBnT8AukWDBWT8Wdn0fEXhv6k6fD0Y0NT5ZfRMQm-4QEwbFk3qmpE5dXF8qEYpPxltkosLq-Gzl1_FvPdBASBO-Version: 0.5
+Action: post
+Path: /sys/policies/
+ID: root
+Type: object
+Content-Type: application/json
+Content-Length: 816
+Content-Hash: sha256:6097adb690d0560d8bde81912669a3c97ec38e8400373641a9794d91bcb4d6dc
+Content-Schema: policy.v2
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 5a9c21436be1b9ba5af1f52b1ec595fe561f6a4192c39a086807b0aba86826fc7739a79b2f632418db18db2c0b0a532d7c7532f0f5110f2dc9f324a967780f0c
+
+{"grants":[{"can":["create"],"on":"/sys/names/","to":"*"},{"can":["update","delete"],"on":"/sys/names/","to":"owner"},{"can":["*"],"on":"/u/$owner/**","to":"owner"},{"can":["create","update"],"on":"/sys/dnssec/**","to":"*"},{"can":["create"],"on":"/sys/checkpoints/**","to":{"key":"ed25519:2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7"}},{"can":["post","transfer","delete","govern"],"on":"/**","to":{"role":"admin"}},{"can":["update","transfer","delete"],"on":"/**","to":"owner"}],"restrictions":[{"on":"/communities/*/spaces/**","require":{"not_attested":{"type":"ban"}}},{"on":"/sys/dnssec/**","require":{"content_type":"application/octet-stream","dnssec_proof":true,"schema":"dnssec.v1"}}],"roles":{"admin":[{"key":"ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"}]}}SBO-Version: 0.5
+Action: post
+Path: /sys/names/
+ID: sys-checkpointer
+Type: object
+Content-Type: application/jwt
+Content-Length: 327
+Content-Hash: sha256:201bb3e24f885faac8d751c6499ed843d836ab362f6d7bd0ca0fbeb60cf92580
+Content-Schema: identity.v1
+Public-Key: ed25519:2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7
+Signature: 2504aae4f82616395bac4d08f1ceffec7b97c5933a7429526e9e6697419e2f398891f0136771052f1e72e68c599abbfede2a3c093861b0525aae922a58cab500
+
+eyJhbGciOiJFZERTQSIsInR5cCI6ImlkZW50aXR5LnYxIn0.eyJpc3MiOiJzZWxmIiwic3ViIjoic3lzLWNoZWNrcG9pbnRlciIsInB1YmxpY19rZXkiOiJlZDI1NTE5OjIwMTJjYjkwY2E2MGU4ZTVkOGRhZjY2ZTIyNzJkMjIzM2UwNDg2ZDU1N2U4YzY2MTQxZWQ4OTIwMTc3ZDdlYjciLCJpYXQiOjE3OTM4Nzc4NjV9.Q9V4F0qR_ED5hyXSPj7jf2WyBv2kH44UhLW-r0wngt4bQCIowI8rIILFzt9SD6dHTY2wJSMvmJSHoeJXGGhUAASBO-Version: 0.5
+Action: post
+Path: /sys/trust/
+ID: brokers
+Type: object
+Content-Type: application/json
+Content-Length: 28
+Content-Hash: sha256:c58a70b9180a45a4cb44e893481bfd0795a1f790de47ec1c354a39820fa7899b
+Content-Schema: trust.brokers.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 217dc639db63a7594aa47b8112d83fca21b0484560f955acc59a8a936e73fa2b90f68280c48bfa27a67b9d6c99357e72e219e13f5c529f340e6f2cc29c396602
+
+{"brokers":["browserid.me"]}SBO-Version: 0.5
+Action: post
+Path: /communities/cooks/
+ID: community
+Type: object
+Content-Type: application/json
+Content-Length: 171
+Content-Hash: sha256:5e75de8f645887ab73666cad0e5e3744e9b389c6d95623fa537cda813d58d07e
+Content-Schema: community.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 1a3c2a530d4ae9db887eef80c115f7c374e6ab6dccacdeb3450f9bc92a2487d4a4048a70803a5b7e3462fb81cb7857f4a197295a11f7cc16445d82e96bf39d03
+
+{"created_at":1784246720,"description":"Home cooks swapping recipes and technique.","issuer":"cooks@mingo.place","name":"Cooks","open":true,"policy":"/communities/cooks/"}SBO-Version: 0.5
+Action: post
+Path: /communities/cooks/spaces/general/
+ID: _config
+Type: object
+Content-Type: application/json
+Content-Length: 92
+Content-Hash: sha256:9bc7554df27169da4045da3a8cd6a7d786b1c924c9daf3ac19094d43cf3ffbea
+Content-Schema: collection.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 801f1ae10121a8966c9662b0a2c8b2ff472b37128bba858d39f797f7470ab067e5de66580039a8fb147a4da560a2ae26ba15fe0954aa3e3819065e4b960ee109
+
+{"batch_interval_s":5,"durability":"batched","max_authoring_lag_s":86400,"schema":"post.v1"}SBO-Version: 0.5
+Action: post
+Path: /communities/cooks/
+ID: root
+Type: object
+Content-Type: application/json
+Content-Length: 643
+Content-Hash: sha256:e0e141f96e89b701dd68e6b255b32ac482786bdc1ac1c18962eee2b39c794336
+Content-Schema: policy.v2
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 75868f6cff23a1e4474e365c296d58eeef387aebaed3aa0f7b4557d3cda5728f2c0866c50c42182e7a81a79fef05ba4043062092f27c7a59f5896cc270fbe10e
+
+{"grants":[{"can":["create"],"on":"/communities/cooks/spaces/**","to":{"role":"member"}},{"can":["update"],"on":"/communities/cooks/spaces/**","to":"owner"},{"can":["delete"],"on":"/communities/cooks/spaces/**","to":{"role":"moderator"}},{"can":["delete"],"on":"/communities/cooks/**","to":{"key":"ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"}}],"restrictions":[{"on":"/communities/cooks/spaces/**","require":{"not_attested":{"by":"cooks@mingo.place","type":"ban"}}}],"roles":{"member":[{"attested":{"type":"membership:cooks"}}],"moderator":[{"attested":{"by":"cooks@mingo.place","type":"role:moderator:cooks"}}]}}SBO-Version: 0.5
+Action: post
+Path: /communities/woodworking/
+ID: community
+Type: object
+Content-Type: application/json
+Content-Length: 178
+Content-Hash: sha256:5a5e4ba2387a1c9af0c8b31d1522dbcf6b4555b667079dce008e9c35dc77ade1
+Content-Schema: community.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 4fcedf80ee1d00eba43d153128f397e93daf0dc409525e24498d9926cdff06d8b21a8e8e10ab345ab8370f2b6a0dfa50e42d2bce254f8f631585933191394503
+
+{"created_at":1784246720,"description":"Makers, joinery, and finishing.","issuer":"woodworking@mingo.place","name":"Woodworking","open":true,"policy":"/communities/woodworking/"}SBO-Version: 0.5
+Action: post
+Path: /communities/woodworking/spaces/general/
+ID: _config
+Type: object
+Content-Type: application/json
+Content-Length: 92
+Content-Hash: sha256:9bc7554df27169da4045da3a8cd6a7d786b1c924c9daf3ac19094d43cf3ffbea
+Content-Schema: collection.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 0dc58e333b1731b1234a789615e78d76d94bf31d9f9ffe32b5e3ef06155dd8b6950111f7e1d92a1f67943e5b12c724d2952e2398b40992f1be44396eed745c0d
+
+{"batch_interval_s":5,"durability":"batched","max_authoring_lag_s":86400,"schema":"post.v1"}SBO-Version: 0.5
+Action: post
+Path: /communities/woodworking/
+ID: root
+Type: object
+Content-Type: application/json
+Content-Length: 697
+Content-Hash: sha256:6ec96b692343810c2c03c80379b9c73bcf08df498139ce8288e683fe38657eb5
+Content-Schema: policy.v2
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 09634c0b454ce070ea25132d9bc7ea9ca26f3434eff7c052960979ed1a7eeb6e7f0aa1207b5f096151dbb257d2be8924f7a613a1c24de76ae94657097c7b8e07
+
+{"grants":[{"can":["create"],"on":"/communities/woodworking/spaces/**","to":{"role":"member"}},{"can":["update"],"on":"/communities/woodworking/spaces/**","to":"owner"},{"can":["delete"],"on":"/communities/woodworking/spaces/**","to":{"role":"moderator"}},{"can":["delete"],"on":"/communities/woodworking/**","to":{"key":"ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"}}],"restrictions":[{"on":"/communities/woodworking/spaces/**","require":{"not_attested":{"by":"woodworking@mingo.place","type":"ban"}}}],"roles":{"member":[{"attested":{"type":"membership:woodworking"}}],"moderator":[{"attested":{"by":"woodworking@mingo.place","type":"role:moderator:woodworking"}}]}}SBO-Version: 0.5
+Action: post
+Path: /communities/homelab/
+ID: community
+Type: object
+Content-Type: application/json
+Content-Length: 172
+Content-Hash: sha256:05ca075ad7c2de2db26568b900eff07b2a67e7dad0d0783c39fbeeca6183c212
+Content-Schema: community.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: e0b38092b96e4e3558b8b7b5006886b9107fdfb283607338575274a0bd5dbbb0684a10d7409e8de73d21fb52cc91468f76ec84384b41510d77eeb3dcadb29704
+
+{"created_at":1784246720,"description":"Self-hosters and home infrastructure.","issuer":"homelab@mingo.place","name":"Homelab","open":true,"policy":"/communities/homelab/"}SBO-Version: 0.5
+Action: post
+Path: /communities/homelab/spaces/general/
+ID: _config
+Type: object
+Content-Type: application/json
+Content-Length: 92
+Content-Hash: sha256:9bc7554df27169da4045da3a8cd6a7d786b1c924c9daf3ac19094d43cf3ffbea
+Content-Schema: collection.v1
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: cd18c5eee94dc04cc93f7824512639cc438e69d8dc7e0e8125d936fe2add84c64a7dccc8344b88e62e21ac99419e00728f7e3e4fa52b9d37978a415551683500
+
+{"batch_interval_s":5,"durability":"batched","max_authoring_lag_s":86400,"schema":"post.v1"}SBO-Version: 0.5
+Action: post
+Path: /communities/homelab/
+ID: root
+Type: object
+Content-Type: application/json
+Content-Length: 661
+Content-Hash: sha256:1794a87cf2ac2f42ce1f0da08e21387d66e18a6702d62bdd508bfedfc95652a8
+Content-Schema: policy.v2
+Owner: sys
+Public-Key: ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a
+Signature: 4e551e2a26b4b9f41b84759b4db339c50ee56f98203a9d1b7bc7443d1fd7647b10d08263288d988f5080e5c0671c5796e8ee406a4d99334d782a972121621900
+
+{"grants":[{"can":["create"],"on":"/communities/homelab/spaces/**","to":{"role":"member"}},{"can":["update"],"on":"/communities/homelab/spaces/**","to":"owner"},{"can":["delete"],"on":"/communities/homelab/spaces/**","to":{"role":"moderator"}},{"can":["delete"],"on":"/communities/homelab/**","to":{"key":"ed25519:c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"}}],"restrictions":[{"on":"/communities/homelab/spaces/**","require":{"not_attested":{"by":"homelab@mingo.place","type":"ban"}}}],"roles":{"member":[{"attested":{"type":"membership:homelab"}}],"moderator":[{"attested":{"by":"homelab@mingo.place","type":"role:moderator:homelab"}}]}}

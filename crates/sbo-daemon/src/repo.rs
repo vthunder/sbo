@@ -67,7 +67,10 @@ impl Repo {
         }
     }
 
-    /// Verify reconstructed genesis-batch wire bytes against `expected_genesis`.
+    /// Verify genesis-submission wire bytes (as included on chain) against
+    /// `expected_genesis`. The sync path acts on the outcome: a submission
+    /// whose hash does not match is not the genesis, and an anchor block that
+    /// yields no matching genesis halts sync (audit 2026-11 D7).
     /// No-op (Ok) when no expected hash is set. Returns the mismatch detail otherwise.
     pub fn verify_genesis(&self, genesis_wire: &[u8]) -> Result<(), String> {
         let Some(expected) = self.expected_genesis.as_deref() else {
@@ -371,7 +374,7 @@ mod tests {
             payload: Some(b"hi".to_vec()),
             owner: None, creator: None, content_encoding: None, content_schema: None,
             policy_ref: None, related: None, hlc: None, prev: None,
-            auth_cert: None, auth_evidence: None, auth_warrant: None,
+            auth_cert: None, auth_evidence: None, auth_warrant: None, extra_headers: Vec::new(),
         };
         msg.sign(&key);
         let wire = sbo_core::wire::serialize(&msg);

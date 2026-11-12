@@ -1,0 +1,60 @@
+# Standing supply-chain gate (security audit 2026-11, WS7). Three checks, all
+# runnable locally with the same tools:
+#   cargo audit        RUSTSEC vulnerabilities; ignores in .cargo/audit.toml
+#   cargo deny check   advisories + licenses + sources + duplicate bans; deny.toml
+#   gitleaks           secrets over the FULL history; allowlist in .gitleaks.toml
+# Every ignore carries a reason and a review date. Actions are pinned by
+# commit SHA (release in the comment). Red on main until remediation R7-1
+# (`cargo update`) lands: see docs/security-audit-2026-11-ws7-supply-chain.md.
+
+name: supply-chain
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, so a new advisory against an unchanged tree still surfaces.
+    - cron: "23 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check
+          rust-version: "1.93.1"
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history: the scan covers every commit
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_SUMMARY: "false"
