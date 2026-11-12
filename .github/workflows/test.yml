@@ -34,7 +34,7 @@ jobs:
 
       # Same toolchain the deploy image builds with (rust:1.93.1-bookworm in
       # mingo/deploy/sbo-daemon/Dockerfile).
-      - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
+      - uses: dtolnay/rust-toolchain@cfcaf53ba4c621917ec7f78a66bff7a8848ddad4 # 1.93.1
 
       - name: Native build deps (rocksdb bindgen, protobuf for avail-rust)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake protobuf-compiler
