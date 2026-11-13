@@ -118,13 +118,13 @@ jobs:
         with:
           fetch-depth: 0 # gitleaks scans every commit
       - uses: dtolnay/rust-toolchain@633c1125191e55c620c8ae7d364073c0ead621c1 # 1.93.1
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-audit
       - name: cargo audit (ignores in .cargo/audit.toml)
         run: cargo audit
       - name: cargo deny (deny.toml)
-        uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           rust-version: "1.93.1"
@@ -173,7 +173,7 @@ jobs:
           scripts/fuzz-smoke.sh
       - name: upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
@@ -212,9 +212,9 @@ jobs:
           perl -0pi -e 's|RUN git clone https://github\.com/vthunder/sbo \. \\\n\s*&& git checkout "\$SBO_REV"|COPY --from=sbo . .\nRUN true|' "$f"
           grep -A3 'COPY --from=sbo' "$f"
           grep -qx 'COPY --from=sbo \. \.' "$f" && ! grep -q 'git clone' "$f" || { echo "::error::mingo's Dockerfile no longer has the expected clone step"; cat "$f"; exit 1; }
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: build (no push)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .rc-mingo
           file: .rc-mingo/deploy/sbo-daemon/Dockerfile
