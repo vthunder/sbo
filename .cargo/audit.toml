@@ -12,6 +12,28 @@ ignore = [
     # hickory-resolver, not a lockfile change. Encode side is our own short
     # queries. Review: 2027-02-01.
     "RUSTSEC-2026-0119",
+    # hickory-proto/-resolver 0.24.4 (sbo-core dns.rs, used only by sbo-cli for
+    # _sbo TXT data discovery), advisories published 2026-11. Fixed in
+    # >= 0.26.2, a major bump with API changes in dns.rs (TokioAsyncResolver,
+    # error types): program logic, normal approval route (deferred bean
+    # browserid-ng-2n93, which covers sbo too).
+    # DNSSEC validation bugs (incl. 0514): the resolver runs with default
+    # options, DNSSEC validation off; sbo's DNSSEC proofs use dnssec-prover.
+    # Text-format parser panics: wire format only.
+    # Header record-count memory amplification: a spoofed UDP answer could
+    # make one CLI lookup allocate; DoS of a local command, no wrong answer
+    # (identity is on-chain, the genesis hash is checked).
+    # Review: 2026-12-15 (after the notice period: do the upgrade then).
+    "RUSTSEC-2026-0487", # SVCB/HTTPS alpn text parse panic
+    "RUSTSEC-2026-0489", # SVCB/HTTPS quote text parse panic
+    "RUSTSEC-2026-0490", # zone file lexer panic
+    "RUSTSEC-2026-0491", # header record-count memory amplification
+    "RUSTSEC-2026-0505", # DNSSEC validation (off)
+    "RUSTSEC-2026-0511", # DNSSEC validation (off)
+    "RUSTSEC-2026-0512", # DNSSEC validation (off)
+    "RUSTSEC-2026-0514", # resolver DNSSEC results (validation off)
+    "RUSTSEC-2026-0530", # DNSSEC validation (off)
+    "RUSTSEC-2026-0531", # DNSSEC validation (off)
     # rsa 0.9 Marvin timing side channel: no upstream fix. Reaches the tree only
     # through rzup/risc0-build in the non-default sbo-zkvm crate (Q19:
     # experimental, no trust claim); daemon and CLI never link it. Review:
